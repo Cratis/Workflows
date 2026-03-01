@@ -40,11 +40,27 @@ jobs:
           source_repo="${{ github.repository }}"
           source_repo_name="${{ github.event.repository.name }}"
 
+          # Repositories to always ignore for propagation
+          ignored_repos=("cratis.github.io" "Workflows")
+
           echo "Triggering sync for repositories in Cratis organization (source: $source_repo)..."
           echo "$repos" | jq -r '.[]' | while read -r repo; do
             # Skip the source repository to avoid infinite loop
             if [ "$repo" = "$source_repo_name" ]; then
               echo "Skipping $repo (source repository)"
+              continue
+            fi
+
+            # Skip repositories in the ignore list
+            skip=false
+            for ignored in "${ignored_repos[@]}"; do
+              if [ "$repo" = "$ignored" ]; then
+                skip=true
+                break
+              fi
+            done
+            if [ "$skip" = "true" ]; then
+              echo "Skipping $repo (in ignore list)"
               continue
             fi
 
