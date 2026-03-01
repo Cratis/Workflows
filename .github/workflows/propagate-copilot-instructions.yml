@@ -16,6 +16,7 @@ permissions:
 jobs:
   propagate:
     runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Cratis' }}
 
     steps:
       - name: Get all Cratis repositories

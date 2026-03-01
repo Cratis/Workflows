@@ -32,8 +32,14 @@ jobs:
 
       - name: Validate source repository input
         run: |
-          if ! echo "${{ inputs.source_repository }}" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
+          input="${{ inputs.source_repository }}"
+          if ! echo "$input" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
             echo "Error: Invalid repository format. Expected 'owner/repo'"
+            exit 1
+          fi
+          owner="${input%%/*}"
+          if [ "$owner" != "Cratis" ]; then
+            echo "Error: Source repository must belong to the Cratis organization (got '$owner')"
             exit 1
           fi
 
