@@ -73,6 +73,20 @@ jobs:
             echo "Copied agents folder"
           fi
 
+          # Copy skills folder if it exists in source
+          if [ -d "/tmp/source-repo/.github/skills" ]; then
+            rm -rf .github/skills
+            cp -r /tmp/source-repo/.github/skills .github/skills
+            echo "Copied skills folder"
+          fi
+
+          # Copy prompts folder if it exists in source
+          if [ -d "/tmp/source-repo/.github/prompts" ]; then
+            rm -rf .github/prompts
+            cp -r /tmp/source-repo/.github/prompts .github/prompts
+            echo "Copied prompts folder"
+          fi
+
       - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
@@ -93,6 +107,8 @@ jobs:
             - Updated `.github/copilot-instructions.md` (if present)
             - Updated `.github/instructions/` folder (if present)
             - Updated `.github/agents/` folder (if present)
+            - Updated `.github/skills/` folder (if present)
+            - Updated `.github/prompts/` folder (if present)
 
             **Source repository:** ${{ inputs.source_repository }}
             **Triggered by workflow run:** ${{ github.run_id }}

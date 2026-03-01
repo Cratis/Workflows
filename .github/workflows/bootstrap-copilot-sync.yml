@@ -94,6 +94,8 @@ on:
       - ".github/copilot-instructions.md"
       - ".github/instructions/**"
       - ".github/agents/**"
+      - ".github/skills/**"
+      - ".github/prompts/**"
 
 jobs:
   propagate:
