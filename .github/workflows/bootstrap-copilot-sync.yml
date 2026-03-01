@@ -1,0 +1,175 @@
+name: Bootstrap Copilot Sync
+# One-time bootstrap workflow that creates PRs in all Cratis repositories to add
+# thin wrapper workflows that delegate to the reusable workflows in this repository.
+# Trigger this workflow manually once to set up all repositories.
+# Requires PAT_DOCUMENTATION secret with permissions:
+# - repo (to create branches, push files, and open pull requests)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get all Cratis repositories
+        id: get-repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+        run: |
+          # List all non-archived repos (limit 1000 covers foreseeable growth)
+          repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
+            --jq '[.[] | select(.isArchived == false) | .name]')
+          echo "repos=$repos" >> $GITHUB_OUTPUT
+
+      - name: Create PRs in all repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+        run: |
+          repos='${{ steps.get-repos.outputs.repos }}'
+
+          echo "$repos" | jq -r '.[]' | while read -r repo; do
+            # Skip this repository (Workflows) — it holds the reusable workflows
+            if [ "$repo" = "Workflows" ]; then
+              echo "Skipping Workflows (this repository)"
+              continue
+            fi
+
+            echo "Processing Cratis/$repo..."
+
+            # Get default branch SHA
+            default_branch=$(gh api repos/Cratis/$repo --jq '.default_branch' 2>/dev/null)
+            if [ -z "$default_branch" ]; then
+              echo "  ⚠ Could not get default branch for $repo, skipping"
+              continue
+            fi
+
+            sha=$(gh api repos/Cratis/$repo/git/ref/heads/$default_branch \
+              --jq '.object.sha' 2>/dev/null)
+            if [ -z "$sha" ]; then
+              echo "  ⚠ Could not get SHA for $repo, skipping"
+              continue
+            fi
+
+            branch="add-copilot-sync-workflows"
+
+            # Create the branch (ignore error if it already exists)
+            gh api --method POST repos/Cratis/$repo/git/refs \
+              -f ref="refs/heads/$branch" \
+              -f sha="$sha" 2>/dev/null || true
+
+            # Content for sync wrapper workflow
+            sync_content=$(cat <<'SYNC_EOF'
+name: Sync Copilot Instructions
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: 'Source repository (owner/repo format)'
+        required: true
+        type: string
+
+jobs:
+  sync:
+    uses: Cratis/Workflows/.github/workflows/sync-copilot-instructions.yml@main
+    with:
+      source_repository: ${{ inputs.source_repository }}
+    secrets: inherit
+SYNC_EOF
+)
+
+            # Content for propagate wrapper workflow
+            propagate_content=$(cat <<'PROPAGATE_EOF'
+name: Propagate Copilot Instructions
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/copilot-instructions.md"
+      - ".github/instructions/**"
+      - ".github/agents/**"
+
+jobs:
+  propagate:
+    uses: Cratis/Workflows/.github/workflows/propagate-copilot-instructions.yml@main
+    secrets: inherit
+PROPAGATE_EOF
+)
+
+            # Ensure .github/workflows directory path
+            sync_path=".github/workflows/sync-copilot-instructions.yml"
+            propagate_path=".github/workflows/propagate-copilot-instructions.yml"
+
+            sync_b64=$(echo "$sync_content" | base64 -w 0)
+            propagate_b64=$(echo "$propagate_content" | base64 -w 0)
+
+            # Push sync workflow file (update if exists, create if not)
+            existing_sha=$(gh api repos/Cratis/$repo/contents/$sync_path \
+              --jq '.sha' 2>/dev/null || true)
+
+            if [ -n "$existing_sha" ]; then
+              gh api --method PUT repos/Cratis/$repo/contents/$sync_path \
+                -f message="Add sync-copilot-instructions workflow" \
+                -f content="$sync_b64" \
+                -f sha="$existing_sha" \
+                -f branch="$branch" 2>/dev/null || \
+                echo "  ⚠ Could not update sync workflow in $repo"
+            else
+              gh api --method PUT repos/Cratis/$repo/contents/$sync_path \
+                -f message="Add sync-copilot-instructions workflow" \
+                -f content="$sync_b64" \
+                -f branch="$branch" 2>/dev/null || \
+                echo "  ⚠ Could not create sync workflow in $repo"
+            fi
+
+            # Push propagate workflow file
+            existing_sha=$(gh api repos/Cratis/$repo/contents/$propagate_path \
+              --jq '.sha' 2>/dev/null || true)
+
+            if [ -n "$existing_sha" ]; then
+              gh api --method PUT repos/Cratis/$repo/contents/$propagate_path \
+                -f message="Add propagate-copilot-instructions workflow" \
+                -f content="$propagate_b64" \
+                -f sha="$existing_sha" \
+                -f branch="$branch" 2>/dev/null || \
+                echo "  ⚠ Could not update propagate workflow in $repo"
+            else
+              gh api --method PUT repos/Cratis/$repo/contents/$propagate_path \
+                -f message="Add propagate-copilot-instructions workflow" \
+                -f content="$propagate_b64" \
+                -f branch="$branch" 2>/dev/null || \
+                echo "  ⚠ Could not create propagate workflow in $repo"
+            fi
+
+            # Create PR
+            existing_pr=$(gh pr list --repo Cratis/$repo \
+              --head "$branch" --json number --jq '.[0].number' 2>/dev/null || true)
+
+            if [ -z "$existing_pr" ]; then
+              if gh pr create \
+                --repo "Cratis/$repo" \
+                --title "Add Copilot sync workflows" \
+                --body "Adds thin wrapper workflows that delegate to the reusable workflows in [Cratis/Workflows](https://github.com/Cratis/Workflows).
+
+### Workflows added
+
+- \`.github/workflows/sync-copilot-instructions.yml\` — triggered via \`workflow_dispatch\` to pull Copilot instructions from a source repository and open a PR with the changes.
+- \`.github/workflows/propagate-copilot-instructions.yml\` — triggered on push to \`main\` when Copilot instruction files change, propagating updates to all Cratis repositories.
+
+The actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place." \
+                --head "$branch" \
+                --base "$default_branch" 2>/dev/null; then
+                echo "  ✓ Created PR for $repo"
+              else
+                echo "  ⚠ Could not create PR for $repo"
+              fi
+            else
+              echo "  ℹ PR already exists for $repo (#$existing_pr)"
+            fi
+          done
