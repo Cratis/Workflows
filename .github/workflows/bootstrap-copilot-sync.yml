@@ -276,20 +276,22 @@ jobs:
             # ----------------------------------------------------------------
             # 10. Create PR (skip if one already exists for this branch)
             # ----------------------------------------------------------------
-            existing_pr=$(gh pr list --repo "Cratis/$repo" \
-              --head "$branch" --json number --jq '.[0].number' 2>/dev/null || true)
+            existing_pr=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" \
+              --jq '.[0].number' \
+              2>/dev/null || true)
 
-            if [ -z "$existing_pr" ]; then
-              if gh pr create \
-                --repo "Cratis/$repo" \
-                --title "Bootstrap Copilot sync workflows" \
-                --body "$pr_body" \
-                --head "$branch" \
-                --base "$default_branch" 2>/dev/null; then
-                echo "  ✓ Created PR for $repo"
+            if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
+              if pr_url=$(gh api -X POST "repos/Cratis/$repo/pulls" \
+                -f title="Bootstrap Copilot sync workflows" \
+                -f body="$pr_body" \
+                -f head="$branch" \
+                -f base="$default_branch" \
+                --jq '.html_url'); then
+                echo "  ✓ Created PR for $repo: $pr_url"
                 echo "$repo" >> "$prs_created_file"
               else
                 echo "  ⚠ Could not create PR for $repo"
+                echo "$repo" >> "$failures_file"
               fi
             else
               echo "  ℹ PR already exists for $repo (#$existing_pr)"
