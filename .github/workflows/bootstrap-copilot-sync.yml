@@ -43,14 +43,14 @@ jobs:
             echo "Processing Cratis/$repo..."
 
             # Get default branch SHA
-            default_branch=$(gh api repos/Cratis/$repo --jq '.default_branch' 2>/dev/null)
+            default_branch=$(gh api repos/Cratis/$repo --jq '.default_branch' 2>/dev/null || true)
             if [ -z "$default_branch" ]; then
               echo "  ⚠ Could not get default branch for $repo, skipping"
               continue
             fi
 
             sha=$(gh api repos/Cratis/$repo/git/ref/heads/$default_branch \
-              --jq '.object.sha' 2>/dev/null)
+              --jq '.object.sha' 2>/dev/null || true)
             if [ -z "$sha" ]; then
               echo "  ⚠ Could not get SHA for $repo, skipping"
               continue
