@@ -4,7 +4,12 @@ name: Bootstrap Copilot Sync
 # 2. Add thin wrapper workflows that delegate to the reusable workflows in this repository.
 # Trigger this workflow manually to set up (or re-set up) all repositories.
 # Requires PAT_DOCUMENTATION secret with permissions:
-# - repo (to clone, push branches, and open pull requests)
+# - repo     (to clone, push branches, and open pull requests)
+# - workflow (to create or update .github/workflows files via git push)
+#
+# NOTE: Both scopes are required. GitHub enforces that git pushes containing
+# workflow files are rejected unless the PAT has the "workflow" scope, even when
+# "repo" scope is present.
 #
 # Re-running this workflow is safe: it force-pushes the branch to a clean state
 # and skips repos where a PR already exists.
@@ -20,6 +25,39 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Verify PAT has required scopes
+        env:
+          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+        run: |
+          # The PAT must have both "repo" and "workflow" scopes (classic PAT).
+          # GitHub rejects git pushes that add or update .github/workflows/ files
+          # when the PAT lacks the "workflow" scope, causing every push to fail
+          # silently and no PRs to be created.
+          #
+          # Classic PATs expose their scopes in the X-OAuth-Scopes response header.
+          # Fine-grained PATs do not; for them we skip the scope check and rely on
+          # the PAT having the "Workflows (write)" repository permission.
+          scopes=$(gh api /user -i 2>&1 | grep -i '^x-oauth-scopes:' | sed 's/x-oauth-scopes: //i' || true)
+          if [ -z "$scopes" ]; then
+            # Fine-grained PAT or failed auth — verify the token authenticates at all
+            if ! gh api /user >/dev/null 2>&1; then
+              echo "::error::Could not authenticate with PAT_DOCUMENTATION. Is the secret set correctly?"
+              exit 1
+            fi
+            echo "ℹ Fine-grained PAT detected (no X-OAuth-Scopes header)."
+            echo "ℹ Ensure the PAT has the 'Workflows' (write) repository permission; otherwise pushes will fail."
+          else
+            echo "Token scopes: $scopes"
+            if ! echo "$scopes" | grep -qw "workflow"; then
+              echo "::error::PAT_DOCUMENTATION is missing the 'workflow' scope."
+              echo "::error::Without 'workflow' scope, GitHub rejects every git push that"
+              echo "::error::creates or updates .github/workflows files, so no PRs will be created."
+              echo "::error::Please regenerate (or update) the PAT and add the 'workflow' scope."
+              exit 1
+            fi
+            echo "✓ PAT has 'workflow' scope"
+          fi
+
       - name: Get all Cratis repositories
         id: get-repos
         env:
@@ -35,6 +73,8 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
         run: |
           repos='${{ steps.get-repos.outputs.repos }}'
+          prs_created_file=$(mktemp)
+          push_failures_file=$(mktemp)
 
           # Pre-computed base64 content for wrapper workflows.
           # Using base64 avoids heredoc end-markers at column 0,
@@ -109,8 +149,6 @@ jobs:
             # Clone the repository (shallow, default branch only).
             # Credentials come from the git credential store configured above,
             # so the PAT does not appear in log output.
-            # git push (not the Contents API) is used so that the `workflow`
-            # OAuth scope is not required — only `repo` is needed.
             if ! git clone --quiet --depth=1 -b "$default_branch" \
               "https://github.com/Cratis/${repo}.git" \
               "$repo_dir"; then
@@ -160,8 +198,9 @@ jobs:
             # clean single-commit state above.
             if ! git -C "$repo_dir" push --force \
               "https://github.com/Cratis/${repo}.git" \
-              "$branch"; then
+              "$branch" 2>&1; then
               echo "  ⚠ Could not push branch for $repo"
+              echo "$repo" >> "$push_failures_file"
               rm -rf "$repo_dir"
               continue
             fi
@@ -179,14 +218,30 @@ jobs:
                 --head "$branch" \
                 --base "$default_branch" 2>/dev/null; then
                 echo "  ✓ Created PR for $repo"
+                echo "$repo" >> "$prs_created_file"
               else
                 echo "  ⚠ Could not create PR for $repo"
               fi
             else
               echo "  ℹ PR already exists for $repo (#$existing_pr)"
+              echo "$repo" >> "$prs_created_file"
             fi
 
             rm -rf "$repo_dir"
           done
 
+          total_prs=$(wc -l < "$prs_created_file" 2>/dev/null || echo "0")
+          total_failures=$(wc -l < "$push_failures_file" 2>/dev/null || echo "0")
+          rm -f "$prs_created_file" "$push_failures_file"
+
+          echo ""
+          echo "Summary: $total_prs repo(s) with PR created or already open, $total_failures push failure(s)"
+
           rm -rf "$workdir"
+
+          if [ "$total_failures" -gt 0 ]; then
+            echo "::error::$total_failures repo(s) failed to have a branch pushed. Check the log above for details."
+            echo "::error::If you see 'refusing to allow a Personal Access Token to create or update workflow',"
+            echo "::error::the PAT_DOCUMENTATION secret needs the 'workflow' OAuth scope added."
+            exit 1
+          fi
