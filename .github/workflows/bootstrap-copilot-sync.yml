@@ -62,54 +62,46 @@ jobs:
               -f ref="refs/heads/$branch" \
               -f sha="$sha" 2>/dev/null || true
 
-            # Content for sync wrapper workflow
-            sync_content=$(cat <<'SYNC_EOF'
-name: Sync Copilot Instructions
-
-on:
-  workflow_dispatch:
-    inputs:
-      source_repository:
-        description: 'Source repository (owner/repo format)'
-        required: true
-        type: string
-
-jobs:
-  sync:
-    uses: Cratis/Workflows/.github/workflows/sync-copilot-instructions.yml@main
-    with:
-      source_repository: ${{ inputs.source_repository }}
-    secrets: inherit
-SYNC_EOF
-)
-
-            # Content for propagate wrapper workflow
-            propagate_content=$(cat <<'PROPAGATE_EOF'
-name: Propagate Copilot Instructions
-
-on:
-  push:
-    branches: ["main"]
-    paths:
-      - ".github/copilot-instructions.md"
-      - ".github/instructions/**"
-      - ".github/agents/**"
-      - ".github/skills/**"
-      - ".github/prompts/**"
-
-jobs:
-  propagate:
-    uses: Cratis/Workflows/.github/workflows/propagate-copilot-instructions.yml@main
-    secrets: inherit
-PROPAGATE_EOF
-)
+            # Pre-computed base64 content for wrapper workflows
+            # (avoids heredoc terminators at column 0 which break YAML block scalar parsing)
+            #
+            # sync_b64 decodes to:
+            #   name: Sync Copilot Instructions
+            #   on:
+            #     workflow_dispatch:
+            #       inputs:
+            #         source_repository:
+            #           description: 'Source repository (owner/repo format)'
+            #           required: true
+            #           type: string
+            #   jobs:
+            #     sync:
+            #       uses: Cratis/Workflows/.github/workflows/sync-copilot-instructions.yml@main
+            #       with:
+            #         source_repository: ${{ inputs.source_repository }}
+            #       secrets: inherit
+            sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICBpbnB1dHM6CiAgICAgIHNvdXJjZV9yZXBvc2l0b3J5OgogICAgICAgIGRlc2NyaXB0aW9uOiAnU291cmNlIHJlcG9zaXRvcnkgKG93bmVyL3JlcG8gZm9ybWF0KScKICAgICAgICByZXF1aXJlZDogdHJ1ZQogICAgICAgIHR5cGU6IHN0cmluZwoKam9iczoKICBzeW5jOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9zeW5jLWNvcGlsb3QtaW5zdHJ1Y3Rpb25zLnltbEBtYWluCiAgICB3aXRoOgogICAgICBzb3VyY2VfcmVwb3NpdG9yeTogJHt7IGlucHV0cy5zb3VyY2VfcmVwb3NpdG9yeSB9fQogICAgc2VjcmV0czogaW5oZXJpdAo="
+            #
+            # propagate_b64 decodes to:
+            #   name: Propagate Copilot Instructions
+            #   on:
+            #     push:
+            #       branches: ["main"]
+            #       paths:
+            #         - ".github/copilot-instructions.md"
+            #         - ".github/instructions/**"
+            #         - ".github/agents/**"
+            #         - ".github/skills/**"
+            #         - ".github/prompts/**"
+            #   jobs:
+            #     propagate:
+            #       uses: Cratis/Workflows/.github/workflows/propagate-copilot-instructions.yml@main
+            #       secrets: inherit
+            propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmdpdGh1Yi9jb3BpbG90LWluc3RydWN0aW9ucy5tZCIKICAgICAgLSAiLmdpdGh1Yi9pbnN0cnVjdGlvbnMvKioiCiAgICAgIC0gIi5naXRodWIvYWdlbnRzLyoqIgogICAgICAtICIuZ2l0aHViL3NraWxscy8qKiIKICAgICAgLSAiLmdpdGh1Yi9wcm9tcHRzLyoqIgoKam9iczoKICBwcm9wYWdhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3Byb3BhZ2F0ZS1jb3BpbG90LWluc3RydWN0aW9ucy55bWxAbWFpbgogICAgc2VjcmV0czogaW5oZXJpdAo="
 
             # Ensure .github/workflows directory path
             sync_path=".github/workflows/sync-copilot-instructions.yml"
             propagate_path=".github/workflows/propagate-copilot-instructions.yml"
-
-            sync_b64=$(echo "$sync_content" | base64 -w 0)
-            propagate_b64=$(echo "$propagate_content" | base64 -w 0)
 
             # Push sync workflow file (update if exists, create if not)
             existing_sha=$(gh api repos/Cratis/$repo/contents/$sync_path \
@@ -154,17 +146,11 @@ PROPAGATE_EOF
               --head "$branch" --json number --jq '.[0].number' 2>/dev/null || true)
 
             if [ -z "$existing_pr" ]; then
+              pr_body=$'Adds thin wrapper workflows that delegate to the reusable workflows in [Cratis/Workflows](https://github.com/Cratis/Workflows).\n\n### Workflows added\n\n- `.github/workflows/sync-copilot-instructions.yml` \u2014 triggered via `workflow_dispatch` to pull Copilot instructions from a source repository and open a PR with the changes.\n- `.github/workflows/propagate-copilot-instructions.yml` \u2014 triggered on push to `main` when Copilot instruction files change, propagating updates to all Cratis repositories.\n\nThe actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place.'
               if gh pr create \
                 --repo "Cratis/$repo" \
                 --title "Add Copilot sync workflows" \
-                --body "Adds thin wrapper workflows that delegate to the reusable workflows in [Cratis/Workflows](https://github.com/Cratis/Workflows).
-
-### Workflows added
-
-- \`.github/workflows/sync-copilot-instructions.yml\` — triggered via \`workflow_dispatch\` to pull Copilot instructions from a source repository and open a PR with the changes.
-- \`.github/workflows/propagate-copilot-instructions.yml\` — triggered on push to \`main\` when Copilot instruction files change, propagating updates to all Cratis repositories.
-
-The actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place." \
+                --body "$pr_body" \
                 --head "$branch" \
                 --base "$default_branch" 2>/dev/null; then
                 echo "  ✓ Created PR for $repo"
