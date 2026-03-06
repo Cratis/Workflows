@@ -1,7 +1,8 @@
 name: Bootstrap Copilot Sync
-# One-time bootstrap workflow that creates PRs in all Cratis repositories to add
-# thin wrapper workflows that delegate to the reusable workflows in this repository.
-# Trigger this workflow manually once to set up all repositories.
+# Bootstrap workflow that creates PRs in all Cratis repositories to:
+# 1. Delete any existing Copilot instruction files (clean slate)
+# 2. Add thin wrapper workflows that delegate to the reusable workflows in this repository.
+# Trigger this workflow manually to set up (or re-set up) all repositories.
 # Requires PAT_DOCUMENTATION secret with permissions:
 # - repo (to create branches, push files, and open pull requests)
 
@@ -61,6 +62,33 @@ jobs:
             gh api --method POST repos/Cratis/$repo/git/refs \
               -f ref="refs/heads/$branch" \
               -f sha="$sha" 2>/dev/null || true
+
+            # ------------------------------------------------------------------
+            # Delete existing Copilot instruction files from the branch.
+            # Uses the recursive Git tree API so nested files are handled too.
+            # ------------------------------------------------------------------
+            echo "  Scanning for existing Copilot instruction files in $repo..."
+            copilot_files=$(gh api "repos/Cratis/$repo/git/trees/$sha?recursive=1" \
+              --jq '[.tree[] | select(.type == "blob") | select(
+                .path == ".github/copilot-instructions.md" or
+                (.path | startswith(".github/instructions/")) or
+                (.path | startswith(".github/agents/")) or
+                (.path | startswith(".github/skills/")) or
+                (.path | startswith(".github/prompts/"))
+              ) | .path]' 2>/dev/null || echo "[]")
+
+            while IFS= read -r file_path; do
+              file_sha=$(gh api "repos/Cratis/$repo/contents/$file_path?ref=$branch" \
+                --jq '.sha' 2>/dev/null || true)
+              if [ -n "$file_sha" ]; then
+                gh api --method DELETE "repos/Cratis/$repo/contents/$file_path" \
+                  -f message="Remove existing Copilot setup (bootstrap cleanup)" \
+                  -f sha="$file_sha" \
+                  -f branch="$branch" 2>/dev/null && \
+                  echo "  ✓ Deleted $file_path" || \
+                  echo "  ⚠ Could not delete $file_path in $repo"
+              fi
+            done < <(echo "$copilot_files" | jq -r '.[]')
 
             # Pre-computed base64 content for wrapper workflows
             # (avoids heredoc terminators at column 0 which break YAML block scalar parsing)
@@ -146,10 +174,10 @@ jobs:
               --head "$branch" --json number --jq '.[0].number' 2>/dev/null || true)
 
             if [ -z "$existing_pr" ]; then
-              pr_body=$'Adds thin wrapper workflows that delegate to the reusable workflows in [Cratis/Workflows](https://github.com/Cratis/Workflows).\n\n### Workflows added\n\n- `.github/workflows/sync-copilot-instructions.yml` \u2014 triggered via `workflow_dispatch` to pull Copilot instructions from a source repository and open a PR with the changes.\n- `.github/workflows/propagate-copilot-instructions.yml` \u2014 triggered on push to `main` when Copilot instruction files change, propagating updates to all Cratis repositories.\n\nThe actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place.'
+              pr_body=$'Bootstraps centralized Copilot instruction management for this repository.\n\n### Changes\n\n**Removed** (if present):\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder\n- `.github/agents/` folder\n- `.github/skills/` folder\n- `.github/prompts/` folder\n\n**Added**:\n- `.github/workflows/sync-copilot-instructions.yml` \u2014 triggered via `workflow_dispatch` to pull Copilot instructions from a source repository and open a PR with the changes.\n- `.github/workflows/propagate-copilot-instructions.yml` \u2014 triggered on push to `main` when Copilot instruction files change, propagating updates to all Cratis repositories.\n\nThe actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place. Copilot instructions will be managed centrally and synced to this repository via the workflows above.'
               if gh pr create \
                 --repo "Cratis/$repo" \
-                --title "Add Copilot sync workflows" \
+                --title "Bootstrap Copilot sync workflows" \
                 --body "$pr_body" \
                 --head "$branch" \
                 --base "$default_branch" 2>/dev/null; then
