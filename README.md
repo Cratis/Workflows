@@ -51,7 +51,15 @@ jobs:
     secrets: inherit
 ```
 
-Both workflows require the `PAT_DOCUMENTATION` secret (a GitHub Personal Access Token with `repo` scope) to be set in the repository or inherited from the organization.
+Both workflows require the `PAT_DOCUMENTATION` secret to be set in the repository or inherited from the organization.
+
+| PAT type | Required permissions |
+|---|---|
+| Classic PAT | `repo` scope (full repository access) |
+| Fine-grained PAT | **Contents** (read/write) + **Pull requests** (read/write) + **Metadata** (read) |
+
+> [!IMPORTANT]
+> If `PAT_DOCUMENTATION` is a fine-grained PAT you **must** grant **Pull requests: Read and write** in addition to Contents. Without it the bootstrap and sync workflows will be able to create branches but will fail to open pull requests, leaving orphan branches behind.
 
 ---
 
@@ -130,11 +138,7 @@ Clones the `source_repository`, extracts the Copilot artifacts, and opens a pull
 |---|---|---|
 | `source_repository` | ✅ | Source repository in `owner/repo` format. Must belong to the Cratis organization. |
 
-**Secrets required:** `PAT_DOCUMENTATION` (`repo` scope)
-
----
-
-### `propagate-copilot-instructions.yml`
+**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write
 
 **Trigger:** `workflow_call` (invoked by the source repository on push to `main`)
 
@@ -142,7 +146,7 @@ Lists all repositories in the Cratis organization and triggers `sync-copilot-ins
 
 **Validation:** Exits early if the calling repository does not belong to the `Cratis` organization.
 
-**Secrets required:** `PAT_DOCUMENTATION` (`repo` scope)
+**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write
 
 ---
 
@@ -158,4 +162,22 @@ One-time setup workflow. For every non-archived repository in the Cratis organiz
 
 Re-running the workflow is safe — it skips repositories where the PR branch already exists.
 
-**Secrets required:** `PAT_DOCUMENTATION` (`repo` scope)
+**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write
+
+---
+
+### `cleanup-copilot-sync-branches.yml`
+
+**Trigger:** `workflow_dispatch` (run manually when needed)
+
+Utility workflow that deletes the `add-copilot-sync-workflows` branch (or any branch name you specify via the `branch` input) from every non-archived Cratis repository where it exists.  It automatically skips repositories where an open pull request still references the branch.
+
+Use this workflow to clean up orphan branches left behind by a partial or failed run of `bootstrap-copilot-sync.yml`.
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `branch` | No | `add-copilot-sync-workflows` | Name of the branch to delete across all repositories |
+
+**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** read/write
