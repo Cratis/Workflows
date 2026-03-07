@@ -56,6 +56,7 @@ jobs:
           repos='${{ steps.get-repos.outputs.repos }}'
           prs_created_file=$(mktemp)
           failures_file=$(mktemp)
+          pr_failures_file=$(mktemp)
 
           # Pre-computed base64 content for wrapper workflows.
           # Using base64 avoids heredoc end-markers at column 0,
@@ -276,9 +277,12 @@ jobs:
             # ----------------------------------------------------------------
             # 10. Create PR (skip if one already exists for this branch)
             # ----------------------------------------------------------------
-            existing_pr=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" \
-              --jq '.[0].number' \
-              2>/dev/null || true)
+            # Use exit-code checking to distinguish a successful empty list
+            # from a 403 error response (which must not be treated as a PR number).
+            existing_pr=""
+            if api_result=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>/dev/null); then
+              existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
+            fi
 
             if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
               if pr_url=$(gh api -X POST "repos/Cratis/$repo/pulls" \
@@ -286,12 +290,12 @@ jobs:
                 -f body="$pr_body" \
                 -f head="$branch" \
                 -f base="$default_branch" \
-                --jq '.html_url'); then
+                --jq '.html_url' 2>/dev/null); then
                 echo "  ✓ Created PR for $repo: $pr_url"
                 echo "$repo" >> "$prs_created_file"
               else
-                echo "  ⚠ Could not create PR for $repo"
-                echo "$repo" >> "$failures_file"
+                echo "  ⚠ Could not create PR for $repo (ensure PAT_DOCUMENTATION has pull_requests:write permission)"
+                echo "$repo" >> "$pr_failures_file"
               fi
             else
               echo "  ℹ PR already exists for $repo (#$existing_pr)"
@@ -301,12 +305,17 @@ jobs:
 
           total_prs=$(wc -l < "$prs_created_file" 2>/dev/null || echo "0")
           total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")
-          rm -f "$prs_created_file" "$failures_file"
+          total_pr_failures=$(wc -l < "$pr_failures_file" 2>/dev/null || echo "0")
+          rm -f "$prs_created_file" "$failures_file" "$pr_failures_file"
 
           echo ""
-          echo "Summary: $total_prs repo(s) with PR created or already open, $total_failures failure(s)"
+          echo "Summary: $total_prs repo(s) with PR created or already open, $total_pr_failures repo(s) where PR could not be created, $total_failures branch setup failure(s)"
+
+          if [ "$total_pr_failures" -gt 0 ]; then
+            echo "::warning::$total_pr_failures repo(s) could not have PRs auto-created. Branches were set up successfully. Ensure PAT_DOCUMENTATION has pull_requests:write permission to enable automatic PR creation."
+          fi
 
           if [ "$total_failures" -gt 0 ]; then
-            echo "::error::$total_failures repo(s) failed. Check the log above for details."
+            echo "::error::$total_failures repo(s) failed to set up branches. Check the log above for details."
             exit 1
           fi
