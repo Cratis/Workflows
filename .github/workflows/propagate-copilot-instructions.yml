@@ -1,13 +1,13 @@
 name: Propagate Copilot Instructions
 # Reusable workflow that propagates Copilot instruction changes from the calling
 # repository to all other repositories in the Cratis organization.
-# This workflow requires PAT_DOCUMENTATION secret with permissions:
+# This workflow requires PAT_WORKFLOWS secret with permissions:
 # - repo (to list repositories and trigger workflows)
 
 on:
   workflow_call:
     secrets:
-      PAT_DOCUMENTATION:
+      PAT_WORKFLOWS:
         required: true
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
       - name: Get all Cratis repositories
         id: get-repos
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           # Get all repositories in the Cratis organization (limit 1000 covers foreseeable growth)
           repos=$(gh repo list Cratis --limit 1000 --json name --jq '.[].name')
@@ -34,7 +34,7 @@ jobs:
 
       - name: Trigger sync workflow for each repository
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           repos='${{ steps.get-repos.outputs.repos }}'
           source_repo="${{ github.repository }}"

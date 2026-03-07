@@ -4,7 +4,7 @@ name: Bootstrap Copilot Sync
 # 2. Add thin wrapper workflows that delegate to the reusable workflows in this repository.
 # Trigger this workflow manually to set up (or re-set up) all repositories.
 #
-# Requires PAT_DOCUMENTATION secret with permissions:
+# Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo scope
 #   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
 #
@@ -30,10 +30,10 @@ jobs:
     steps:
       - name: Verify PAT can authenticate
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           if ! gh api /user >/dev/null 2>&1; then
-            echo "::error::Could not authenticate with PAT_DOCUMENTATION. Is the secret set correctly?"
+            echo "::error::Could not authenticate with PAT_WORKFLOWS. Is the secret set correctly?"
             exit 1
           fi
           login=$(gh api /user --jq '.login')
@@ -45,7 +45,7 @@ jobs:
       - name: Get all Cratis repositories
         id: get-repos
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           # List all non-archived repos (limit 1000 covers foreseeable growth)
           repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
@@ -54,7 +54,7 @@ jobs:
 
       - name: Create PRs in all repositories
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           repos='${{ steps.get-repos.outputs.repos }}'
           prs_created_file=$(mktemp)
@@ -297,7 +297,7 @@ jobs:
                 echo "  ✓ Created PR for $repo: $pr_url"
                 echo "$repo" >> "$prs_created_file"
               else
-                echo "  ⚠ Could not create PR for $repo (ensure PAT_DOCUMENTATION has pull_requests:write permission)"
+                echo "  ⚠ Could not create PR for $repo (ensure PAT_WORKFLOWS has pull_requests:write permission)"
                 echo "$repo" >> "$pr_failures_file"
               fi
             else
@@ -315,7 +315,7 @@ jobs:
           echo "Summary: $total_prs repo(s) with PR created or already open, $total_pr_failures repo(s) where PR could not be created, $total_failures branch setup failure(s)"
 
           if [ "$total_pr_failures" -gt 0 ]; then
-            echo "::warning::$total_pr_failures repo(s) could not have PRs auto-created. Branches were set up successfully. Ensure PAT_DOCUMENTATION has pull_requests:write permission to enable automatic PR creation."
+            echo "::warning::$total_pr_failures repo(s) could not have PRs auto-created. Branches were set up successfully. Ensure PAT_WORKFLOWS has pull_requests:write permission to enable automatic PR creation."
           fi
 
           if [ "$total_failures" -gt 0 ]; then

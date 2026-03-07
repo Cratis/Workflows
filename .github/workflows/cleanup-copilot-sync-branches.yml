@@ -5,7 +5,7 @@ name: Cleanup Copilot Sync Branches
 # Run this workflow manually whenever you need to clean up stale bootstrap
 # branches left behind by a failed or partial run of bootstrap-copilot-sync.
 #
-# Requires PAT_DOCUMENTATION secret with permissions:
+# Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo scope
 #   Fine-grained PAT:  Contents (read/write)
 
@@ -28,10 +28,10 @@ jobs:
     steps:
       - name: Verify PAT can authenticate
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           if ! gh api /user >/dev/null 2>&1; then
-            echo "::error::Could not authenticate with PAT_DOCUMENTATION. Is the secret set correctly?"
+            echo "::error::Could not authenticate with PAT_WORKFLOWS. Is the secret set correctly?"
             exit 1
           fi
           login=$(gh api /user --jq '.login')
@@ -40,7 +40,7 @@ jobs:
       - name: Get all Cratis repositories
         id: get-repos
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
             --jq '[.[] | select(.isArchived == false) | .name]')
@@ -48,7 +48,7 @@ jobs:
 
       - name: Delete branch from all repositories
         env:
-          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
           repos='${{ steps.get-repos.outputs.repos }}'
           branch="${{ inputs.branch }}"
