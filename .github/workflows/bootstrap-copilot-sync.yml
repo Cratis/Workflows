@@ -33,12 +33,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
-          if ! gh api /user >/dev/null 2>&1; then
+          auth_error=$(mktemp)
+          if ! gh api /user >/dev/null 2>"$auth_error"; then
             echo "::error::Could not authenticate with PAT_WORKFLOWS. Is the secret set correctly?"
+            echo "::error::API error: $(cat "$auth_error")"
+            rm -f "$auth_error"
             exit 1
           fi
+          rm -f "$auth_error"
           login=$(gh api /user --jq '.login')
           echo "✓ Authenticated as $login"
+          # Show PAT type and scopes to help diagnose permission issues.
+          # Classic PATs expose granted scopes via the X-OAuth-Scopes response header.
+          # Fine-grained PATs do not include this header.
+          oauth_scopes=$(gh api /user -i 2>/dev/null | grep -i '^x-oauth-scopes:' | sed 's/[^:]*: //' | tr -d '\r' || true)
+          if [ -n "$oauth_scopes" ]; then
+            echo "  PAT type: classic"
+            echo "  OAuth scopes: $oauth_scopes"
+          else
+            echo "  PAT type: fine-grained (scopes not exposed via API)"
+          fi
           # NOTE: PR-creation permission is validated implicitly per-repository during
           # the main loop below.  A pre-flight probe against Cratis/Workflows would
           # always fail for fine-grained PATs that (correctly) exclude this repo.
@@ -170,18 +184,30 @@ jobs:
             #    Using the Git Data API avoids the git receive-hook restriction
             #    that rejects workflow file pushes without the "workflow" scope.
             # ----------------------------------------------------------------
+            sync_blob_error=$(mktemp)
             sync_blob_sha=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
               -f content="$sync_b64" -f encoding=base64 \
-              --jq '.sha' 2>/dev/null || true)
+              --jq '.sha' 2>"$sync_blob_error" || true)
+            propagate_blob_error=$(mktemp)
             propagate_blob_sha=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
               -f content="$propagate_b64" -f encoding=base64 \
-              --jq '.sha' 2>/dev/null || true)
+              --jq '.sha' 2>"$propagate_blob_error" || true)
 
             if [ -z "$sync_blob_sha" ] || [ -z "$propagate_blob_sha" ]; then
               echo "  ⚠ Could not create blobs for $repo"
+              if [ -z "$sync_blob_sha" ]; then
+                sync_err=$(cat "$sync_blob_error" 2>/dev/null || true)
+                [ -n "$sync_err" ] && echo "    sync blob error: $sync_err"
+              fi
+              if [ -z "$propagate_blob_sha" ]; then
+                prop_err=$(cat "$propagate_blob_error" 2>/dev/null || true)
+                [ -n "$prop_err" ] && echo "    propagate blob error: $prop_err"
+              fi
+              rm -f "$sync_blob_error" "$propagate_blob_error"
               echo "$repo" >> "$failures_file"
               continue
             fi
+            rm -f "$sync_blob_error" "$propagate_blob_error"
 
             # ----------------------------------------------------------------
             # 5. Check if workflow files already match and no files need removal
@@ -258,32 +284,42 @@ jobs:
             # ----------------------------------------------------------------
             # 7. Create the new tree object
             # ----------------------------------------------------------------
+            tree_error=$(mktemp)
             new_tree_sha=$(echo "$new_tree_json" | \
               gh api -X POST "repos/Cratis/$repo/git/trees" \
-              --input - --jq '.sha' 2>/dev/null || true)
+              --input - --jq '.sha' 2>"$tree_error" || true)
 
             if [ -z "$new_tree_sha" ]; then
+              tree_api_error=$(cat "$tree_error" 2>/dev/null || true)
               echo "  ⚠ Could not create tree for $repo"
+              [ -n "$tree_api_error" ] && echo "    API error: $tree_api_error"
+              rm -f "$tree_error"
               echo "$repo" >> "$failures_file"
               continue
             fi
+            rm -f "$tree_error"
 
             # ----------------------------------------------------------------
             # 8. Create the commit
             # ----------------------------------------------------------------
+            commit_error=$(mktemp)
             new_commit_sha=$(jq -n \
               --arg msg  "Bootstrap Copilot sync workflows" \
               --arg tree "$new_tree_sha" \
               --arg parent "$head_sha" \
               '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
               gh api -X POST "repos/Cratis/$repo/git/commits" \
-              --input - --jq '.sha' 2>/dev/null || true)
+              --input - --jq '.sha' 2>"$commit_error" || true)
 
             if [ -z "$new_commit_sha" ]; then
+              commit_api_error=$(cat "$commit_error" 2>/dev/null || true)
               echo "  ⚠ Could not create commit for $repo"
+              [ -n "$commit_api_error" ] && echo "    API error: $commit_api_error"
+              rm -f "$commit_error"
               echo "$repo" >> "$failures_file"
               continue
             fi
+            rm -f "$commit_error"
 
             # ----------------------------------------------------------------
             # 9. Copy Copilot setup from Cratis/AI (second commit)
@@ -359,23 +395,28 @@ jobs:
             existing_branch_sha=$(gh api "repos/Cratis/$repo/git/ref/heads/$branch" \
               --jq '.object.sha' 2>/dev/null || true)
 
+            branch_error=$(mktemp)
             if [ -z "$existing_branch_sha" ]; then
               branch_ok=$(gh api -X POST "repos/Cratis/$repo/git/refs" \
                 -f "ref=refs/heads/$branch" \
                 -f "sha=$new_commit_sha" \
-                --jq '.ref' 2>/dev/null || true)
+                --jq '.ref' 2>"$branch_error" || true)
             else
               branch_ok=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$branch" \
                 -f "sha=$new_commit_sha" \
                 -F force=true \
-                --jq '.ref' 2>/dev/null || true)
+                --jq '.ref' 2>"$branch_error" || true)
             fi
 
             if [ -z "$branch_ok" ]; then
+              branch_api_error=$(cat "$branch_error" 2>/dev/null || true)
               echo "  ⚠ Could not create/update branch for $repo"
+              [ -n "$branch_api_error" ] && echo "    API error: $branch_api_error"
+              rm -f "$branch_error"
               echo "$repo" >> "$failures_file"
               continue
             fi
+            rm -f "$branch_error"
 
             echo "  ✓ Branch $branch ready for $repo"
 
@@ -390,18 +431,22 @@ jobs:
             fi
 
             if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
+              pr_error=$(mktemp)
               if pr_url=$(gh api -X POST "repos/Cratis/$repo/pulls" \
                 -f title="Bootstrap Copilot sync workflows" \
                 -f body="$pr_body" \
                 -f head="$branch" \
                 -f base="$default_branch" \
-                --jq '.html_url' 2>/dev/null); then
+                --jq '.html_url' 2>"$pr_error"); then
                 echo "  ✓ Created PR for $repo: $pr_url"
                 echo "$repo" >> "$prs_created_file"
               else
-                echo "  ⚠ Could not create PR for $repo (ensure PAT_WORKFLOWS has pull_requests:write permission)"
+                pr_api_error=$(cat "$pr_error" 2>/dev/null || true)
+                echo "  ⚠ Could not create PR for $repo"
+                [ -n "$pr_api_error" ] && echo "    API error: $pr_api_error"
                 echo "$repo" >> "$pr_failures_file"
               fi
+              rm -f "$pr_error"
             else
               echo "  ℹ PR already exists for $repo (#$existing_pr)"
               echo "$repo" >> "$prs_created_file"
