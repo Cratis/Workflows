@@ -75,6 +75,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
+          # Confirm which credential gh is actually using — ensures PAT is active
+          # and not accidentally overridden by GITHUB_TOKEN.
+          echo "gh auth status (confirming PAT is used for PR creation):"
+          gh auth status 2>&1 | sed 's/^/  /' || true
+
           repos='${{ steps.get-repos.outputs.repos }}'
           prs_created_file=$(mktemp)
           failures_file=$(mktemp)
@@ -441,22 +446,29 @@ jobs:
             rm -f "$list_pr_error"
 
             if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
+              pr_response_file=$(mktemp)
               pr_error=$(mktemp)
-              if pr_url=$(gh api -X POST "repos/Cratis/$repo/pulls" \
+              if gh api -X POST "repos/Cratis/$repo/pulls" \
                 -f title="Bootstrap Copilot sync workflows" \
                 -f body="$pr_body" \
                 -f head="$branch" \
                 -f base="$default_branch" \
-                --jq '.html_url' 2>"$pr_error"); then
+                > "$pr_response_file" 2>"$pr_error"; then
+                pr_url=$(jq -r '.html_url // empty' < "$pr_response_file" 2>/dev/null || true)
                 echo "  ✓ Created PR for $repo: $pr_url"
                 echo "$repo" >> "$prs_created_file"
               else
                 pr_api_error=$(cat "$pr_error" 2>/dev/null || true)
+                # Extract the GitHub API error message from the response body
+                # (gh CLI only shows "Validation Failed" but the body contains the real reason,
+                # e.g. "Resource not accessible by integration" for permission errors).
+                pr_gh_message=$(jq -r '.message // empty' < "$pr_response_file" 2>/dev/null || true)
                 echo "  ⚠ Could not create PR for $repo"
                 [ -n "$pr_api_error" ] && echo "    API error: $pr_api_error"
+                [ -n "$pr_gh_message" ] && echo "    GitHub message: $pr_gh_message"
                 echo "$repo" >> "$pr_failures_file"
               fi
-              rm -f "$pr_error"
+              rm -f "$pr_response_file" "$pr_error"
             else
               echo "  ℹ PR already exists for $repo (#$existing_pr)"
               echo "$repo" >> "$prs_created_file"
