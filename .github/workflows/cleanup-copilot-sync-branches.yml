@@ -1,0 +1,101 @@
+name: Cleanup Copilot Sync Branches
+# Deletes the orphan `add-copilot-sync-workflows` branch from every Cratis
+# repository where it still exists (and where no open PR references it).
+#
+# Run this workflow manually whenever you need to clean up stale bootstrap
+# branches left behind by a failed or partial run of bootstrap-copilot-sync.
+#
+# Requires PAT_DOCUMENTATION secret with permissions:
+#   Classic PAT:       repo scope
+#   Fine-grained PAT:  Contents (read/write)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch name to delete (default: add-copilot-sync-workflows)'
+        required: false
+        default: 'add-copilot-sync-workflows'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify PAT can authenticate
+        env:
+          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+        run: |
+          if ! gh api /user >/dev/null 2>&1; then
+            echo "::error::Could not authenticate with PAT_DOCUMENTATION. Is the secret set correctly?"
+            exit 1
+          fi
+          login=$(gh api /user --jq '.login')
+          echo "✓ Authenticated as $login"
+
+      - name: Get all Cratis repositories
+        id: get-repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+        run: |
+          repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
+            --jq '[.[] | select(.isArchived == false) | .name]')
+          echo "repos=$repos" >> $GITHUB_OUTPUT
+
+      - name: Delete branch from all repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
+        run: |
+          repos='${{ steps.get-repos.outputs.repos }}'
+          branch="${{ inputs.branch }}"
+          deleted_file=$(mktemp)
+          skipped_file=$(mktemp)
+          failures_file=$(mktemp)
+
+          echo "$repos" | jq -r '.[]' | while read -r repo; do
+            echo "Checking Cratis/$repo..."
+
+            # Check whether the branch exists
+            branch_sha=$(gh api "repos/Cratis/$repo/git/ref/heads/$branch" \
+              --jq '.object.sha' 2>/dev/null || true)
+
+            if [ -z "$branch_sha" ]; then
+              echo "  ℹ Branch not found in $repo, skipping"
+              continue
+            fi
+
+            # Check whether an open PR references this branch (skip if so)
+            open_pr=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" \
+              --jq '.[0].number // empty' 2>/dev/null || true)
+            if [ -n "$open_pr" ]; then
+              echo "  ⚠ Open PR #$open_pr references $branch in $repo — skipping (close or merge the PR first)"
+              echo "$repo" >> "$skipped_file"
+              continue
+            fi
+
+            # Delete the branch
+            if gh api -X DELETE "repos/Cratis/$repo/git/refs/heads/$branch" 2>/dev/null; then
+              echo "  ✓ Deleted branch $branch from $repo"
+              echo "$repo" >> "$deleted_file"
+            else
+              echo "  ✗ Failed to delete branch $branch from $repo"
+              echo "$repo" >> "$failures_file"
+            fi
+          done
+
+          total_deleted=$(wc -l < "$deleted_file" 2>/dev/null || echo "0")
+          total_skipped=$(wc -l < "$skipped_file" 2>/dev/null || echo "0")
+          total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")
+          rm -f "$deleted_file" "$skipped_file" "$failures_file"
+
+          echo ""
+          echo "Summary: $total_deleted deleted, $total_skipped skipped (open PR), $total_failures failed"
+
+          if [ "$total_failures" -gt 0 ]; then
+            echo "::error::Failed to delete branch from $total_failures repo(s). Check the log above."
+            exit 1
+          fi

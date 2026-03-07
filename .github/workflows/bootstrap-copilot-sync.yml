@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Verify PAT can authenticate
+      - name: Verify PAT can authenticate and has required permissions
         env:
           GH_TOKEN: ${{ secrets.PAT_DOCUMENTATION }}
         run: |
@@ -38,6 +38,29 @@ jobs:
           fi
           login=$(gh api /user --jq '.login')
           echo "✓ Authenticated as $login"
+
+          # Pre-flight check: verify that the PAT can create pull requests.
+          # We probe the PR creation endpoint with deliberately invalid data so the
+          # API returns 422 (Unprocessable Entity) when authorized, vs 403 (Forbidden)
+          # when the token lacks pull-request write permission.
+          # curl -w "%{http_code}" is used for reliable numeric status capture.
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/Cratis/Workflows/pulls" \
+            -d '{"title":"__preflight__","head":"__preflight__","base":"__preflight__"}')
+
+          if [ "$http_code" = "403" ] || [ "$http_code" = "401" ]; then
+            echo "::error::PAT_DOCUMENTATION cannot create pull requests (HTTP $http_code)."
+            echo "::error::For a fine-grained PAT add 'Pull requests: Read and write' permission."
+            echo "::error::For a classic PAT ensure the 'repo' scope is selected."
+            echo "::error::Update the secret and re-run this workflow."
+            exit 1
+          fi
+          # Any other code (404, 422, etc.) means the token IS authorized for PR creation.
+          echo "✓ PAT has pull-request creation permission (probe returned HTTP $http_code)"
 
       - name: Get all Cratis repositories
         id: get-repos
