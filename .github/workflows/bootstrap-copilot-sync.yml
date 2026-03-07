@@ -43,6 +43,10 @@ jobs:
           rm -f "$auth_error"
           login=$(gh api /user --jq '.login')
           echo "✓ Authenticated as $login"
+          # Show which credential gh is actually using — confirms PAT is active
+          # and not accidentally overridden by GITHUB_TOKEN.
+          echo "  gh auth status:"
+          gh auth status 2>&1 | sed 's/^/    /'
           # Show PAT type and scopes to help diagnose permission issues.
           # Classic PATs expose granted scopes via the X-OAuth-Scopes response header.
           # Fine-grained PATs do not include this header.
@@ -426,9 +430,15 @@ jobs:
             # Use exit-code checking to distinguish a successful empty list
             # from a 403 error response (which must not be treated as a PR number).
             existing_pr=""
-            if api_result=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>/dev/null); then
+            list_pr_error=$(mktemp)
+            if api_result=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>"$list_pr_error"); then
               existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
+            else
+              list_pr_api_error=$(cat "$list_pr_error" 2>/dev/null || true)
+              echo "  ⚠ Could not list PRs for $repo"
+              [ -n "$list_pr_api_error" ] && echo "    API error: $list_pr_api_error"
             fi
+            rm -f "$list_pr_error"
 
             if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
               pr_error=$(mktemp)
