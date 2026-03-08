@@ -404,24 +404,30 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # ----------------------------------------------------------------
   # 11. Create PR (skip if one already exists for this branch)
   # ----------------------------------------------------------------
-  # Poll GET /repos/{owner}/{repo}/branches/{branch} until the branch
-  # is visible to the regular REST API (which shares the same replica
-  # as the PR-creation endpoint).  The Git Data API writes land
-  # immediately but the branches/pulls service may lag a few seconds.
+  # Poll GET /repos/{owner}/{repo}/git/ref/heads/{branch} until the
+  # branch ref is visible to the Git Data API.  This uses the same
+  # endpoint that the rest of the script uses, avoiding permission
+  # asymmetries where fine-grained PATs can write git refs but cannot
+  # read via the higher-level /branches/{branch} endpoint.
   branch_accessible=false
   for wait_i in $(seq 1 6); do
-    branch_check=$(gh api "repos/Cratis/$repo/branches/$branch" \
-      --jq '.name' 2>/dev/null || true)
-    if [ "$branch_check" = "$branch" ]; then
+    branch_check_err=$(mktemp)
+    branch_check=$(gh api "repos/Cratis/$repo/git/ref/heads/$branch" \
+      --jq '.object.sha' 2>"$branch_check_err" || true)
+    if [ -n "$branch_check" ]; then
+      rm -f "$branch_check_err"
       branch_accessible=true
       break
     fi
+    branch_check_api_err=$(cat "$branch_check_err" 2>/dev/null || true)
+    rm -f "$branch_check_err"
+    [ -n "$branch_check_api_err" ] && echo "  ℹ Branch check error: $branch_check_api_err"
     echo "  ℹ Waiting for branch $branch to propagate (attempt $wait_i/6)..."
     sleep 10
   done
 
   if [ "$branch_accessible" = "false" ]; then
-    echo "  ⚠ Branch $branch not accessible via branches API after 60s; skipping PR creation for $repo"
+    echo "  ⚠ Branch $branch not accessible via Git Data API after 60s; skipping PR creation for $repo"
     echo "$repo" >> "$pr_failures_file"
     continue
   fi
@@ -445,6 +451,13 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     # where it does not exist, causing "Head sha can't be blank" GraphQL
     # errors.  The REST endpoint resolves the head branch name in the
     # context of the target repository without any local git lookup.
+    #
+    # Brief pause before the first attempt: the Git Data API write and the
+    # Pulls API read can race, causing a 422 "head: invalid" error even
+    # when the branch ref was confirmed above.  3 s was not enough in
+    # practice; 5 s covers typical propagation.  The retry loop below
+    # provides an additional safety net.
+    sleep 5
     pr_error=$(mktemp)
     pr_created=false
     max_attempts=3
