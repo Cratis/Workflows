@@ -6,14 +6,14 @@ name: Bootstrap Copilot Sync
 # Trigger this workflow manually to set up (or re-set up) all repositories.
 #
 # Requires PAT_WORKFLOWS secret with permissions:
-#   Classic PAT:       repo scope
+#   Classic PAT:       repo + workflow scopes
 #   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
+#                      + Workflows (read/write)
 #
 # NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
-# instead of git push to avoid the receive-hook restriction that rejects pushes
-# of .github/workflows/ files unless the token has the "workflow" OAuth scope.
-# The Git Data API only requires the "repo" scope (classic) or
-# "Contents: write" (fine-grained), so no "workflow" scope is needed.
+# instead of git push.  However, GitHub still enforces workflow-file protection
+# on POST /git/trees when the tree contains .github/workflows/ paths, so the
+# PAT must include the Workflows permission.
 #
 # Re-running this workflow is safe: it force-updates the branch to a clean state
 # and skips repos where a PR already exists.

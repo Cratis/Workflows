@@ -104,6 +104,7 @@ if [ -n "$probe_repo" ]; then
     echo "  • Repository access: All repositories"
     echo "  • Permissions → Contents: Read and write"
     echo "  • Permissions → Pull requests: Read and write"
+    echo "  • Permissions → Workflows: Read and write"
     echo "Update the PAT at: https://github.com/settings/personal-access-tokens"
     exit 1
   fi
@@ -182,8 +183,8 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
   # ----------------------------------------------------------------
   # 4. Create blobs for the two workflow files
-  #    Using the Git Data API avoids the git receive-hook restriction
-  #    that rejects workflow file pushes without the "workflow" scope.
+  #    Blobs are raw content — no path-level permission checks here.
+  #    The Workflows permission is checked later when creating the tree.
   # ----------------------------------------------------------------
   sync_blob_error=$(mktemp)
   _sync_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
