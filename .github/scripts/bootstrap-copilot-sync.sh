@@ -86,11 +86,13 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   echo "Processing Cratis/$repo..."
 
   # ----------------------------------------------------------------
-  # 1. Get default branch and HEAD SHA
+  # 1. Get default branch, HEAD SHA, and repository node ID
   # ----------------------------------------------------------------
   repo_info_error=$(mktemp)
-  default_branch=$(gh api "repos/Cratis/$repo" \
-    --jq '.default_branch' 2>"$repo_info_error" || true)
+  repo_info_json=$(gh api "repos/Cratis/$repo" \
+    --jq '{default_branch: .default_branch, node_id: .node_id}' 2>"$repo_info_error" || true)
+  default_branch=$(echo "$repo_info_json" | jq -r '.default_branch // empty' 2>/dev/null || true)
+  repo_node_id=$(echo "$repo_info_json" | jq -r '.node_id // empty' 2>/dev/null || true)
   if [ -z "$default_branch" ]; then
     repo_info_api_error=$(cat "$repo_info_error" 2>/dev/null || true)
     echo "  ⚠ Could not get default branch for $repo, skipping"
@@ -371,60 +373,73 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   fi
 
   # ----------------------------------------------------------------
-  # 10. Create or force-update the feature branch
+  # 10. Create or force-update the feature branch (via GraphQL)
+  #
+  # The REST Git Data API (POST /git/refs) creates low-level refs that
+  # are NOT registered in GitHub's branch index.  The Pulls API and
+  # GraphQL createPullRequest require the branch to be in the index,
+  # which is why every previous attempt got "Head ref must be a branch".
+  #
+  # GraphQL createRef / updateRef go through the higher-level branch
+  # service and properly register the branch.
   # ----------------------------------------------------------------
-  existing_branch_sha=$(gh api "repos/Cratis/$repo/git/ref/heads/$branch" \
-    --jq '.object.sha' 2>/dev/null || true)
-
   branch_error=$(mktemp)
-  if [ -z "$existing_branch_sha" ]; then
-    branch_ok=$(gh api -X POST "repos/Cratis/$repo/git/refs" \
-      -f "ref=refs/heads/$branch" \
-      -f "sha=$new_commit_sha" \
-      --jq '.ref' 2>"$branch_error" || true)
+  branch_ok=""
+
+  # Check if the branch already exists via GraphQL
+  existing_ref_result=$(gh api graphql \
+    -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){id target{oid}}}}' \
+    -f owner="Cratis" \
+    -f name="$repo" \
+    -f ref="refs/heads/$branch" \
+    2>/dev/null || true)
+  existing_ref_id=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.id // empty' 2>/dev/null || true)
+
+  if [ -n "$existing_ref_id" ] && [ "$existing_ref_id" != "null" ]; then
+    # Branch exists — force-update it
+    branch_result=$(gh api graphql \
+      -f query='mutation($refId:ID!,$oid:GitObjectID!){updateRef(input:{refId:$refId,oid:$oid,force:true}){ref{name target{oid}}}}' \
+      -f refId="$existing_ref_id" \
+      -f oid="$new_commit_sha" \
+      2>"$branch_error" || true)
+    branch_ok=$(echo "$branch_result" | jq -r '.data.updateRef.ref.name // empty' 2>/dev/null || true)
   else
-    branch_ok=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$branch" \
-      -f "sha=$new_commit_sha" \
-      -F force=true \
-      --jq '.ref' 2>"$branch_error" || true)
+    # Branch doesn't exist — create it
+    if [ -z "$repo_node_id" ]; then
+      echo "  ⚠ No repository node ID for $repo; cannot create branch via GraphQL"
+      echo "$repo" >> "$failures_file"
+      rm -f "$branch_error"
+      continue
+    fi
+    branch_result=$(gh api graphql \
+      -f query='mutation($repoId:ID!,$name:String!,$oid:GitObjectID!){createRef(input:{repositoryId:$repoId,name:$name,oid:$oid}){ref{name target{oid}}}}' \
+      -f repoId="$repo_node_id" \
+      -f name="refs/heads/$branch" \
+      -f oid="$new_commit_sha" \
+      2>"$branch_error" || true)
+    branch_ok=$(echo "$branch_result" | jq -r '.data.createRef.ref.name // empty' 2>/dev/null || true)
   fi
 
-  if [ -z "$branch_ok" ]; then
+  if [ -z "$branch_ok" ] || [ "$branch_ok" = "null" ]; then
     branch_api_error=$(cat "$branch_error" 2>/dev/null || true)
-    echo "  ⚠ Could not create/update branch for $repo"
-    [ -n "$branch_api_error" ] && echo "    API error: $branch_api_error"
+    branch_gql_errors=$(echo "$branch_result" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
+    echo "  ⚠ Could not create/update branch for $repo (GraphQL)"
+    [ -n "$branch_api_error" ] && echo "    stderr: $branch_api_error"
+    [ -n "$branch_gql_errors" ] && echo "    GraphQL errors: $branch_gql_errors"
+    echo "    Full response: $(echo "$branch_result" | head -c 500)"
     rm -f "$branch_error"
     echo "$repo" >> "$failures_file"
     continue
   fi
   rm -f "$branch_error"
 
-  echo "  ✓ Branch $branch ready for $repo"
+  echo "  ✓ Branch $branch ready for $repo (GraphQL)"
 
   # ----------------------------------------------------------------
   # 11. Create PR (skip if one already exists for this branch)
   # ----------------------------------------------------------------
-  # Confirm the branch ref is accessible via the Git Data API.  The
-  # fine-grained PAT has access to git/ref/heads/ but NOT the
-  # higher-level /branches/ endpoint (returns 404).  A short poll
-  # guards against any eventual-consistency lag after the ref write.
-  branch_accessible=false
-  for wait_i in $(seq 1 6); do
-    branch_check=$(gh api "repos/Cratis/$repo/git/ref/heads/$branch" \
-      --jq '.object.sha' 2>/dev/null || true)
-    if [ -n "$branch_check" ]; then
-      branch_accessible=true
-      break
-    fi
-    echo "  ℹ Waiting for branch ref to propagate (attempt $wait_i/6)..."
-    sleep 5
-  done
-
-  if [ "$branch_accessible" = "false" ]; then
-    echo "  ⚠ Branch $branch not accessible via Git Data API after 30s; skipping PR for $repo"
-    echo "$repo" >> "$pr_failures_file"
-    continue
-  fi
+  # No polling needed — GraphQL createRef/updateRef registers the
+  # branch in the branch index synchronously.
 
   # Check for an existing open PR for this branch.
   existing_pr=""
@@ -439,9 +454,6 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$list_pr_error"
 
   if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
-    # Get repository node ID for GraphQL mutation.
-    repo_node_id=$(gh api "repos/Cratis/$repo" --jq '.node_id' 2>/dev/null || true)
-
     pr_created=false
 
     # ------------------------------------------------------------------
