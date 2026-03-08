@@ -404,11 +404,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # ----------------------------------------------------------------
   # 11. Create PR (skip if one already exists for this branch)
   # ----------------------------------------------------------------
-  # Brief pause to let GitHub's API propagate the branch update before
-  # the PR creation endpoint is queried.  Without this delay the branch
-  # ref write and the PR creation read can race, causing a 422
-  # "Validation Failed / invalid head" error even when the branch exists.
-  sleep 3
+  # Pause to let GitHub's internal ref processing complete before we
+  # attempt PR creation.  The Git Data API commits and refs are written
+  # synchronously, but GitHub's PR validation pipeline reads from a
+  # separate internal service that may lag slightly behind.
+  sleep 10
 
   # Use exit-code checking to distinguish a successful empty list
   # from a 403 error response (which must not be treated as a PR number).
@@ -424,44 +424,48 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$list_pr_error"
 
   if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
-    pr_response_file=$(mktemp)
+    # Use gh pr create (backed by GraphQL) instead of the REST pulls
+    # endpoint.  The REST POST /repos/{owner}/{repo}/pulls returns
+    # "head: invalid" with HTTP 422 even when the branch exists because
+    # its head-validation path reads from a replica that may not yet
+    # reflect the newly created ref.  gh pr create uses the GraphQL
+    # createPullRequest mutation which resolves the head ref differently
+    # and does not exhibit the same replication-lag failure mode.
     pr_error=$(mktemp)
-    # Build the PR payload via jq to guarantee correct JSON encoding of
-    # all fields (including multi-line body and non-ASCII characters).
-    # Pass just the branch name as head — for same-repository pull
-    # requests GitHub expects a plain branch name, not owner:branch
-    # (that format is for cross-repository / fork PRs only).
-    pr_payload=$(jq -n \
-      --arg title "Bootstrap Copilot sync workflows" \
-      --arg body  "$pr_body" \
-      --arg head  "$branch" \
-      --arg base  "$default_branch" \
-      '{"title": $title, "body": $body, "head": $head, "base": $base}')
-    if echo "$pr_payload" | gh api -X POST "repos/Cratis/$repo/pulls" \
-      --input - > "$pr_response_file" 2>"$pr_error"; then
-      pr_url=$(jq -r '.html_url // empty' < "$pr_response_file" 2>/dev/null || true)
-      echo "  ✓ Created PR for $repo: $pr_url"
-      echo "$repo" >> "$prs_created_file"
-    else
+    pr_created=false
+    max_attempts=4
+    attempt_delay=15
+
+    for attempt in $(seq 1 "$max_attempts"); do
+      if pr_url=$(gh pr create \
+        --repo "Cratis/$repo" \
+        --title "Bootstrap Copilot sync workflows" \
+        --body "$pr_body" \
+        --head "$branch" \
+        --base "$default_branch" 2>"$pr_error"); then
+        echo "  ✓ Created PR for $repo: $pr_url"
+        echo "$repo" >> "$prs_created_file"
+        pr_created=true
+        break
+      else
+        pr_api_error=$(cat "$pr_error" 2>/dev/null || true)
+        if [ "$attempt" -lt "$max_attempts" ]; then
+          echo "  ℹ PR creation attempt $attempt/$max_attempts failed for $repo, retrying in ${attempt_delay}s..."
+          [ -n "$pr_api_error" ] && echo "    Error: $pr_api_error"
+          next_delay="$attempt_delay"
+          attempt_delay=$((attempt_delay * 2))
+          sleep "$next_delay"
+        fi
+      fi
+    done
+
+    if [ "$pr_created" = "false" ]; then
       pr_api_error=$(cat "$pr_error" 2>/dev/null || true)
-      # Extract the GitHub API error message and detailed errors from the
-      # response body.  The gh CLI only shows the top-level message (e.g.
-      # "Validation Failed") but the errors array contains the real reason
-      # (e.g. "No commits between main and add-copilot-sync-workflows", or
-      # "Resource not accessible by integration" for permission errors).
-      # Include the field name so we know which parameter is rejected.
-      pr_gh_message=$(jq -r '.message // empty' < "$pr_response_file" 2>/dev/null || true)
-      pr_gh_errors=$(jq -r '(.errors // []) | map(
-        if .field then (.field + ": " + (.message // .code // "unknown"))
-        else (.message // .code // "unknown")
-        end) | join("; ")' < "$pr_response_file" 2>/dev/null || true)
-      echo "  ⚠ Could not create PR for $repo"
+      echo "  ⚠ Could not create PR for $repo after $max_attempts attempt(s)"
       [ -n "$pr_api_error" ] && echo "    API error: $pr_api_error"
-      [ -n "$pr_gh_message" ] && echo "    GitHub message: $pr_gh_message"
-      [ -n "$pr_gh_errors" ] && echo "    GitHub errors: $pr_gh_errors"
       echo "$repo" >> "$pr_failures_file"
     fi
-    rm -f "$pr_response_file" "$pr_error"
+    rm -f "$pr_error"
   else
     echo "  ℹ PR already exists for $repo (#$existing_pr)"
     echo "$repo" >> "$prs_created_file"
