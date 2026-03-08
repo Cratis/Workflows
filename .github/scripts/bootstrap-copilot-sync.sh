@@ -404,11 +404,27 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # ----------------------------------------------------------------
   # 11. Create PR (skip if one already exists for this branch)
   # ----------------------------------------------------------------
-  # Pause to let GitHub's internal ref processing complete before we
-  # attempt PR creation.  The Git Data API commits and refs are written
-  # synchronously, but GitHub's PR validation pipeline reads from a
-  # separate internal service that may lag slightly behind.
-  sleep 10
+  # Poll GET /repos/{owner}/{repo}/branches/{branch} until the branch
+  # is visible to the regular REST API (which shares the same replica
+  # as the PR-creation endpoint).  The Git Data API writes land
+  # immediately but the branches/pulls service may lag a few seconds.
+  branch_accessible=false
+  for wait_i in $(seq 1 6); do
+    branch_check=$(gh api "repos/Cratis/$repo/branches/$branch" \
+      --jq '.name' 2>/dev/null || true)
+    if [ "$branch_check" = "$branch" ]; then
+      branch_accessible=true
+      break
+    fi
+    echo "  ℹ Waiting for branch $branch to propagate (attempt $wait_i/6)..."
+    sleep 10
+  done
+
+  if [ "$branch_accessible" = "false" ]; then
+    echo "  ⚠ Branch $branch not accessible via branches API after 60s; skipping PR creation for $repo"
+    echo "$repo" >> "$pr_failures_file"
+    continue
+  fi
 
   # Use exit-code checking to distinguish a successful empty list
   # from a 403 error response (which must not be treated as a PR number).
@@ -424,25 +440,26 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$list_pr_error"
 
   if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
-    # Use gh pr create (backed by GraphQL) instead of the REST pulls
-    # endpoint.  The REST POST /repos/{owner}/{repo}/pulls returns
-    # "head: invalid" with HTTP 422 even when the branch exists because
-    # its head-validation path reads from a replica that may not yet
-    # reflect the newly created ref.  gh pr create uses the GraphQL
-    # createPullRequest mutation which resolves the head ref differently
-    # and does not exhibit the same replication-lag failure mode.
+    # Use the REST pulls endpoint directly.  `gh pr create --repo` resolves
+    # the head branch against the local git checkout (Cratis/Workflows),
+    # where it does not exist, causing "Head sha can't be blank" GraphQL
+    # errors.  The REST endpoint resolves the head branch name in the
+    # context of the target repository without any local git lookup.
     pr_error=$(mktemp)
     pr_created=false
-    max_attempts=4
+    max_attempts=3
     attempt_delay=15
 
     for attempt in $(seq 1 "$max_attempts"); do
-      if pr_url=$(gh pr create \
-        --repo "Cratis/$repo" \
-        --title "Bootstrap Copilot sync workflows" \
-        --body "$pr_body" \
-        --head "$branch" \
-        --base "$default_branch" 2>"$pr_error"); then
+      pr_response=$(gh api -X POST "repos/Cratis/$repo/pulls" \
+        -f title="Bootstrap Copilot sync workflows" \
+        -f body="$pr_body" \
+        -f head="$branch" \
+        -f base="$default_branch" \
+        2>"$pr_error" || true)
+      pr_url=$(echo "$pr_response" | jq -r '.html_url // empty' 2>/dev/null || true)
+
+      if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
         echo "  ✓ Created PR for $repo: $pr_url"
         echo "$repo" >> "$prs_created_file"
         pr_created=true
