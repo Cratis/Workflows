@@ -432,6 +432,12 @@ jobs:
             # ----------------------------------------------------------------
             # 11. Create PR (skip if one already exists for this branch)
             # ----------------------------------------------------------------
+            # Brief pause to let GitHub's API propagate the branch update before
+            # the PR creation endpoint is queried.  Without this delay the branch
+            # ref write and the PR creation read can race, causing a 422
+            # "Validation Failed / invalid head" error even when the branch exists.
+            sleep 3
+
             # Use exit-code checking to distinguish a successful empty list
             # from a 403 error response (which must not be treated as a PR number).
             existing_pr=""
@@ -448,14 +454,19 @@ jobs:
             if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
               pr_response_file=$(mktemp)
               pr_error=$(mktemp)
-              # Use owner:branch format for head — required for organization repositories
-              # even when the head branch lives in the same repo as the base.
-              if gh api -X POST "repos/Cratis/$repo/pulls" \
-                -f title="Bootstrap Copilot sync workflows" \
-                -f body="$pr_body" \
-                -f "head=Cratis:$branch" \
-                -f base="$default_branch" \
-                > "$pr_response_file" 2>"$pr_error"; then
+              # Build the PR payload via jq to guarantee correct JSON encoding of
+              # all fields (including multi-line body and non-ASCII characters).
+              # Pass just the branch name as head — for same-repository pull
+              # requests GitHub expects a plain branch name, not owner:branch
+              # (that format is for cross-repository / fork PRs only).
+              pr_payload=$(jq -n \
+                --arg title "Bootstrap Copilot sync workflows" \
+                --arg body  "$pr_body" \
+                --arg head  "$branch" \
+                --arg base  "$default_branch" \
+                '{"title": $title, "body": $body, "head": $head, "base": $base}')
+              if echo "$pr_payload" | gh api -X POST "repos/Cratis/$repo/pulls" \
+                --input - > "$pr_response_file" 2>"$pr_error"; then
                 pr_url=$(jq -r '.html_url // empty' < "$pr_response_file" 2>/dev/null || true)
                 echo "  ✓ Created PR for $repo: $pr_url"
                 echo "$repo" >> "$prs_created_file"
@@ -466,8 +477,12 @@ jobs:
                 # "Validation Failed") but the errors array contains the real reason
                 # (e.g. "No commits between main and add-copilot-sync-workflows", or
                 # "Resource not accessible by integration" for permission errors).
+                # Include the field name so we know which parameter is rejected.
                 pr_gh_message=$(jq -r '.message // empty' < "$pr_response_file" 2>/dev/null || true)
-                pr_gh_errors=$(jq -r '(.errors // []) | map(.message // .code // "unknown") | join("; ")' < "$pr_response_file" 2>/dev/null || true)
+                pr_gh_errors=$(jq -r '(.errors // []) | map(
+                  if .field then (.field + ": " + (.message // .code // "unknown"))
+                  else (.message // .code // "unknown")
+                  end) | join("; ")' < "$pr_response_file" 2>/dev/null || true)
                 echo "  ⚠ Could not create PR for $repo"
                 [ -n "$pr_api_error" ] && echo "    API error: $pr_api_error"
                 [ -n "$pr_gh_message" ] && echo "    GitHub message: $pr_gh_message"
