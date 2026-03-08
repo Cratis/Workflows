@@ -91,6 +91,25 @@ else
 fi
 rm -f "$ai_tree_error"
 
+# ================================================================
+# Pre-flight: verify PAT has write permission on target repositories
+# ================================================================
+probe_repo=$(echo "$repos" | jq -r '[.[] | select(. != "Workflows")][0] // empty')
+if [ -n "$probe_repo" ]; then
+  probe_perms=$(gh api "repos/Cratis/$probe_repo" --jq '.permissions.push // false' 2>/dev/null || true)
+  if [ "$probe_perms" != "true" ]; then
+    echo "::error::PAT_WORKFLOWS does not have write (push) access to Cratis/$probe_repo."
+    echo "The fine-grained PAT must be configured with:"
+    echo "  • Resource owner: Cratis"
+    echo "  • Repository access: All repositories"
+    echo "  • Permissions → Contents: Read and write"
+    echo "  • Permissions → Pull requests: Read and write"
+    echo "Update the PAT at: https://github.com/settings/personal-access-tokens"
+    exit 1
+  fi
+  echo "✓ PAT has write access to Cratis/$probe_repo (pre-flight check passed)"
+fi
+
 echo "$repos" | jq -r '.[]' | while read -r repo; do
   # Skip this repository (Workflows) — it holds the reusable workflows
   if [ "$repo" = "Workflows" ]; then
@@ -277,7 +296,13 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   if [ -z "$new_tree_sha" ]; then
     tree_api_error=$(cat "$tree_error" 2>/dev/null || true)
     echo "  ⚠ Could not create tree for $repo"
-    [ -n "$tree_api_error" ] && echo "    API error: $tree_api_error"
+    if echo "$tree_api_error" | grep -qi '403'; then
+      echo "    API error: $tree_api_error"
+      echo "    → PAT lacks 'Contents: Read and write' for this repo."
+      echo "    → Update PAT repository access at https://github.com/settings/personal-access-tokens"
+    else
+      [ -n "$tree_api_error" ] && echo "    API error: $tree_api_error"
+    fi
     rm -f "$tree_error"
     echo "$repo" >> "$failures_file"
     continue
