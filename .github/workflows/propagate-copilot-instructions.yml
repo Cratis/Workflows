@@ -2,7 +2,13 @@ name: Propagate Copilot Instructions
 # Reusable workflow that propagates Copilot instruction changes from the calling
 # repository to all other repositories in the Cratis organization.
 # This workflow requires PAT_WORKFLOWS secret with permissions:
-# - repo (to list repositories and trigger workflows)
+#   Classic PAT:       repo + workflow scopes
+#   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
+#                      + Workflows (read/write)
+#
+# NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
+# and GraphQL mutations to create branches and PRs directly — the same approach
+# used by the Bootstrap workflow.  No per-repository workflow dispatch is needed.
 
 on:
   workflow_call:
@@ -19,57 +25,28 @@ jobs:
     if: ${{ github.repository_owner == 'Cratis' }}
 
     steps:
+      - name: Checkout Workflows repository
+        uses: actions/checkout@v4
+        with:
+          repository: Cratis/Workflows
+          ref: main
+          token: ${{ secrets.PAT_WORKFLOWS }}
+
       - name: Get all Cratis repositories
-        id: get-repos
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
-          # Get all repositories in the Cratis organization (limit 1000 covers foreseeable growth)
-          repos=$(gh repo list Cratis --limit 1000 --json name --jq '.[].name')
+          # List all non-archived repos (limit 1000 covers foreseeable growth)
+          # Write to a workspace file to avoid the 21000-character expression
+          # length limit that applies when passing large values via step outputs.
+          gh repo list Cratis --limit 1000 --json name,isArchived \
+            --jq '[.[] | select(.isArchived == false) | .name]' \
+            > "$GITHUB_WORKSPACE/repos.json"
 
-          # Convert to JSON array
-          echo "repos<<EOF" >> $GITHUB_OUTPUT
-          echo "$repos" | jq -R -s -c 'split("\n") | map(select(length > 0))' >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Trigger sync workflow for each repository
+      - name: Propagate Copilot instructions to all repositories
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          SOURCE_REPO: ${{ github.repository }}
+          REPOS_FILE: ${{ github.workspace }}/repos.json
         run: |
-          repos='${{ steps.get-repos.outputs.repos }}'
-          source_repo="${{ github.repository }}"
-          source_repo_name="${{ github.event.repository.name }}"
-
-          # Repositories to always ignore for propagation
-          ignored_repos=("cratis.github.io" "Workflows")
-
-          echo "Triggering sync for repositories in Cratis organization (source: $source_repo)..."
-          echo "$repos" | jq -r '.[]' | while read -r repo; do
-            # Skip the source repository to avoid infinite loop
-            if [ "$repo" = "$source_repo_name" ]; then
-              echo "Skipping $repo (source repository)"
-              continue
-            fi
-
-            # Skip repositories in the ignore list
-            skip=false
-            for ignored in "${ignored_repos[@]}"; do
-              if [ "$repo" = "$ignored" ]; then
-                skip=true
-                break
-              fi
-            done
-            if [ "$skip" = "true" ]; then
-              echo "Skipping $repo (in ignore list)"
-              continue
-            fi
-
-            echo "Triggering sync for Cratis/$repo..."
-            if gh workflow run "sync-copilot-instructions.yml" \
-              --repo "Cratis/$repo" \
-              --raw-field source_repository="$source_repo" 2>&1; then
-              echo "  ✓ Successfully triggered workflow for $repo"
-            else
-              echo "  ⚠ Could not trigger workflow for $repo (workflow may not exist)"
-            fi
-          done
+          bash .github/scripts/propagate-copilot-instructions.sh

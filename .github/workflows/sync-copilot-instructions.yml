@@ -1,8 +1,15 @@
 name: Sync Copilot Instructions
-# Reusable workflow that synchronizes Copilot instructions from a source repository.
+# Reusable workflow that synchronizes Copilot instructions from a source repository
+# into the calling (target) repository by opening a PR with the changes.
+#
+# Uses the GitHub Git Data API (blobs/trees/commits) and GraphQL mutations to
+# create the branch and PR — the same approach used by the Bootstrap workflow.
+# No local git checkout or push of the target repository is required.
+#
 # This workflow requires PAT_WORKFLOWS secret with permissions:
-# - contents: write (to checkout and modify files)
-# - pull-requests: write (to create pull requests)
+#   Classic PAT:       repo + workflow scopes
+#   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
+#                      + Workflows (read/write)
 
 on:
   workflow_call:
@@ -16,103 +23,37 @@ on:
         required: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   sync-instructions:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout current repository
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          token: ${{ secrets.PAT_WORKFLOWS }}
-
       - name: Validate source repository input
         run: |
           input="${{ inputs.source_repository }}"
           if ! echo "$input" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
-            echo "Error: Invalid repository format. Expected 'owner/repo'"
+            echo "::error::Invalid repository format. Expected 'owner/repo'"
             exit 1
           fi
           owner="${input%%/*}"
           if [ "$owner" != "Cratis" ]; then
-            echo "Error: Source repository must belong to the Cratis organization (got '$owner')"
+            echo "::error::Source repository must belong to the Cratis organization (got '$owner')"
             exit 1
           fi
 
-      - name: Clone source repository
+      - name: Checkout Workflows repository
+        uses: actions/checkout@v4
+        with:
+          repository: Cratis/Workflows
+          ref: main
+          token: ${{ secrets.PAT_WORKFLOWS }}
+
+      - name: Sync Copilot instructions to current repository
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          SOURCE_REPO: ${{ inputs.source_repository }}
+          TARGET_REPO: ${{ github.repository }}
         run: |
-          gh repo clone "${{ inputs.source_repository }}" /tmp/source-repo
-
-      - name: Extract and copy Copilot instructions
-        run: |
-          mkdir -p .github
-
-          # Copy root Copilot instructions file if it exists
-          if [ -f "/tmp/source-repo/.github/copilot-instructions.md" ]; then
-            cp /tmp/source-repo/.github/copilot-instructions.md .github/copilot-instructions.md
-            echo "Copied copilot-instructions.md"
-          fi
-
-          # Copy instructions folder if it exists in source
-          if [ -d "/tmp/source-repo/.github/instructions" ]; then
-            rm -rf .github/instructions
-            cp -r /tmp/source-repo/.github/instructions .github/instructions
-            echo "Copied instructions folder"
-          fi
-
-          # Copy agents folder if it exists in source
-          if [ -d "/tmp/source-repo/.github/agents" ]; then
-            rm -rf .github/agents
-            cp -r /tmp/source-repo/.github/agents .github/agents
-            echo "Copied agents folder"
-          fi
-
-          # Copy skills folder if it exists in source
-          if [ -d "/tmp/source-repo/.github/skills" ]; then
-            rm -rf .github/skills
-            cp -r /tmp/source-repo/.github/skills .github/skills
-            echo "Copied skills folder"
-          fi
-
-          # Copy prompts folder if it exists in source
-          if [ -d "/tmp/source-repo/.github/prompts" ]; then
-            rm -rf .github/prompts
-            cp -r /tmp/source-repo/.github/prompts .github/prompts
-            echo "Copied prompts folder"
-          fi
-
-      - name: Configure git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.PAT_WORKFLOWS }}
-          commit-message: "Copilot Instructions synchronization from ${{ inputs.source_repository }}"
-          branch: "copilot-sync/${{ github.run_id }}-${{ github.run_attempt }}"
-          delete-branch: true
-          title: "Sync Copilot Instructions from ${{ inputs.source_repository }}"
-          body: |
-            This PR synchronizes Copilot instructions from [${{ inputs.source_repository }}](https://github.com/${{ inputs.source_repository }}).
-
-            ### Changes include:
-            - Updated `.github/copilot-instructions.md` (if present)
-            - Updated `.github/instructions/` folder (if present)
-            - Updated `.github/agents/` folder (if present)
-            - Updated `.github/skills/` folder (if present)
-            - Updated `.github/prompts/` folder (if present)
-
-            **Source repository:** ${{ inputs.source_repository }}
-            **Triggered by workflow run:** ${{ github.run_id }}
-            **Run attempt:** ${{ github.run_attempt }}
-          labels: |
-            automated
-            copilot-sync
+          bash .github/scripts/sync-copilot-instructions.sh
