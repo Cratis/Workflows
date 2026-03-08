@@ -8,6 +8,21 @@
 
 set -euo pipefail
 
+# Extract a SHA from a gh api JSON response.  Returns empty string if:
+#   - the response is empty
+#   - the jq path does not exist
+#   - the value is not a valid 40-char hex SHA
+# Usage: sha=$(extract_sha "$response" '.sha')
+extract_sha() {
+  local response="$1" jq_path="${2:-.sha}"
+  local val
+  val=$(echo "$response" | jq -r "$jq_path // empty" 2>/dev/null || true)
+  # Validate: must look like a git SHA (40 or 64 hex chars)
+  if [[ "$val" =~ ^[0-9a-f]{40,64}$ ]]; then
+    echo "$val"
+  fi
+}
+
 repos_file="${REPOS_FILE:-$GITHUB_WORKSPACE/repos.json}"
 repos=$(cat "$repos_file")
 
@@ -103,8 +118,9 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$repo_info_error"
 
   head_sha_error=$(mktemp)
-  head_sha=$(gh api "repos/Cratis/$repo/git/ref/heads/$default_branch" \
-    --jq '.object.sha' 2>"$head_sha_error" || true)
+  _head_sha_resp=$(gh api "repos/Cratis/$repo/git/ref/heads/$default_branch" \
+    2>"$head_sha_error" || true)
+  head_sha=$(extract_sha "$_head_sha_resp" '.object.sha')
   if [ -z "$head_sha" ]; then
     head_sha_api_error=$(cat "$head_sha_error" 2>/dev/null || true)
     echo "  ⚠ Could not get HEAD SHA for $repo ($default_branch branch not found), skipping"
@@ -118,8 +134,9 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 2. Get the commit's tree SHA
   # ----------------------------------------------------------------
   tree_sha_error=$(mktemp)
-  tree_sha=$(gh api "repos/Cratis/$repo/git/commits/$head_sha" \
-    --jq '.tree.sha' 2>"$tree_sha_error" || true)
+  _tree_sha_resp=$(gh api "repos/Cratis/$repo/git/commits/$head_sha" \
+    2>"$tree_sha_error" || true)
+  tree_sha=$(extract_sha "$_tree_sha_resp" '.tree.sha')
   if [ -z "$tree_sha" ]; then
     tree_sha_api_error=$(cat "$tree_sha_error" 2>/dev/null || true)
     echo "  ⚠ Could not get tree SHA for $repo, skipping"
@@ -150,13 +167,15 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   #    that rejects workflow file pushes without the "workflow" scope.
   # ----------------------------------------------------------------
   sync_blob_error=$(mktemp)
-  sync_blob_sha=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+  _sync_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
     -f content="$sync_b64" -f encoding=base64 \
-    --jq '.sha' 2>"$sync_blob_error" || true)
+    2>"$sync_blob_error" || true)
+  sync_blob_sha=$(extract_sha "$_sync_blob_resp")
   propagate_blob_error=$(mktemp)
-  propagate_blob_sha=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+  _prop_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
     -f content="$propagate_b64" -f encoding=base64 \
-    --jq '.sha' 2>"$propagate_blob_error" || true)
+    2>"$propagate_blob_error" || true)
+  propagate_blob_sha=$(extract_sha "$_prop_blob_resp")
 
   if [ -z "$sync_blob_sha" ] || [ -z "$propagate_blob_sha" ]; then
     echo "  ⚠ Could not create blobs for $repo"
@@ -250,9 +269,10 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 7. Create the new tree object
   # ----------------------------------------------------------------
   tree_error=$(mktemp)
-  new_tree_sha=$(echo "$new_tree_json" | \
+  _new_tree_resp=$(echo "$new_tree_json" | \
     gh api -X POST "repos/Cratis/$repo/git/trees" \
-    --input - --jq '.sha' 2>"$tree_error" || true)
+    --input - 2>"$tree_error" || true)
+  new_tree_sha=$(extract_sha "$_new_tree_resp")
 
   if [ -z "$new_tree_sha" ]; then
     tree_api_error=$(cat "$tree_error" 2>/dev/null || true)
@@ -268,13 +288,14 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 8. Create the commit
   # ----------------------------------------------------------------
   commit_error=$(mktemp)
-  new_commit_sha=$(jq -n \
+  _commit_resp=$(jq -n \
     --arg msg  "Bootstrap Copilot sync workflows" \
     --arg tree "$new_tree_sha" \
     --arg parent "$head_sha" \
     '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
     gh api -X POST "repos/Cratis/$repo/git/commits" \
-    --input - --jq '.sha' 2>"$commit_error" || true)
+    --input - 2>"$commit_error" || true)
+  new_commit_sha=$(extract_sha "$_commit_resp")
 
   if [ -z "$new_commit_sha" ]; then
     commit_api_error=$(cat "$commit_error" 2>/dev/null || true)
@@ -317,10 +338,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       clean_ai_b64=$(echo "$ai_blob_content" | tr -d '\n')
 
       target_blob_error=$(mktemp)
-      target_blob_sha=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+      _target_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
         -f "content=$clean_ai_b64" \
         -f encoding=base64 \
-        --jq '.sha' 2>"$target_blob_error" || true)
+        2>"$target_blob_error" || true)
+      target_blob_sha=$(extract_sha "$_target_blob_resp")
 
       if [ -z "$target_blob_sha" ]; then
         target_blob_api_error=$(cat "$target_blob_error" 2>/dev/null || true)
@@ -340,9 +362,10 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
     if [ "$ai_copy_failed" = "false" ]; then
       ai_second_tree_error=$(mktemp)
-      ai_second_tree_sha=$(echo "$ai_second_tree_json" | \
+      _ai_tree_resp=$(echo "$ai_second_tree_json" | \
         gh api -X POST "repos/Cratis/$repo/git/trees" \
-        --input - --jq '.sha' 2>"$ai_second_tree_error" || true)
+        --input - 2>"$ai_second_tree_error" || true)
+      ai_second_tree_sha=$(extract_sha "$_ai_tree_resp")
 
       if [ -z "$ai_second_tree_sha" ]; then
         ai_second_tree_api_error=$(cat "$ai_second_tree_error" 2>/dev/null || true)
@@ -350,13 +373,14 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
         [ -n "$ai_second_tree_api_error" ] && echo "    API error: $ai_second_tree_api_error"
       else
         ai_second_commit_error=$(mktemp)
-        ai_second_commit_sha=$(jq -n \
+        _ai_commit_resp=$(jq -n \
           --arg msg "Add initial Copilot setup from Cratis/AI" \
           --arg tree "$ai_second_tree_sha" \
           --arg parent "$new_commit_sha" \
           '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
           gh api -X POST "repos/Cratis/$repo/git/commits" \
-          --input - --jq '.sha' 2>"$ai_second_commit_error" || true)
+          --input - 2>"$ai_second_commit_error" || true)
+        ai_second_commit_sha=$(extract_sha "$_ai_commit_resp")
 
         if [ -z "$ai_second_commit_sha" ]; then
           ai_second_commit_api_error=$(cat "$ai_second_commit_error" 2>/dev/null || true)
