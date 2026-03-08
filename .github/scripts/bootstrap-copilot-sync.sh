@@ -404,35 +404,24 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # ----------------------------------------------------------------
   # 11. Create PR (skip if one already exists for this branch)
   # ----------------------------------------------------------------
-  # Poll the higher-level /branches/ endpoint (not git/ref/heads/) to
-  # confirm the branch is visible to the Pulls API.  The Git Data API
-  # (git/ref/heads/) uses a separate low-level ref store that propagates
-  # instantly, while the Pulls API and /branches/ share a branch index
-  # that updates asynchronously.  Polling git/ref/heads/ always succeeds
-  # immediately but gives no guarantee the Pulls API can see the branch.
+  # Confirm the branch ref is accessible via the Git Data API.  The
+  # fine-grained PAT has access to git/ref/heads/ but NOT the
+  # higher-level /branches/ endpoint (returns 404).  A short poll
+  # guards against any eventual-consistency lag after the ref write.
   branch_accessible=false
-  for wait_i in $(seq 1 10); do
-    branch_check_err=$(mktemp)
-    branch_check=$(gh api "repos/Cratis/$repo/branches/$branch" \
-      --jq '.name' 2>"$branch_check_err" || true)
-    if [ -n "$branch_check" ] && [ "$branch_check" = "$branch" ]; then
-      rm -f "$branch_check_err"
+  for wait_i in $(seq 1 6); do
+    branch_check=$(gh api "repos/Cratis/$repo/git/ref/heads/$branch" \
+      --jq '.object.sha' 2>/dev/null || true)
+    if [ -n "$branch_check" ]; then
       branch_accessible=true
       break
     fi
-    branch_check_api_err=$(cat "$branch_check_err" 2>/dev/null || true)
-    rm -f "$branch_check_err"
-    if [ "$wait_i" -le 2 ]; then
-      : # Quiet for the first couple of polls
-    else
-      [ -n "$branch_check_api_err" ] && echo "  ℹ Branch check: $branch_check_api_err"
-      echo "  ℹ Waiting for branch $branch to appear in branch index (attempt $wait_i/10)..."
-    fi
-    sleep 10
+    echo "  ℹ Waiting for branch ref to propagate (attempt $wait_i/6)..."
+    sleep 5
   done
 
   if [ "$branch_accessible" = "false" ]; then
-    echo "  ⚠ Branch $branch not visible via /branches/ API after 100s; skipping PR creation for $repo"
+    echo "  ⚠ Branch $branch not accessible via Git Data API after 30s; skipping PR for $repo"
     echo "$repo" >> "$pr_failures_file"
     continue
   fi
@@ -450,31 +439,34 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$list_pr_error"
 
   if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
-    # Get repository node ID for Graph QL.
+    # Get repository node ID for GraphQL mutation.
     repo_node_id=$(gh api "repos/Cratis/$repo" --jq '.node_id' 2>/dev/null || true)
 
     pr_created=false
 
     # ------------------------------------------------------------------
     # Strategy 1: GraphQL createPullRequest mutation
-    # Unlike `gh pr create` (which resolves the head branch from the
-    # local git checkout), the raw GraphQL mutation resolves headRefName
-    # within the repository identified by repositoryId.  This eliminates
-    # the "Head sha can't be blank" error.
-    # Unlike the REST POST /repos/{owner}/{repo}/pulls endpoint, the
-    # GraphQL Pulls resolver shares the same branch index as /branches/,
-    # so once /branches/ sees the branch, GraphQL will too.
+    # The raw GraphQL mutation resolves headRefName within the
+    # repository identified by repositoryId — no local git checkout
+    # needed and no cross-repo branch resolution issues.
     # ------------------------------------------------------------------
     if [ -n "$repo_node_id" ]; then
       pr_error=$(mktemp)
-      pr_response=$(gh api graphql \
-        -f query='mutation($repoId:ID!,$base:String!,$head:String!,$title:String!,$body:String!){createPullRequest(input:{repositoryId:$repoId,baseRefName:$base,headRefName:$head,title:$title,body:$body}){pullRequest{url}}}' \
-        -f repoId="$repo_node_id" \
-        -f base="$default_branch" \
-        -f head="$branch" \
-        -f title="Bootstrap Copilot sync workflows" \
-        -f body="$pr_body" \
-        2>"$pr_error" || true)
+      # Write the body to a temp file so we can pass it cleanly via --input
+      # without any shell escaping issues with backticks/newlines/markdown.
+      gql_input_file=$(mktemp)
+      jq -n \
+        --arg query 'mutation($repoId:ID!,$base:String!,$head:String!,$title:String!,$body:String!){createPullRequest(input:{repositoryId:$repoId,baseRefName:$base,headRefName:$head,title:$title,body:$body}){pullRequest{url}}}' \
+        --arg repoId "$repo_node_id" \
+        --arg base "$default_branch" \
+        --arg head "$branch" \
+        --arg title "Bootstrap Copilot sync workflows" \
+        --arg body "$pr_body" \
+        '{query:$query,variables:{repoId:$repoId,base:$base,head:$head,title:$title,body:$body}}' \
+        > "$gql_input_file"
+
+      pr_response=$(gh api graphql --input "$gql_input_file" 2>"$pr_error" || true)
+      rm -f "$gql_input_file"
 
       pr_url=$(echo "$pr_response" | jq -r '.data.createPullRequest.pullRequest.url // empty' 2>/dev/null || true)
       if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
@@ -484,12 +476,15 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       else
         gql_err=$(cat "$pr_error" 2>/dev/null || true)
         gql_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
+        gql_data_errors=$(echo "$pr_response" | jq -r '(.data.createPullRequest.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
         echo "  ℹ GraphQL PR creation failed for $repo"
         [ -n "$gql_err" ] && echo "    stderr: $gql_err"
         [ -n "$gql_errors" ] && echo "    GraphQL errors: $gql_errors"
+        [ -n "$gql_data_errors" ] && echo "    Mutation errors: $gql_data_errors"
+        echo "    Full response: $(echo "$pr_response" | head -c 800)"
 
         # Check for "already exists" in GraphQL error
-        if echo "$gql_errors" | grep -qi "already exists"; then
+        if echo "$gql_errors$gql_data_errors" | grep -qi "already exists"; then
           echo "  ℹ PR already exists for $repo (detected via GraphQL error)"
           echo "$repo" >> "$prs_created_file"
           pr_created=true
@@ -499,24 +494,28 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     fi
 
     # ------------------------------------------------------------------
-    # Strategy 2: REST API fallback with Cratis:branch head format
+    # Strategy 2: REST API fallback with JSON body via --input
+    # Pass the full payload as JSON file to avoid any shell escaping
+    # issues with the PR body (contains markdown, backticks, URLs).
     # ------------------------------------------------------------------
     if [ "$pr_created" = "false" ]; then
       echo "  ℹ Trying REST API fallback for $repo..."
       pr_error=$(mktemp)
+      rest_input_file=$(mktemp)
 
-      # Build JSON payload with jq to ensure proper escaping of the body
-      pr_payload=$(jq -n \
+      jq -n \
         --arg title "Bootstrap Copilot sync workflows" \
         --arg body "$pr_body" \
-        --arg head "Cratis:$branch" \
+        --arg head "$branch" \
         --arg base "$default_branch" \
-        '{title:$title, body:$body, head:$head, base:$base}')
+        '{title:$title, body:$body, head:$head, base:$base}' \
+        > "$rest_input_file"
 
-      pr_response=$(echo "$pr_payload" | \
-        gh api -X POST "repos/Cratis/$repo/pulls" \
-        --input - \
+      pr_response=$(gh api -X POST "repos/Cratis/$repo/pulls" \
+        --input "$rest_input_file" \
         2>"$pr_error" || true)
+      rm -f "$rest_input_file"
+
       pr_url=$(echo "$pr_response" | jq -r '.html_url // empty' 2>/dev/null || true)
 
       if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
@@ -527,11 +526,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
         rest_err=$(cat "$pr_error" 2>/dev/null || true)
         rest_msg=$(echo "$pr_response" | jq -r '.message // empty' 2>/dev/null || true)
         rest_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-        echo "  ⚠ REST API PR creation also failed for $repo"
+        echo "  ⚠ REST PR creation also failed for $repo"
         [ -n "$rest_err" ] && echo "    stderr: $rest_err"
         [ -n "$rest_msg" ] && echo "    GitHub message: $rest_msg"
         [ -n "$rest_errors" ] && echo "    Validation errors: $rest_errors"
-        echo "    Full response: $(echo "$pr_response" | head -c 500)"
+        echo "    Full response: $(echo "$pr_response" | head -c 800)"
 
         # Handle known 422 cases gracefully
         if echo "$rest_errors$rest_msg" | grep -qi "already exists"; then
