@@ -41,7 +41,7 @@ jobs:
           # List all non-archived repos, excluding the source repo and a fixed
           # ignore list.  The result is a compact JSON array used as the matrix.
           repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
-            --jq --arg src "$source_name" \
+            | jq --arg src "$source_name" \
             '[.[] | select(.isArchived == false) | .name
               | select(. != $src)
               | select(. != "cratis.github.io")
