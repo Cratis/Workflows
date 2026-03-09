@@ -144,16 +144,24 @@ new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
 while IFS=' ' read -r src_path src_sha; do
   [ -z "$src_path" ] && continue
 
-  # Fetch blob content from source repo (returned as base64 by API)
+  # Fetch blob content from source repo (returned as base64 by API).
+  # NOTE: zero-byte files return {"content":"","encoding":"base64"} — the
+  # content field is legitimately empty.  We must check whether the API call
+  # itself succeeded (non-empty JSON response), not whether content is empty.
   blob_error=$(mktemp)
-  blob_content=$(gh api "repos/${source_repo}/git/blobs/${src_sha}" \
-    --jq '.content' 2>"$blob_error" || true)
+  blob_resp=$(gh api "repos/${source_repo}/git/blobs/${src_sha}" \
+    2>"$blob_error" || true)
+  blob_api_error=$(cat "$blob_error" 2>/dev/null || true)
   rm -f "$blob_error"
 
-  if [ -z "$blob_content" ]; then
+  if [ -z "$blob_resp" ]; then
     echo "::error::Could not fetch blob for ${src_path} from ${source_repo}"
+    [ -n "$blob_api_error" ] && echo "  API error: $blob_api_error"
     exit 1
   fi
+
+  # Extract content; empty string is valid for zero-byte files
+  blob_content=$(echo "$blob_resp" | jq -r '.content' 2>/dev/null || true)
 
   # Strip embedded newlines that the API inserts into base64 output
   clean_b64=$(echo "$blob_content" | tr -d '\n')
