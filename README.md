@@ -44,6 +44,9 @@ on:
       - ".github/copilot-instructions.md"
       - ".github/instructions/**"
       - ".github/agents/**"
+      - ".github/skills/**"
+      - ".github/prompts/**"
+  workflow_dispatch:
 
 jobs:
   propagate:
@@ -162,7 +165,24 @@ One-time setup workflow. For every non-archived repository in the Cratis organiz
 
 Re-running the workflow is safe — it skips repositories where the PR branch already exists.
 
-**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Pull requests** + **Workflows** read/write
+
+---
+
+### `update-synced-workflows.yml`
+
+**Trigger:** `workflow_dispatch` (run manually when wrapper workflow templates change)
+
+Propagates the latest wrapper workflow files to all Cratis repositories. Run this workflow whenever the installed wrapper templates in this repository change (for example, when a new trigger or input is added).
+
+For each non-archived repository (except `Workflows` itself), it:
+
+1. Skips repositories where both wrapper files already match the latest version.
+2. Skips repositories where neither wrapper file is present (not yet bootstrapped — run `bootstrap-copilot-sync.yml` first).
+3. Creates or force-updates a branch `update-synced-workflows` with a commit that updates the two wrapper workflow files.
+4. Opens a pull request targeting the repository's default branch.
+
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Pull requests** + **Workflows** read/write
 
 ---
 
