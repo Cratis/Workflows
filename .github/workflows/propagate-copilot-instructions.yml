@@ -9,6 +9,10 @@ name: Propagate Copilot Instructions
 # NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
 # and GraphQL mutations to create branches and PRs directly — the same approach
 # used by the Bootstrap workflow.  No per-repository workflow dispatch is needed.
+#
+# Repositories are processed in parallel using a dynamic matrix built from the
+# list of non-archived Cratis repositories (excluding the source repo and a small
+# ignore list).  Each matrix job handles exactly one target repository.
 
 on:
   workflow_call:
@@ -20,9 +24,38 @@ permissions:
   contents: read
 
 jobs:
-  propagate:
+  get-repos:
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'Cratis' }}
+    outputs:
+      repos: ${{ steps.list-repos.outputs.repos }}
+
+    steps:
+      - name: Get all Cratis repositories
+        id: list-repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          SOURCE_REPO: ${{ github.repository }}
+        run: |
+          source_name="${SOURCE_REPO##*/}"
+          # List all non-archived repos, excluding the source repo and a fixed
+          # ignore list.  The result is a compact JSON array used as the matrix.
+          repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
+            --jq --arg src "$source_name" \
+            '[.[] | select(.isArchived == false) | .name
+              | select(. != $src)
+              | select(. != "cratis.github.io")
+              | select(. != "Workflows")]')
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+
+  propagate:
+    needs: get-repos
+    if: ${{ needs.get-repos.outputs.repos != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.get-repos.outputs.repos) }}
+      fail-fast: false
 
     steps:
       - name: Checkout Workflows repository
@@ -32,21 +65,10 @@ jobs:
           ref: main
           token: ${{ secrets.PAT_WORKFLOWS }}
 
-      - name: Get all Cratis repositories
-        env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
-        run: |
-          # List all non-archived repos (limit 1000 covers foreseeable growth)
-          # Write to a workspace file to avoid the 21000-character expression
-          # length limit that applies when passing large values via step outputs.
-          gh repo list Cratis --limit 1000 --json name,isArchived \
-            --jq '[.[] | select(.isArchived == false) | .name]' \
-            > "$GITHUB_WORKSPACE/repos.json"
-
-      - name: Propagate Copilot instructions to all repositories
+      - name: Propagate Copilot instructions to ${{ matrix.repo }}
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           SOURCE_REPO: ${{ github.repository }}
-          REPOS_FILE: ${{ github.workspace }}/repos.json
+          TARGET_REPO: ${{ matrix.repo }}
         run: |
           bash .github/scripts/propagate-copilot-instructions.sh
