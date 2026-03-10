@@ -8,7 +8,7 @@
 #   copilot_files    - JSON array of {path, sha} objects
 #
 # After sourcing, copilot_files will be updated in place (filtered).
-# The script exits 0 if all files are excluded (nothing to sync).
+# Returns 1 if all files are excluded (caller should handle the exit).
 
 _apply_copilot_sync_ignore() {
   local ignore_sha
@@ -41,7 +41,7 @@ _apply_copilot_sync_ignore() {
     [ -z "$pattern" ] && continue
     [[ "$pattern" == \#* ]] && continue
 
-    # Normalise: ensure .github/ prefix
+    # Normalize: ensure .github/ prefix
     [[ "$pattern" != .github/* ]] && pattern=".github/${pattern}"
 
     # Convert glob → regex (order matters: ** before *)
@@ -74,7 +74,7 @@ _apply_copilot_sync_ignore() {
     echo "  Excluded ${excluded} file(s) matching .copilot-sync-ignore patterns"
   fi
 
-  if [ "$copilot_files" = "[]" ] || [ -z "$copilot_files" ]; then
+  if [ "$copilot_files" = "[]" ]; then
     return 1
   fi
 
