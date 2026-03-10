@@ -56,69 +56,13 @@ echo "✓ Found $(echo "$copilot_files" | jq 'length') Copilot file(s) in ${sour
 # ----------------------------------------------------------------
 # Filter out files matching .copilot-sync-ignore patterns
 # ----------------------------------------------------------------
-ignore_sha=$(echo "$source_tree_raw" | jq -r \
-  '.tree[] | select(.path == ".github/.copilot-sync-ignore") | .sha // empty' \
-  2>/dev/null || true)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=copilot-sync-ignore-filter.sh
+source "${SCRIPT_DIR}/copilot-sync-ignore-filter.sh"
 
-if [ -n "$ignore_sha" ]; then
-  echo "ℹ Found .copilot-sync-ignore in ${source_repo}"
-  ignore_blob=$(gh api "repos/${source_repo}/git/blobs/${ignore_sha}" \
-    --jq '.content' 2>/dev/null || true)
-  ignore_content=$(echo "$ignore_blob" | base64 -d 2>/dev/null || true)
-
-  if [ -n "$ignore_content" ]; then
-    # Build a combined regex from all non-comment, non-empty lines.
-    # Each glob pattern is converted to a regex:
-    #   **  → .*          (match across directories)
-    #   *   → [^/]*       (match within a single directory)
-    #   ?   → [^/]        (match a single character)
-    #   .   → \.          (literal dot)
-    # Patterns without a .github/ prefix get one prepended automatically.
-    combined_regex=""
-    while IFS= read -r pattern || [ -n "$pattern" ]; do
-      pattern=$(echo "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      [ -z "$pattern" ] && continue
-      [[ "$pattern" == \#* ]] && continue
-
-      # Normalise: ensure .github/ prefix
-      [[ "$pattern" != .github/* ]] && pattern=".github/${pattern}"
-
-      # Convert glob → regex (order matters: ** before *)
-      regex=$(printf '%s' "$pattern" \
-        | sed -e 's/\*\*/__GLOBSTAR__/g' \
-              -e 's/\*/__STAR__/g' \
-              -e 's/\./\\./g' \
-              -e 's/?/[^\/]/g' \
-              -e 's/__GLOBSTAR__/.*/g' \
-              -e 's/__STAR__/[^\/]*/g')
-
-      if [ -n "$combined_regex" ]; then
-        combined_regex="${combined_regex}|^${regex}$"
-      else
-        combined_regex="^${regex}$"
-      fi
-    done <<< "$ignore_content"
-
-    if [ -n "$combined_regex" ]; then
-      before_count=$(echo "$copilot_files" | jq 'length')
-      copilot_files=$(echo "$copilot_files" | jq -c \
-        --arg regex "$combined_regex" \
-        '[.[] | select(.path | test($regex) | not)]')
-      after_count=$(echo "$copilot_files" | jq 'length')
-      excluded=$((before_count - after_count))
-
-      if [ "$excluded" -gt 0 ]; then
-        echo "  Excluded ${excluded} file(s) matching .copilot-sync-ignore patterns"
-      fi
-
-      if [ "$copilot_files" = "[]" ] || [ -z "$copilot_files" ]; then
-        echo "All Copilot files excluded by .copilot-sync-ignore — nothing to propagate."
-        exit 0
-      fi
-
-      echo "✓ After filtering: ${after_count} file(s) to propagate"
-    fi
-  fi
+if ! _apply_copilot_sync_ignore; then
+  echo "All Copilot files excluded by .copilot-sync-ignore — nothing to propagate."
+  exit 0
 fi
 
 echo "Processing Cratis/${repo}..."
