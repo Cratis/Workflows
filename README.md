@@ -79,6 +79,36 @@ The artifacts that are synchronized are:
 | `.github/copilot-instructions.md` | Root Copilot instructions file |
 | `.github/instructions/` | Folder of scoped instruction files |
 | `.github/agents/` | Folder of custom agent definitions |
+| `.github/skills/` | Folder of skill files |
+| `.github/prompts/` | Folder of prompt files |
+
+### Excluding files from synchronization
+
+If a repository contains Copilot artifacts that are specific to that repository and should **not** be synced to other repos, create a `.github/.copilot-sync-ignore` file in the source repository. It works like a `.gitignore` — list one glob pattern per line.
+
+```text
+# Skills that are specific to this repository
+skills/repo-specific-skill.md
+
+# A whole subfolder of instructions
+instructions/local-only/
+
+# Wildcard examples
+skills/experimental-*
+prompts/draft-?.md
+```
+
+**Rules:**
+
+| Feature | Syntax |
+|---|---|
+| Comment | Lines starting with `#` |
+| Single-segment wildcard | `*` — matches any characters except `/` |
+| Multi-segment wildcard | `**` — matches across directory boundaries |
+| Single-character wildcard | `?` — matches exactly one character |
+| `.github/` prefix | Optional — `skills/foo.md` and `.github/skills/foo.md` are equivalent |
+
+When the sync or propagate workflow encounters this file in the source repository, any matching Copilot files are excluded before the PR is created in the target repository.
 
 ### Propagation flow
 

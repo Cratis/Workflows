@@ -70,6 +70,18 @@ fi
 echo "✓ Found $(echo "$copilot_files" | jq 'length') Copilot file(s) in ${source_repo}"
 
 # ----------------------------------------------------------------
+# 1b. Filter out files matching .copilot-sync-ignore patterns
+# ----------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=copilot-sync-ignore-filter.sh
+source "${SCRIPT_DIR}/copilot-sync-ignore-filter.sh"
+
+if ! _apply_copilot_sync_ignore; then
+  echo "All Copilot files excluded by .copilot-sync-ignore — nothing to sync."
+  exit 0
+fi
+
+# ----------------------------------------------------------------
 # 2. Get target repository info (default branch, node ID, HEAD SHA)
 # ----------------------------------------------------------------
 repo_info_error=$(mktemp)

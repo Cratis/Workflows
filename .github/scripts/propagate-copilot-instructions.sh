@@ -53,6 +53,18 @@ if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
 fi
 echo "✓ Found $(echo "$copilot_files" | jq 'length') Copilot file(s) in ${source_repo}"
 
+# ----------------------------------------------------------------
+# Filter out files matching .copilot-sync-ignore patterns
+# ----------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=copilot-sync-ignore-filter.sh
+source "${SCRIPT_DIR}/copilot-sync-ignore-filter.sh"
+
+if ! _apply_copilot_sync_ignore; then
+  echo "All Copilot files excluded by .copilot-sync-ignore — nothing to propagate."
+  exit 0
+fi
+
 echo "Processing Cratis/${repo}..."
 
 # ----------------------------------------------------------------
