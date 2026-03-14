@@ -47,6 +47,9 @@ jobs:
           # other repos (including back to repo A's dependants).
           commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
             --jq '.message' 2>/dev/null || true)
+          # Case-insensitive match: covers both the exact commit message written by the
+          # sync scripts ("Sync Copilot instructions from …") and any variation that
+          # may arise from squash/rebase merges where the title casing differs.
           if echo "$commit_msg" | grep -qiE '(^Sync Copilot instructions from|copilot-sync/update-instructions)'; then
             echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
             echo "repos=[]" >> "$GITHUB_OUTPUT"
