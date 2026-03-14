@@ -127,13 +127,62 @@ fi
 rm -f "$subtree_error"
 
 # ----------------------------------------------------------------
-# 3. Check whether all copilot files are already up to date
+# 3. Check for an existing sync branch and open PR early.
+#    This determines the correct comparison baseline for the
+#    "up to date" check below: when a PR is already open we compare
+#    the source against the sync branch tree so that new source
+#    changes are always committed to the existing PR rather than
+#    being silently skipped because the default branch looks current.
+# ----------------------------------------------------------------
+existing_ref_result=$(gh api graphql \
+  -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){id target{oid}}}}' \
+  -f owner="Cratis" \
+  -f name="$repo" \
+  -f ref="refs/heads/${branch}" \
+  2>/dev/null || true)
+existing_ref_id=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.id // empty' 2>/dev/null || true)
+existing_branch_sha=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.target.oid // empty' 2>/dev/null || true)
+
+existing_pr=""
+list_pr_error=$(mktemp)
+if api_result=$(gh api "repos/Cratis/${repo}/pulls?state=open&head=Cratis:${branch}" 2>"$list_pr_error"); then
+  existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
+else
+  list_pr_api_error=$(cat "$list_pr_error" 2>/dev/null || true)
+  echo "⚠ Could not list PRs for ${repo}"
+  [ -n "$list_pr_api_error" ] && echo "  API error: $list_pr_api_error"
+fi
+rm -f "$list_pr_error"
+
+# When a PR is open, compare the source against the sync branch tree
+# so we only skip if the PR branch already carries the latest changes.
+# When there is no PR, fall back to comparing against the default branch.
+comparison_subtree="$subtree"
+if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ] && \
+   [ -n "$existing_branch_sha" ] && [ "$existing_branch_sha" != "null" ]; then
+  echo "ℹ Open PR #${existing_pr} found for ${repo} — comparing source against sync branch"
+  sync_tree_sha_error=$(mktemp)
+  _sync_tree_sha_resp=$(gh api "repos/Cratis/${repo}/git/commits/${existing_branch_sha}" \
+    2>"$sync_tree_sha_error" || true)
+  sync_tree_sha=$(extract_sha "$_sync_tree_sha_resp" '.tree.sha')
+  rm -f "$sync_tree_sha_error"
+  if [ -n "$sync_tree_sha" ]; then
+    sync_subtree_error=$(mktemp)
+    sync_subtree=$(gh api "repos/Cratis/${repo}/git/trees/${sync_tree_sha}?recursive=1" \
+      2>"$sync_subtree_error" || true)
+    rm -f "$sync_subtree_error"
+    [ -n "$sync_subtree" ] && comparison_subtree="$sync_subtree"
+  fi
+fi
+
+# ----------------------------------------------------------------
+# 4. Check whether all copilot files are already up to date
 #    (git blob SHAs are content-addressed across repositories)
 # ----------------------------------------------------------------
 files_up_to_date=true
 while IFS=' ' read -r chk_path chk_sha; do
   [ -z "$chk_path" ] && continue
-  existing_sha=$(echo "$subtree" | jq -r \
+  existing_sha=$(echo "$comparison_subtree" | jq -r \
     --arg p "$chk_path" \
     '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
   if [ "$existing_sha" != "$chk_sha" ]; then
@@ -143,12 +192,16 @@ while IFS=' ' read -r chk_path chk_sha; do
 done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
 
 if [ "$files_up_to_date" = "true" ]; then
-  echo "ℹ No changes needed for ${repo} (files already up to date)"
+  if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ]; then
+    echo "ℹ PR #${existing_pr} for ${repo} is already up to date with the source"
+  else
+    echo "ℹ No changes needed for ${repo} (files already up to date)"
+  fi
   exit 0
 fi
 
 # ----------------------------------------------------------------
-# 4. Create blobs in the target repository for each source file
+# 5. Create blobs in the target repository for each source file
 # ----------------------------------------------------------------
 new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
   '{"base_tree": $base_tree, "tree": []}')
@@ -198,7 +251,7 @@ while IFS=' ' read -r src_path src_sha; do
 done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
 
 # ----------------------------------------------------------------
-# 5. Create new tree and commit
+# 6. Create new tree and commit
 # ----------------------------------------------------------------
 new_tree_error=$(mktemp)
 _new_tree_resp=$(echo "$new_tree_json" | \
@@ -235,22 +288,17 @@ fi
 rm -f "$commit_error"
 
 # ----------------------------------------------------------------
-# 6. Create or force-update the feature branch via GraphQL
+# 7. Create or force-update the feature branch via GraphQL
 #
 # GraphQL createRef/updateRef register the branch in GitHub's branch
 # index, which is required for the Pulls API and createPullRequest
 # mutation.  REST low-level ref writes do NOT register in the index.
+#
+# existing_ref_id was resolved earlier (before the up-to-date check)
+# so we reuse it here instead of issuing a second query.
 # ----------------------------------------------------------------
 branch_error=$(mktemp)
 branch_ok=""
-
-existing_ref_result=$(gh api graphql \
-  -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){id target{oid}}}}' \
-  -f owner="Cratis" \
-  -f name="$repo" \
-  -f ref="refs/heads/${branch}" \
-  2>/dev/null || true)
-existing_ref_id=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.id // empty' 2>/dev/null || true)
 
 if [ -n "$existing_ref_id" ] && [ "$existing_ref_id" != "null" ]; then
   branch_result=$(gh api graphql \
@@ -288,21 +336,13 @@ rm -f "$branch_error"
 echo "✓ Branch ${branch} ready for ${repo} (GraphQL)"
 
 # ----------------------------------------------------------------
-# 7. Create PR (skip if one already exists for this branch)
+# 8. Create PR, or confirm the existing PR was updated
 # ----------------------------------------------------------------
-existing_pr=""
-list_pr_error=$(mktemp)
-if api_result=$(gh api "repos/Cratis/${repo}/pulls?state=open&head=Cratis:${branch}" 2>"$list_pr_error"); then
-  existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
-else
-  list_pr_api_error=$(cat "$list_pr_error" 2>/dev/null || true)
-  echo "⚠ Could not list PRs for ${repo}"
-  [ -n "$list_pr_api_error" ] && echo "  API error: $list_pr_api_error"
-fi
-rm -f "$list_pr_error"
 
+# If a PR was already open we have already force-pushed the sync
+# branch above, so the PR now reflects the latest changes.
 if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ]; then
-  echo "ℹ PR already exists for ${repo} (#${existing_pr})"
+  echo "✓ Updated existing PR #${existing_pr} for ${repo} with latest Copilot changes"
   exit 0
 fi
 

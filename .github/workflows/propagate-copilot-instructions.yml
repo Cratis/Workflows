@@ -36,8 +36,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           SOURCE_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           source_name="${SOURCE_REPO##*/}"
+
+          # Skip propagation when the commit that triggered this run is itself
+          # a Copilot sync commit (squash / rebase merge) or the merge commit
+          # of a copilot-sync branch.  This prevents an infinite loop where
+          # merging a sync PR in repo A would immediately re-propagate to all
+          # other repos (including back to repo A's dependants).
+          commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
+            --jq '.message' 2>/dev/null || true)
+          if echo "$commit_msg" | grep -qiE '(^Sync Copilot instructions from|copilot-sync/update-instructions)'; then
+            echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
+            echo "repos=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # List all non-archived repos, excluding the source repo and a fixed
           # ignore list.  The result is a compact JSON array used as the matrix.
           repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
