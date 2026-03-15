@@ -51,6 +51,8 @@ on:
 jobs:
   propagate:
     uses: Cratis/Workflows/.github/workflows/propagate-copilot-instructions.yml@main
+    with:
+      event_name: ${{ github.event_name }}
     secrets: inherit
 ```
 

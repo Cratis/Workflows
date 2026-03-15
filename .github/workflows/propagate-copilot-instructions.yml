@@ -16,6 +16,12 @@ name: Propagate Copilot Instructions
 
 on:
   workflow_call:
+    inputs:
+      event_name:
+        description: 'The event that triggered the caller workflow (e.g. push, workflow_dispatch)'
+        required: false
+        type: string
+        default: 'push'
     secrets:
       PAT_WORKFLOWS:
         required: true
@@ -37,12 +43,16 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           SOURCE_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ inputs.event_name }}
         run: |
           source_name="${SOURCE_REPO##*/}"
 
           # Skip propagation when the triggering commit is itself a Copilot sync
           # commit (squash or rebase merge of a sync PR).  This prevents a repo
           # from immediately re-propagating content it just received.
+          #
+          # This guard is bypassed for manual triggers (workflow_dispatch) so that
+          # a user can always force a propagation regardless of the last commit message.
           #
           # We match only the exact commit message written by the sync scripts
           # ("Sync Copilot instructions from …").  We intentionally do NOT match
@@ -53,12 +63,14 @@ jobs:
           # sync PRs from other canonical sources.  For regular merges the
           # propagation proceeds; the per-repo "up to date" content check in the
           # propagation script naturally prevents creating redundant PRs.
-          commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
-            --jq '.message' 2>/dev/null || true)
-          if echo "$commit_msg" | grep -qiE '^Sync Copilot instructions from'; then
-            echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
-            echo "repos=[]" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ "${EVENT_NAME:-push}" != "workflow_dispatch" ]; then
+            commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
+              --jq '.message' 2>/dev/null || true)
+            if echo "$commit_msg" | grep -qiE '^Sync Copilot instructions from'; then
+              echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
+              echo "repos=[]" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
           # List all non-archived repos, excluding the source repo and a fixed
