@@ -40,17 +40,22 @@ jobs:
         run: |
           source_name="${SOURCE_REPO##*/}"
 
-          # Skip propagation when the commit that triggered this run is itself
-          # a Copilot sync commit (squash / rebase merge) or the merge commit
-          # of a copilot-sync branch.  This prevents an infinite loop where
-          # merging a sync PR in repo A would immediately re-propagate to all
-          # other repos (including back to repo A's dependants).
+          # Skip propagation when the triggering commit is itself a Copilot sync
+          # commit (squash or rebase merge of a sync PR).  This prevents a repo
+          # from immediately re-propagating content it just received.
+          #
+          # We match only the exact commit message written by the sync scripts
+          # ("Sync Copilot instructions from …").  We intentionally do NOT match
+          # on the branch name "copilot-sync/update-instructions" because that
+          # pattern also matches regular merge commits ("Merge pull request #N
+          # from …/copilot-sync/update-instructions"), which would incorrectly
+          # suppress propagation in repos that regularly receive — and merge —
+          # sync PRs from other canonical sources.  For regular merges the
+          # propagation proceeds; the per-repo "up to date" content check in the
+          # propagation script naturally prevents creating redundant PRs.
           commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
             --jq '.message' 2>/dev/null || true)
-          # Case-insensitive match: covers both the exact commit message written by the
-          # sync scripts ("Sync Copilot instructions from …") and any variation that
-          # may arise from squash/rebase merges where the title casing differs.
-          if echo "$commit_msg" | grep -qiE '(^Sync Copilot instructions from|copilot-sync/update-instructions)'; then
+          if echo "$commit_msg" | grep -qiE '^Sync Copilot instructions from'; then
             echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
             echo "repos=[]" >> "$GITHUB_OUTPUT"
             exit 0
