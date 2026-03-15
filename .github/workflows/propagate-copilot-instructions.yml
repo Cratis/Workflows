@@ -18,7 +18,7 @@ on:
   workflow_call:
     inputs:
       event_name:
-        description: 'The event that triggered the caller workflow (e.g. push, workflow_dispatch)'
+        description: 'Fallback event name if the Actions API run lookup fails (e.g. push, workflow_dispatch). The workflow primarily determines the trigger event via the API.'
         required: false
         type: string
         default: 'push'
@@ -54,6 +54,15 @@ jobs:
           # This guard is bypassed for manual triggers (workflow_dispatch) so that
           # a user can always force a propagation regardless of the last commit message.
           #
+          # We determine the trigger event by querying the GitHub Actions API for
+          # this workflow run.  In a reusable workflow, GITHUB_RUN_ID refers to the
+          # caller's run, so the API returns the event that actually triggered the
+          # calling workflow (e.g. 'workflow_dispatch' for manual triggers, 'push'
+          # for push events).  This is more reliable than the event_name input
+          # because it works even when callers do not explicitly forward
+          # github.event_name.  The event_name input is kept as a fallback in case
+          # the API call fails.
+          #
           # We match only the exact commit message written by the sync scripts
           # ("Sync Copilot instructions from …").  We intentionally do NOT match
           # on the branch name "copilot-sync/update-instructions" because that
@@ -63,7 +72,13 @@ jobs:
           # sync PRs from other canonical sources.  For regular merges the
           # propagation proceeds; the per-repo "up to date" content check in the
           # propagation script naturally prevents creating redundant PRs.
-          if [ "${EVENT_NAME:-push}" != "workflow_dispatch" ]; then
+          actual_event=$(gh api "repos/${SOURCE_REPO}/actions/runs/${GITHUB_RUN_ID}" \
+            --jq '.event' 2>/dev/null || true)
+          if [ -z "$actual_event" ]; then
+            actual_event="${EVENT_NAME:-push}"
+          fi
+
+          if [ "$actual_event" != "workflow_dispatch" ]; then
             commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
               --jq '.message' 2>/dev/null || true)
             if echo "$commit_msg" | grep -qiE '^Sync Copilot instructions from'; then
