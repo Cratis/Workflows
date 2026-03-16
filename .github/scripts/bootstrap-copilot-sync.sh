@@ -62,6 +62,7 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #         - ".github/agents/**"
 #         - ".github/skills/**"
 #         - ".github/prompts/**"
+#         - ".github/hooks/**"
 #     workflow_dispatch:
 #   jobs:
 #     propagate:
@@ -69,9 +70,9 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #       with:
 #         event_name: ${{ github.event_name }}
 #       secrets: inherit
-propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmdpdGh1Yi9jb3BpbG90LWluc3RydWN0aW9ucy5tZCIKICAgICAgLSAiLmdpdGh1Yi9pbnN0cnVjdGlvbnMvKioiCiAgICAgIC0gIi5naXRodWIvYWdlbnRzLyoqIgogICAgICAtICIuZ2l0aHViL3NraWxscy8qKiIKICAgICAgLSAiLmdpdGh1Yi9wcm9tcHRzLyoqIgogIHdvcmtmbG93X2Rpc3BhdGNoOgoKam9iczoKICBwcm9wYWdhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3Byb3BhZ2F0ZS1jb3BpbG90LWluc3RydWN0aW9ucy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgZXZlbnRfbmFtZTogJHt7IGdpdGh1Yi5ldmVudF9uYW1lIH19CiAgICBzZWNyZXRzOiBpbmhlcml0Cg=="
+propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmdpdGh1Yi9jb3BpbG90LWluc3RydWN0aW9ucy5tZCIKICAgICAgLSAiLmdpdGh1Yi9pbnN0cnVjdGlvbnMvKioiCiAgICAgIC0gIi5naXRodWIvYWdlbnRzLyoqIgogICAgICAtICIuZ2l0aHViL3NraWxscy8qKiIKICAgICAgLSAiLmdpdGh1Yi9wcm9tcHRzLyoqIgogICAgICAtICIuZ2l0aHViL2hvb2tzLyoqIgogIHdvcmtmbG93X2Rpc3BhdGNoOgoKam9iczoKICBwcm9wYWdhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3Byb3BhZ2F0ZS1jb3BpbG90LWluc3RydWN0aW9ucy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgZXZlbnRfbmFtZTogJHt7IGdpdGh1Yi5ldmVudF9uYW1lIH19CiAgICBzZWNyZXRzOiBpbmhlcml0Cg=="
 
-pr_body=$'Bootstraps centralized Copilot instruction management for this repository.\n\n### Changes\n\n**Removed** (if present):\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder\n- `.github/agents/` folder\n- `.github/skills/` folder\n- `.github/prompts/` folder\n\n**Added**:\n- `.github/workflows/sync-copilot-instructions.yml` \u2014 triggered via `workflow_dispatch` to pull Copilot instructions from a source repository and open a PR with the changes.\n- `.github/workflows/propagate-copilot-instructions.yml` \u2014 triggered on push to `main` when Copilot instruction files change, propagating updates to all Cratis repositories.\n\n**Copied from [Cratis/AI](https://github.com/Cratis/AI)**:\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder (if present)\n- `.github/agents/` folder (if present)\n- `.github/skills/` folder (if present)\n- `.github/prompts/` folder (if present)\n\nThe actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place. Copilot instructions will be managed centrally and synced to this repository via the workflows above.'
+pr_body=$'Bootstraps centralized Copilot instruction management for this repository.\n\n### Changes\n\n**Removed** (if present):\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder\n- `.github/agents/` folder\n- `.github/skills/` folder\n- `.github/prompts/` folder\n- `.github/hooks/` folder\n\n**Added**:\n- `.github/workflows/sync-copilot-instructions.yml` \u2014 triggered via `workflow_dispatch` to pull Copilot instructions from a source repository and open a PR with the changes.\n- `.github/workflows/propagate-copilot-instructions.yml` \u2014 triggered on push to `main` when Copilot instruction files change, propagating updates to all Cratis repositories.\n\n**Copied from [Cratis/AI](https://github.com/Cratis/AI)**:\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder (if present)\n- `.github/agents/` folder (if present)\n- `.github/skills/` folder (if present)\n- `.github/prompts/` folder (if present)\n- `.github/hooks/` folder (if present)\n\nThe actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place. Copilot instructions will be managed centrally and synced to this repository via the workflows above.'
 
 branch="add-copilot-sync-workflows"
 
@@ -82,7 +83,7 @@ ai_tree_raw=$(gh api "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_er
 if [ -n "$ai_tree_raw" ]; then
   ai_copilot_files=$(echo "$ai_tree_raw" | jq -c \
     '[.tree[] | select(.type == "blob") |
-     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/)")) |
+     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
      {path: .path, sha: .sha}]' 2>/dev/null || true)
 fi
 if [ -z "$ai_copilot_files" ] || [ "$ai_copilot_files" = "[]" ]; then
@@ -230,10 +231,10 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
   # List all blob paths under .github/ that belong to Copilot instruction
   # artefacts we want to remove: the root instructions file, plus the
-  # instructions/, agents/, skills/, and prompts/ sub-directories.
+  # instructions/, agents/, skills/, prompts/, and hooks/ sub-directories.
   files_to_delete=$(echo "$subtree" | jq -r \
     '.tree[] | select(.type == "blob") |
-     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/)")) |
+     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
      .path' 2>/dev/null || true)
 
   # Check whether Copilot files from Cratis/AI are already present in
