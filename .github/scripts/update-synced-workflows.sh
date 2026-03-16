@@ -63,6 +63,7 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #         - ".github/agents/**"
 #         - ".github/skills/**"
 #         - ".github/prompts/**"
+#         - ".github/hooks/**"
 #     workflow_dispatch:
 #   jobs:
 #     propagate:
@@ -70,7 +71,7 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #       with:
 #         event_name: ${{ github.event_name }}
 #       secrets: inherit
-propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmdpdGh1Yi9jb3BpbG90LWluc3RydWN0aW9ucy5tZCIKICAgICAgLSAiLmdpdGh1Yi9pbnN0cnVjdGlvbnMvKioiCiAgICAgIC0gIi5naXRodWIvYWdlbnRzLyoqIgogICAgICAtICIuZ2l0aHViL3NraWxscy8qKiIKICAgICAgLSAiLmdpdGh1Yi9wcm9tcHRzLyoqIgogIHdvcmtmbG93X2Rpc3BhdGNoOgoKam9iczoKICBwcm9wYWdhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3Byb3BhZ2F0ZS1jb3BpbG90LWluc3RydWN0aW9ucy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgZXZlbnRfbmFtZTogJHt7IGdpdGh1Yi5ldmVudF9uYW1lIH19CiAgICBzZWNyZXRzOiBpbmhlcml0Cg=="
+propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmdpdGh1Yi9jb3BpbG90LWluc3RydWN0aW9ucy5tZCIKICAgICAgLSAiLmdpdGh1Yi9pbnN0cnVjdGlvbnMvKioiCiAgICAgIC0gIi5naXRodWIvYWdlbnRzLyoqIgogICAgICAtICIuZ2l0aHViL3NraWxscy8qKiIKICAgICAgLSAiLmdpdGh1Yi9wcm9tcHRzLyoqIgogICAgICAtICIuZ2l0aHViL2hvb2tzLyoqIgogIHdvcmtmbG93X2Rpc3BhdGNoOgoKam9iczoKICBwcm9wYWdhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3Byb3BhZ2F0ZS1jb3BpbG90LWluc3RydWN0aW9ucy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgZXZlbnRfbmFtZTogJHt7IGdpdGh1Yi5ldmVudF9uYW1lIH19CiAgICBzZWNyZXRzOiBpbmhlcml0Cg=="
 
 pr_body=$'Updates the centralized Copilot sync wrapper workflows in this repository to the latest version from [Cratis/Workflows](https://github.com/Cratis/Workflows).\n\n### Changes\n\n**Updated**:\n- `.github/workflows/sync-copilot-instructions.yml`\n- `.github/workflows/propagate-copilot-instructions.yml`\n\nThese files are thin wrappers that delegate to the reusable workflows in [Cratis/Workflows](https://github.com/Cratis/Workflows). Merging this PR ensures the repository uses the latest wrapper definitions.'
 

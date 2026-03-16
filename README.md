@@ -46,6 +46,7 @@ on:
       - ".github/agents/**"
       - ".github/skills/**"
       - ".github/prompts/**"
+      - ".github/hooks/**"
   workflow_dispatch:
 
 jobs:
@@ -83,6 +84,7 @@ The artifacts that are synchronized are:
 | `.github/agents/` | Folder of custom agent definitions |
 | `.github/skills/` | Folder of skill files |
 | `.github/prompts/` | Folder of prompt files |
+| `.github/hooks/` | Folder of hook files |
 
 ### Excluding files from synchronization
 

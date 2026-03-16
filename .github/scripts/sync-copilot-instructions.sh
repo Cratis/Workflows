@@ -39,6 +39,7 @@ pr_body="Synchronizes Copilot instruction files from [${source_repo}](https://gi
 - Updated \`.github/agents/\` folder (if present in source)
 - Updated \`.github/skills/\` folder (if present in source)
 - Updated \`.github/prompts/\` folder (if present in source)
+- Updated \`.github/hooks/\` folder (if present in source)
 
 **Source repository:** ${source_repo}"
 
@@ -59,7 +60,7 @@ fi
 
 copilot_files=$(echo "$source_tree_raw" | jq -c \
   '[.tree[] | select(.type == "blob") |
-   select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/)")) |
+   select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
    {path: .path, sha: .sha}]' 2>/dev/null || true)
 
 if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
