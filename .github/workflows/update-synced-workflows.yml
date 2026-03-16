@@ -1,7 +1,9 @@
 name: Update Synced Workflows
 # Propagates the latest wrapper workflow files to all Cratis repositories.
-# Run this workflow manually whenever the wrapper workflow templates in this
-# repository change (e.g. new trigger added to propagate-copilot-instructions.yml).
+# Triggered automatically on push to main whenever the wrapper templates
+# change (e.g. a new CoPilot folder path added to propagate_b64, or a new
+# trigger added to the propagate wrapper).  Can also be run manually at any
+# time via workflow_dispatch.
 #
 # For each non-archived repository in the Cratis organization (except Workflows
 # itself), the workflow:
@@ -19,6 +21,10 @@ name: Update Synced Workflows
 #                      + Workflows (read/write)
 
 on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/scripts/update-synced-workflows.sh"
   workflow_dispatch:
 
 permissions:
