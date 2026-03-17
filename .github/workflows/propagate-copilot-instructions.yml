@@ -26,6 +26,11 @@ on:
       PAT_WORKFLOWS:
         required: true
 
+env:
+  # Repositories to skip when propagating Copilot instructions.
+  # Add any repo name here that should never receive propagated changes.
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues"]'
+
 permissions:
   contents: read
 
@@ -88,14 +93,14 @@ jobs:
             fi
           fi
 
-          # List all non-archived repos, excluding the source repo and a fixed
-          # ignore list.  The result is a compact JSON array used as the matrix.
+          # List all non-archived repos, excluding the source repo and the
+          # repos in REPOS_TO_IGNORE.  The result is a compact JSON array
+          # used as the matrix.
           repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
-            | jq -c --arg src "$source_name" \
+            | jq -c --arg src "$source_name" --argjson ignore "$REPOS_TO_IGNORE" \
             '[.[] | select(.isArchived == false) | .name
               | select(. != $src)
-              | select(. != "cratis.github.io")
-              | select(. != "Workflows")]')
+              | select(. as $n | ($ignore | index($n)) == null)]')
           echo "repos=$repos" >> "$GITHUB_OUTPUT"
 
   propagate:
