@@ -57,15 +57,15 @@ jobs:
     secrets: inherit
 ```
 
-Both workflows require the `PAT_DOCUMENTATION` secret to be set in the repository or inherited from the organization.
+Both wrapper workflows require the `PAT_WORKFLOWS` secret to be set in the repository or inherited from the organization.
 
 | PAT type | Required permissions |
 |---|---|
 | Classic PAT | `repo` scope (full repository access) |
-| Fine-grained PAT | **Contents** (read/write) + **Pull requests** (read/write) + **Metadata** (read) |
+| Fine-grained PAT | **Contents** (read/write) + **Metadata** (read) |
 
 > [!IMPORTANT]
-> If `PAT_DOCUMENTATION` is a fine-grained PAT you **must** grant **Pull requests: Read and write** in addition to Contents. Without it the bootstrap and sync workflows will be able to create branches but will fail to open pull requests, leaving orphan branches behind.
+> The propagation workflow pushes directly to the default branch of each target repository. The GitHub user account that owns `PAT_WORKFLOWS` must therefore be configured as a **bypass actor** on every target repository's branch protection ruleset. See [Branch protection setup](#branch-protection-setup) below for the exact steps.
 
 ---
 
@@ -112,7 +112,7 @@ prompts/draft-?.md
 | Single-character wildcard | `?` — matches exactly one character |
 | `.github/` prefix | Optional — `skills/foo.md` and `.github/skills/foo.md` are equivalent |
 
-When the sync or propagate workflow encounters this file in the source repository, any matching Copilot files are excluded before the PR is created in the target repository.
+When the `.copilot-sync-ignore` file is present in the source repository, any matching Copilot files are excluded before the changes are pushed to the target repository.
 
 ### Propagation flow
 
@@ -122,41 +122,39 @@ When Copilot instruction files are pushed to `main` in any Cratis repository:
 sequenceDiagram
     participant Source as Source Repo<br/>(e.g. Chronicle)
     participant Propagate as propagate-copilot-instructions<br/>(Cratis/Workflows)
-    participant Sync as sync-copilot-instructions<br/>(Cratis/Workflows)
     participant Target as Target Repo<br/>(e.g. Arc, Fundamentals, …)
 
     Source->>Propagate: push to main<br/>(copilot paths changed)
     Propagate->>Propagate: Validate caller is Cratis org
     Propagate->>Propagate: List all Cratis repositories
     loop For each target repo (except source)
-        Propagate->>Target: Trigger sync-copilot-instructions<br/>(source_repository = Source)
-        Target->>Sync: workflow_call
-        Sync->>Sync: Validate source is Cratis org
-        Sync->>Source: Clone source repo
-        Sync->>Target: Copy copilot artifacts
-        Sync->>Target: Open PR with changes
+        Propagate->>Source: Fetch copilot files
+        Propagate->>Target: Create blob/tree/commit objects
+        Propagate->>Target: Push commit directly to main<br/>(commit message: "Sync Copilot instructions from …")
+        Note over Target: Commit message guard prevents<br/>recursive re-propagation
     end
 ```
+
+**Anti-loop guard:** the propagated commit message starts with `Sync Copilot instructions from`, which the propagation workflow detects on the next push event and skips — preventing a recursive trigger chain.
 
 ### Sync workflow detail
 
 ```mermaid
 flowchart TD
-    A([workflow_dispatch / workflow_call\nsource_repository input]) --> B{Validate format\nand Cratis org}
+    A([workflow_dispatch\nsource_repository input]) --> B{Validate format\nand Cratis org}
     B -- invalid --> Z([Exit with error])
-    B -- valid --> C[Checkout target repo]
-    C --> D[Clone source repo]
-    D --> E{copilot-instructions.md\nexists in source?}
-    E -- yes --> F[Copy to .github/]
-    E -- no --> G
-    F --> G{instructions/ folder\nexists in source?}
-    G -- yes --> H[Replace .github/instructions/]
-    G -- no --> I
-    H --> I{agents/ folder\nexists in source?}
-    I -- yes --> J[Replace .github/agents/]
-    I -- no --> K
-    J --> K[Create PR with changes]
-    K --> L([Done])
+    B -- valid --> C[Fetch source repo tree via API]
+    C --> D{copilot-instructions.md\nexists in source?}
+    D -- yes --> E[Copy to target .github/]
+    D -- no --> F
+    E --> F{instructions/ folder\nexists in source?}
+    F -- yes --> G[Replace .github/instructions/]
+    F -- no --> H
+    G --> H{agents/ folder\nexists in source?}
+    H -- yes --> I[Replace .github/agents/]
+    H -- no --> J
+    I --> J[Open PR with changes]
+    J --> K([Done])
 ```
 
 ---
@@ -167,7 +165,7 @@ flowchart TD
 
 **Trigger:** `workflow_call` (invoked by each target repository)
 
-Clones the `source_repository`, extracts the Copilot artifacts, and opens a pull request in the calling repository with the synchronized changes.
+Fetches the Copilot artifacts from the `source_repository` via the GitHub API and opens a pull request in the calling repository with the synchronized changes.
 
 **Inputs:**
 
@@ -175,15 +173,21 @@ Clones the `source_repository`, extracts the Copilot artifacts, and opens a pull
 |---|---|---|
 | `source_repository` | ✅ | Source repository in `owner/repo` format. Must belong to the Cratis organization. |
 
-**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write + **Metadata** read
+
+---
+
+### `propagate-copilot-instructions.yml`
 
 **Trigger:** `workflow_call` (invoked by the source repository on push to `main`)
 
-Lists all repositories in the Cratis organization and triggers `sync-copilot-instructions.yml` in each one (except the caller). Silently skips repositories where the workflow file does not exist.
+Lists all repositories in the Cratis organization and pushes the Copilot instruction files directly to the default branch of each one (except the caller). Silently skips repositories where files are already up to date.
+
+**Anti-loop protection:** commits made by this workflow start with `Sync Copilot instructions from`, which the workflow detects on subsequent pushes and skips — preventing recursive propagation chains.
 
 **Validation:** Exits early if the calling repository does not belong to the `Cratis` organization.
 
-**Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** + **Pull requests** read/write
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** read/write + **Metadata** read. The PAT owner must be a bypass actor on each target repository's branch protection ruleset.
 
 ---
 
@@ -235,3 +239,50 @@ Use this workflow to clean up orphan branches left behind by a partial or failed
 | `branch` | No | `add-copilot-sync-workflows` | Name of the branch to delete across all repositories |
 
 **Secrets required:** `PAT_DOCUMENTATION` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** read/write
+
+---
+
+## Branch protection setup
+
+Because `propagate-copilot-instructions.yml` pushes directly to each target repository's default branch, you must grant the PAT owner permission to bypass the normal branch protection rules. Use GitHub **Repository Rulesets** (not the legacy "Branch protection rules") so that you can add a precise bypass actor.
+
+### Steps (repeat for every target repository)
+
+1. Go to **Settings → Rules → Rulesets** in the target repository.
+2. Click **New ruleset → New branch ruleset**.
+3. Set **Target branches** to the default branch (e.g. `main`).
+4. Enable the rule **Require a pull request before merging** (and any other rules you want, such as required status checks).
+5. Under **Bypass list**, click **Add bypass** and add the GitHub user account that owns `PAT_WORKFLOWS`. Set the bypass role to **Always**.
+6. Save the ruleset.
+
+> [!TIP]
+> If you manage many repositories you can create the ruleset at the **organization level** (Organization Settings → Rules → Rulesets), target all repositories, and add the bypass actor once.
+
+### Path enforcement
+
+The bypass actor can technically push any content to the default branch. The workflow enforces the path constraint in code — it only ever commits files under:
+
+```
+.github/copilot-instructions.md
+.github/instructions/
+.github/agents/
+.github/skills/
+.github/prompts/
+.github/hooks/
+```
+
+For an extra layer of defence you can add a **Restrict file paths** rule to the ruleset that blocks direct changes to files *outside* these paths from all other actors. The bypass actor is exempt from this restriction, but since the bypass is scoped to a dedicated service account whose only use is this workflow, the effective risk is minimal.
+
+### Choosing the PAT owner
+
+Use a dedicated GitHub service-account (bot user) for `PAT_WORKFLOWS`, not a personal developer account. This makes the bypass list easy to audit and ensures the token is never accidentally shared with workflows that should not have direct-push access.
+
+### Anti-loop protection
+
+Every commit created by the propagation workflow uses the message:
+
+```
+Sync Copilot instructions from <owner>/<repo>
+```
+
+The `propagate-copilot-instructions.yml` workflow in each target repository detects this prefix on the next `push` event and exits without triggering another round of propagation, preventing recursive loops.
