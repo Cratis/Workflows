@@ -1,9 +1,18 @@
 name: Bootstrap Copilot Sync
-# Bootstrap workflow that creates PRs in all Cratis repositories to:
-# 1. Delete any existing Copilot instruction files (clean slate)
-# 2. Add thin wrapper workflows that delegate to the reusable workflows in this repository.
-# 3. Copy the initial Copilot setup from Cratis/AI.
-# Trigger this workflow manually to set up (or re-set up) all repositories.
+# Ensures all Cratis repositories have the Copilot sync wrapper workflows
+# installed and up-to-date, and that the initial Copilot setup from Cratis/AI
+# is in place.  Handles both initial bootstrap (new repos) and ongoing updates
+# (when the wrapper workflow content or Copilot files change):
+#
+#  • New repos:               adds the two wrapper workflows and copies the
+#                             initial Copilot setup from Cratis/AI.
+#  • Already-bootstrapped:    updates wrapper workflows and Copilot files if
+#                             the content has changed since last run.
+#  • Already up-to-date:      skips processing; closes any stale open PRs.
+#
+# Triggered automatically on push to main whenever this script changes
+# (e.g. updated wrapper content or a new Copilot folder path).  Can also
+# be run manually at any time via workflow_dispatch.
 #
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
@@ -15,10 +24,15 @@ name: Bootstrap Copilot Sync
 # on POST /git/trees when the tree contains .github/workflows/ paths, so the
 # PAT must include the Workflows permission.
 #
-# Re-running this workflow is safe: it force-updates the branch to a clean state
-# and skips repos where a PR already exists.
+# Re-running this workflow is safe: it force-updates the branch to a clean state,
+# skips repos where a PR already exists, and closes stale PRs when no changes
+# are needed.
 
 on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/scripts/bootstrap-copilot-sync.sh"
   workflow_dispatch:
 
 permissions:
