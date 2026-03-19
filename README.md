@@ -114,6 +114,27 @@ prompts/draft-?.md
 
 When the sync or propagate workflow encounters this file in the source repository, any matching Copilot files are excluded before the PR is created in the target repository.
 
+### Opting out of specific files on the receiving side
+
+If a target repository wants to reject specific Copilot artifacts from being synced into it, create a `.github/.copilot-sync-receive-ignore` file **in the target repository**. It uses the exact same pattern syntax as `.copilot-sync-ignore`.
+
+```text
+# This is a CLI tool — we don't need frontend or EF Core instructions
+instructions/csharp-efcore.md
+instructions/frontend/**
+skills/react-*.md
+
+# We maintain our own hooks
+hooks/**
+```
+
+When both files exist, the source-side `.copilot-sync-ignore` is applied first (removing files the source doesn't want to send), then the target-side `.copilot-sync-receive-ignore` is applied (removing files the target doesn't want to receive).
+
+| File | Location | Controls |
+|---|---|---|
+| `.github/.copilot-sync-ignore` | Source repo | Which files the source does **not send** |
+| `.github/.copilot-sync-receive-ignore` | Target repo | Which files the target does **not accept** |
+
 ### Propagation flow
 
 When Copilot instruction files are pushed to `main` in any Cratis repository:

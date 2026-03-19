@@ -134,6 +134,17 @@ if [ -z "$subtree" ]; then
 fi
 
 # ----------------------------------------------------------------
+# 3b. Filter out files the target repo does not want to receive
+# ----------------------------------------------------------------
+target_tree_raw="$subtree"
+target_repo_name="${target_repo}"
+
+if ! _apply_copilot_sync_receive_ignore; then
+  echo "All Copilot files excluded by .copilot-sync-receive-ignore in ${target_repo} — nothing to sync."
+  exit 0
+fi
+
+# ----------------------------------------------------------------
 # 4. Check for an existing sync branch and open PR early.
 #    This determines the correct comparison baseline for the
 #    "up to date" check below: when a PR is already open we compare
