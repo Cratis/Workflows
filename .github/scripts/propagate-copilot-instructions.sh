@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Propagates Copilot instruction files from the source repository to a single
-# target repository in the Cratis organization, opening a PR with the changes.
+# target repository in the Cratis organization, pushing the commit directly to
+# the default branch (no PR).
 # Called by .github/workflows/propagate-copilot-instructions.yml for each
 # matrix job (one per target repository).
 #
 # Expects:
-#   GH_TOKEN      - PAT with Contents (r/w) + Pull requests (r/w) + Workflows (r/w)
+#   GH_TOKEN      - PAT with Contents (r/w).  The PAT owner must be a bypass
+#                   actor on the target repository's branch protection ruleset
+#                   so that the direct push to the default branch is allowed.
 #   SOURCE_REPO   - source repository in owner/repo format (e.g. Cratis/AI)
 #   TARGET_REPO   - target repository name (e.g. Chronicle)
 
@@ -28,8 +31,6 @@ extract_sha() {
 
 source_repo="${SOURCE_REPO:?SOURCE_REPO must be set}"
 repo="${TARGET_REPO:?TARGET_REPO must be set}"
-
-branch="copilot-sync/update-instructions"
 
 # ----------------------------------------------------------------
 # Fetch Copilot files from the source repository
@@ -68,14 +69,12 @@ fi
 echo "Processing Cratis/${repo}..."
 
 # ----------------------------------------------------------------
-# 1. Get default branch, HEAD SHA, and repository node ID
+# 1. Get default branch and HEAD SHA
 # ----------------------------------------------------------------
 repo_info_error=$(mktemp)
-repo_info_json=$(gh api "repos/Cratis/${repo}" \
-  --jq '{default_branch: .default_branch, node_id: .node_id}' \
+default_branch=$(gh api "repos/Cratis/${repo}" \
+  --jq '.default_branch' \
   2>"$repo_info_error" || true)
-default_branch=$(echo "$repo_info_json" | jq -r '.default_branch // empty' 2>/dev/null || true)
-repo_node_id=$(echo "$repo_info_json" | jq -r '.node_id // empty' 2>/dev/null || true)
 if [ -z "$default_branch" ]; then
   repo_info_api_error=$(cat "$repo_info_error" 2>/dev/null || true)
   echo "::error::Could not get default branch for ${repo}"
@@ -127,62 +126,13 @@ fi
 rm -f "$subtree_error"
 
 # ----------------------------------------------------------------
-# 3. Check for an existing sync branch and open PR early.
-#    This determines the correct comparison baseline for the
-#    "up to date" check below: when a PR is already open we compare
-#    the source against the sync branch tree so that new source
-#    changes are always committed to the existing PR rather than
-#    being silently skipped because the default branch looks current.
-# ----------------------------------------------------------------
-existing_ref_result=$(gh api graphql \
-  -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){id target{oid}}}}' \
-  -f owner="Cratis" \
-  -f name="$repo" \
-  -f ref="refs/heads/${branch}" \
-  2>/dev/null || true)
-existing_ref_id=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.id // empty' 2>/dev/null || true)
-existing_branch_sha=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.target.oid // empty' 2>/dev/null || true)
-
-existing_pr=""
-list_pr_error=$(mktemp)
-if api_result=$(gh api "repos/Cratis/${repo}/pulls?state=open&head=Cratis:${branch}" 2>"$list_pr_error"); then
-  existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
-else
-  list_pr_api_error=$(cat "$list_pr_error" 2>/dev/null || true)
-  echo "⚠ Could not list PRs for ${repo}"
-  [ -n "$list_pr_api_error" ] && echo "  API error: $list_pr_api_error"
-fi
-rm -f "$list_pr_error"
-
-# When a PR is open, compare the source against the sync branch tree
-# so we only skip if the PR branch already carries the latest changes.
-# When there is no PR, fall back to comparing against the default branch.
-comparison_subtree="$subtree"
-if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ] && \
-   [ -n "$existing_branch_sha" ] && [ "$existing_branch_sha" != "null" ]; then
-  echo "ℹ Open PR #${existing_pr} found for ${repo} — comparing source against sync branch"
-  sync_tree_sha_error=$(mktemp)
-  _sync_tree_sha_resp=$(gh api "repos/Cratis/${repo}/git/commits/${existing_branch_sha}" \
-    2>"$sync_tree_sha_error" || true)
-  sync_tree_sha=$(extract_sha "$_sync_tree_sha_resp" '.tree.sha')
-  rm -f "$sync_tree_sha_error"
-  if [ -n "$sync_tree_sha" ]; then
-    sync_subtree_error=$(mktemp)
-    sync_subtree=$(gh api "repos/Cratis/${repo}/git/trees/${sync_tree_sha}?recursive=1" \
-      2>"$sync_subtree_error" || true)
-    rm -f "$sync_subtree_error"
-    [ -n "$sync_subtree" ] && comparison_subtree="$sync_subtree"
-  fi
-fi
-
-# ----------------------------------------------------------------
-# 4. Check whether all copilot files are already up to date
+# 3. Check whether all copilot files are already up to date
 #    (git blob SHAs are content-addressed across repositories)
 # ----------------------------------------------------------------
 files_up_to_date=true
 while IFS=' ' read -r chk_path chk_sha; do
   [ -z "$chk_path" ] && continue
-  existing_sha=$(echo "$comparison_subtree" | jq -r \
+  existing_sha=$(echo "$subtree" | jq -r \
     --arg p "$chk_path" \
     '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
   if [ "$existing_sha" != "$chk_sha" ]; then
@@ -192,16 +142,12 @@ while IFS=' ' read -r chk_path chk_sha; do
 done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
 
 if [ "$files_up_to_date" = "true" ]; then
-  if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ]; then
-    echo "ℹ PR #${existing_pr} for ${repo} is already up to date with the source"
-  else
-    echo "ℹ No changes needed for ${repo} (files already up to date)"
-  fi
+  echo "ℹ No changes needed for ${repo} (files already up to date)"
   exit 0
 fi
 
 # ----------------------------------------------------------------
-# 5. Create blobs in the target repository for each source file
+# 4. Create blobs in the target repository for each source file
 # ----------------------------------------------------------------
 new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
   '{"base_tree": $base_tree, "tree": []}')
@@ -251,7 +197,7 @@ while IFS=' ' read -r src_path src_sha; do
 done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
 
 # ----------------------------------------------------------------
-# 6. Create new tree and commit
+# 5. Create new tree and commit
 # ----------------------------------------------------------------
 new_tree_error=$(mktemp)
 _new_tree_resp=$(echo "$new_tree_json" | \
@@ -287,168 +233,32 @@ if [ -z "$new_commit_sha" ]; then
 fi
 rm -f "$commit_error"
 
-# ----------------------------------------------------------------
-# 7. Create or force-update the feature branch via GraphQL
-#
-# GraphQL createRef/updateRef register the branch in GitHub's branch
-# index, which is required for the Pulls API and createPullRequest
-# mutation.  REST low-level ref writes do NOT register in the index.
-#
-# existing_ref_id was resolved earlier (before the up-to-date check)
-# so we reuse it here instead of issuing a second query.
-# ----------------------------------------------------------------
-branch_error=$(mktemp)
-branch_ok=""
+echo "✓ Created commit ${new_commit_sha} in ${repo}"
 
-if [ -n "$existing_ref_id" ] && [ "$existing_ref_id" != "null" ]; then
-  branch_result=$(gh api graphql \
-    -f query='mutation($refId:ID!,$oid:GitObjectID!){updateRef(input:{refId:$refId,oid:$oid,force:true}){ref{name target{oid}}}}' \
-    -f refId="$existing_ref_id" \
-    -f oid="$new_commit_sha" \
-    2>"$branch_error" || true)
-  branch_ok=$(echo "$branch_result" | jq -r '.data.updateRef.ref.name // empty' 2>/dev/null || true)
-else
-  if [ -z "$repo_node_id" ]; then
-    echo "::error::No repository node ID for ${repo}; cannot create branch via GraphQL"
-    rm -f "$branch_error"
-    exit 1
-  fi
-  branch_result=$(gh api graphql \
-    -f query='mutation($repoId:ID!,$name:String!,$oid:GitObjectID!){createRef(input:{repositoryId:$repoId,name:$name,oid:$oid}){ref{name target{oid}}}}' \
-    -f repoId="$repo_node_id" \
-    -f name="refs/heads/${branch}" \
-    -f oid="$new_commit_sha" \
-    2>"$branch_error" || true)
-  branch_ok=$(echo "$branch_result" | jq -r '.data.createRef.ref.name // empty' 2>/dev/null || true)
-fi
+# ----------------------------------------------------------------
+# 6. Push commit directly to the default branch
+#
+# A fast-forward (non-force) PATCH updates the ref only if the new
+# commit is a descendant of the current HEAD — safe against races.
+# The PAT owner must be configured as a bypass actor on the target
+# repository's branch protection ruleset for this push to succeed.
+# ----------------------------------------------------------------
+push_error=$(mktemp)
+push_result=$(gh api -X PATCH "repos/Cratis/${repo}/git/refs/heads/${default_branch}" \
+  -f sha="$new_commit_sha" \
+  -F force=false \
+  2>"$push_error" || true)
+updated_sha=$(extract_sha "$push_result" '.object.sha')
 
-if [ -z "$branch_ok" ] || [ "$branch_ok" = "null" ]; then
-  branch_api_error=$(cat "$branch_error" 2>/dev/null || true)
-  branch_gql_errors=$(echo "$branch_result" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
-  echo "::error::Could not create/update branch for ${repo} (GraphQL)"
-  [ -n "$branch_api_error" ] && echo "  stderr: $branch_api_error"
-  [ -n "$branch_gql_errors" ] && echo "  GraphQL errors: $branch_gql_errors"
-  echo "  Full response: $(echo "$branch_result" | head -c 500)"
-  rm -f "$branch_error"
+if [ -z "$updated_sha" ]; then
+  push_api_error=$(cat "$push_error" 2>/dev/null || true)
+  push_msg=$(echo "$push_result" | jq -r '.message // empty' 2>/dev/null || true)
+  echo "::error::Could not push commit to ${default_branch} in ${repo}"
+  [ -n "$push_api_error" ] && echo "  API error: $push_api_error"
+  [ -n "$push_msg" ]       && echo "  GitHub message: $push_msg"
+  rm -f "$push_error"
   exit 1
 fi
-rm -f "$branch_error"
-echo "✓ Branch ${branch} ready for ${repo} (GraphQL)"
+rm -f "$push_error"
 
-# ----------------------------------------------------------------
-# 8. Create PR, or confirm the existing PR was updated
-# ----------------------------------------------------------------
-
-# If a PR was already open we have already force-pushed the sync
-# branch above, so the PR now reflects the latest changes.
-if [ -n "$existing_pr" ] && [ "$existing_pr" != "null" ]; then
-  echo "✓ Updated existing PR #${existing_pr} for ${repo} with latest Copilot changes"
-  exit 0
-fi
-
-pr_body="Propagates Copilot instruction files from [${source_repo}](https://github.com/${source_repo}).
-
-### Changes include:
-- Updated \`.github/copilot-instructions.md\` (if present in source)
-- Updated \`.github/instructions/\` folder (if present in source)
-- Updated \`.github/agents/\` folder (if present in source)
-- Updated \`.github/skills/\` folder (if present in source)
-- Updated \`.github/prompts/\` folder (if present in source)
-- Updated \`.github/hooks/\` folder (if present in source)
-
-**Source repository:** ${source_repo}"
-
-pr_created=false
-
-# ------------------------------------------------------------------
-# Strategy 1: GraphQL createPullRequest mutation
-# ------------------------------------------------------------------
-if [ -n "$repo_node_id" ]; then
-  pr_error=$(mktemp)
-  gql_input_file=$(mktemp)
-  jq -n \
-    --arg query 'mutation($repoId:ID!,$base:String!,$head:String!,$title:String!,$body:String!){createPullRequest(input:{repositoryId:$repoId,baseRefName:$base,headRefName:$head,title:$title,body:$body}){pullRequest{url}}}' \
-    --arg repoId "$repo_node_id" \
-    --arg base "$default_branch" \
-    --arg head "$branch" \
-    --arg title "Sync Copilot Instructions from ${source_repo}" \
-    --arg body "$pr_body" \
-    '{query:$query,variables:{repoId:$repoId,base:$base,head:$head,title:$title,body:$body}}' \
-    > "$gql_input_file"
-
-  pr_response=$(gh api graphql --input "$gql_input_file" 2>"$pr_error" || true)
-  rm -f "$gql_input_file"
-
-  pr_url=$(echo "$pr_response" | jq -r '.data.createPullRequest.pullRequest.url // empty' 2>/dev/null || true)
-  if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
-    echo "✓ Created PR for ${repo} (GraphQL): ${pr_url}"
-    pr_created=true
-  else
-    gql_err=$(cat "$pr_error" 2>/dev/null || true)
-    gql_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
-    gql_data_errors=$(echo "$pr_response" | jq -r '(.data.createPullRequest.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-    echo "ℹ GraphQL PR creation failed for ${repo}"
-    [ -n "$gql_err" ] && echo "  stderr: $gql_err"
-    [ -n "$gql_errors" ] && echo "  GraphQL errors: $gql_errors"
-    [ -n "$gql_data_errors" ] && echo "  Mutation errors: $gql_data_errors"
-    echo "  Full response: $(echo "$pr_response" | head -c 800)"
-
-    if echo "$gql_errors$gql_data_errors" | grep -qi "already exists"; then
-      echo "ℹ PR already exists for ${repo} (detected via GraphQL error)"
-      pr_created=true
-    fi
-  fi
-  rm -f "$pr_error"
-fi
-
-# ------------------------------------------------------------------
-# Strategy 2: REST API fallback
-# ------------------------------------------------------------------
-if [ "$pr_created" = "false" ]; then
-  echo "ℹ Trying REST API fallback for ${repo}..."
-  pr_error=$(mktemp)
-  rest_input_file=$(mktemp)
-
-  jq -n \
-    --arg title "Sync Copilot Instructions from ${source_repo}" \
-    --arg body "$pr_body" \
-    --arg head "$branch" \
-    --arg base "$default_branch" \
-    '{title:$title, body:$body, head:$head, base:$base}' \
-    > "$rest_input_file"
-
-  pr_response=$(gh api -X POST "repos/Cratis/${repo}/pulls" \
-    --input "$rest_input_file" \
-    2>"$pr_error" || true)
-  rm -f "$rest_input_file"
-
-  pr_url=$(echo "$pr_response" | jq -r '.html_url // empty' 2>/dev/null || true)
-
-  if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
-    echo "✓ Created PR for ${repo} (REST): ${pr_url}"
-    pr_created=true
-  else
-    rest_err=$(cat "$pr_error" 2>/dev/null || true)
-    rest_msg=$(echo "$pr_response" | jq -r '.message // empty' 2>/dev/null || true)
-    rest_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-    echo "⚠ REST PR creation also failed for ${repo}"
-    [ -n "$rest_err" ] && echo "  stderr: $rest_err"
-    [ -n "$rest_msg" ] && echo "  GitHub message: $rest_msg"
-    [ -n "$rest_errors" ] && echo "  Validation errors: $rest_errors"
-    echo "  Full response: $(echo "$pr_response" | head -c 800)"
-
-    if echo "$rest_errors$rest_msg" | grep -qi "already exists"; then
-      echo "ℹ PR already exists for ${repo} (detected via REST 422)"
-      pr_created=true
-    elif echo "$rest_errors" | grep -qi "no commits between"; then
-      echo "ℹ No diff between ${branch} and ${default_branch} for ${repo} — skipping"
-      pr_created=true
-    fi
-  fi
-  rm -f "$pr_error"
-fi
-
-if [ "$pr_created" = "false" ]; then
-  echo "::error::Could not create PR for ${repo}"
-  exit 1
-fi
+echo "✓ Pushed Copilot instructions directly to ${default_branch} in ${repo}"

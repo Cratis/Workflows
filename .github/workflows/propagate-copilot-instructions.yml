@@ -1,14 +1,18 @@
 name: Propagate Copilot Instructions
 # Reusable workflow that propagates Copilot instruction changes from the calling
-# repository to all other repositories in the Cratis organization.
+# repository to all other repositories in the Cratis organization by pushing
+# a commit directly to each target repository's default branch (no PR).
+#
 # This workflow requires PAT_WORKFLOWS secret with permissions:
-#   Classic PAT:       repo + workflow scopes
-#   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
-#                      + Workflows (read/write)
+#   Classic PAT:       repo scope
+#   Fine-grained PAT:  Contents (read/write) + Metadata (read)
+#
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.  See the README for setup instructions.
 #
 # NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
-# and GraphQL mutations to create branches and PRs directly — the same approach
-# used by the Bootstrap workflow.  No per-repository workflow dispatch is needed.
+# directly — no per-repository workflow dispatch is needed.
 #
 # Repositories are processed in parallel using a dynamic matrix built from the
 # list of non-archived Cratis repositories (excluding the source repo and a small
