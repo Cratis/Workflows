@@ -127,6 +127,17 @@ fi
 rm -f "$subtree_error"
 
 # ----------------------------------------------------------------
+# 2b. Filter out files the target repo does not want to receive
+# ----------------------------------------------------------------
+target_tree_raw="$subtree"
+target_repo_name="Cratis/${repo}"
+
+if ! _apply_copilot_sync_receive_ignore; then
+  echo "All Copilot files excluded by .copilot-sync-receive-ignore in ${repo} — nothing to propagate."
+  exit 0
+fi
+
+# ----------------------------------------------------------------
 # 3. Check for an existing sync branch and open PR early.
 #    This determines the correct comparison baseline for the
 #    "up to date" check below: when a PR is already open we compare
