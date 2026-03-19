@@ -58,6 +58,14 @@ if [ -z "$source_tree_raw" ]; then
   exit 1
 fi
 
+# Check for API error response (e.g. rate limit) which returns non-empty JSON
+# with a "message" field instead of a "tree" array.
+api_error_msg=$(echo "$source_tree_raw" | jq -r '.message // empty' 2>/dev/null || true)
+if [ -n "$api_error_msg" ]; then
+  echo "::error::GitHub API error fetching tree from ${source_repo}: ${api_error_msg}"
+  exit 1
+fi
+
 copilot_files=$(echo "$source_tree_raw" | jq -c \
   '[.tree[] | select(.type == "blob") |
    select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
