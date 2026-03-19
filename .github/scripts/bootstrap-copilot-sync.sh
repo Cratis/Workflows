@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Main logic for the Bootstrap Copilot Sync workflow.
 # Called by .github/workflows/bootstrap-copilot-sync.yml after checkout.
+#
+# This script handles both initial bootstrap and ongoing updates for all
+# Cratis repositories:
+#   - New repos: adds wrapper workflows and copies initial Copilot setup from Cratis/AI.
+#   - Already-bootstrapped repos: updates wrapper workflows and Copilot files if needed.
+#   - Up-to-date repos: skips processing and closes any stale open PRs.
+#
 # Expects:
 #   GH_TOKEN          - PAT with repo + pull_requests write permissions
 #   REPOS_FILE        - path to a JSON file containing the repos array
@@ -254,10 +261,49 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
   fi
 
+  # Check whether any copilot files in the repo need to be cleaned up —
+  # i.e., files that match the delete pattern but are not part of the
+  # expected AI file set (with the correct SHA).  If AI is up-to-date and
+  # every file in files_to_delete is already covered by the AI set, there
+  # is nothing to delete; otherwise at least one file needs removal.
+  #
+  # Pre-build tab-separated "path\tsha" lookup tables once to avoid
+  # repeated jq invocations inside the loop.
+  repo_copilot_shas=$(echo "$subtree" | jq -r \
+    '[.tree[] | select(.type == "blob") |
+      select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)"))] |
+      .[] | .path + "\t" + .sha' 2>/dev/null || true)
+  ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha' 2>/dev/null || true)
+
+  has_files_to_clean=false
+  while IFS= read -r del_path; do
+    [ -z "$del_path" ] && continue
+    del_sha=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2;exit}')
+    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha"; then
+      has_files_to_clean=true
+      break
+    fi
+  done <<< "$files_to_delete"
+
   if [ "$existing_sync" = "$sync_blob_sha" ] && \
      [ "$existing_propagate" = "$propagate_blob_sha" ] && \
-     [ -z "$files_to_delete" ] && \
+     [ "$has_files_to_clean" = "false" ] && \
      [ "$ai_files_up_to_date" = "true" ]; then
+    # Close any stale open PR for this branch — the repo is already up-to-date.
+    _stale_pr_resp=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>/dev/null || true)
+    _stale_pr_num=$(echo "$_stale_pr_resp" | jq -r '.[0].number // empty' 2>/dev/null || true)
+    if [ -n "$_stale_pr_num" ] && [ "$_stale_pr_num" != "null" ]; then
+      _close_pr_error=$(mktemp)
+      if gh api -X PATCH "repos/Cratis/$repo/pulls/$_stale_pr_num" \
+          -f state=closed 2>"$_close_pr_error"; then
+        echo "  ✓ Closed stale PR #$_stale_pr_num for $repo (no changes needed)"
+      else
+        _close_pr_api_error=$(cat "$_close_pr_error" 2>/dev/null || true)
+        echo "  ⚠ Could not close stale PR #$_stale_pr_num for $repo"
+        [ -n "$_close_pr_api_error" ] && echo "    API error: $_close_pr_api_error"
+      fi
+      rm -f "$_close_pr_error"
+    fi
     echo "  ℹ No changes needed for $repo"
     continue
   fi
