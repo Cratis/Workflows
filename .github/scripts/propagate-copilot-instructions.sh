@@ -178,15 +178,19 @@ while IFS=' ' read -r src_path src_sha; do
   clean_b64=$(echo "$blob_content" | tr -d '\n')
 
   target_blob_error=$(mktemp)
-  _target_blob_resp=$(gh api -X POST "repos/Cratis/${repo}/git/blobs" \
-    -f "content=${clean_b64}" \
-    -f encoding=base64 \
+  _target_blob_resp=$(jq -n \
+    --arg content "$clean_b64" \
+    '{"content": $content, "encoding": "base64"}' | \
+    gh api -X POST "repos/Cratis/${repo}/git/blobs" \
+    --input - \
     2>"$target_blob_error" || true)
-  target_blob_sha=$(extract_sha "$_target_blob_resp")
+  target_blob_api_error=$(cat "$target_blob_error" 2>/dev/null || true)
   rm -f "$target_blob_error"
+  target_blob_sha=$(extract_sha "$_target_blob_resp")
 
   if [ -z "$target_blob_sha" ]; then
     echo "::error::Could not create blob for ${src_path} in ${repo}"
+    [ -n "$target_blob_api_error" ] && echo "  API error: $target_blob_api_error"
     exit 1
   fi
 
