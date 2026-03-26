@@ -69,6 +69,42 @@ Both wrapper workflows require the `PAT_WORKFLOWS` secret to be set in the repos
 
 ---
 
+## Cleaning up PR artifacts
+
+When a repository publishes Docker images or NuGet packages during pull requests (for example, pre-release builds tagged with the PR number), those packages should be removed once the pull request is closed to avoid accumulating stale artifacts.
+
+To enable automatic cleanup, add the following workflow to your repository:
+
+**`.github/workflows/cleanup-pr-artifacts.yml`**
+
+```yaml
+name: Cleanup PR Artifacts
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    uses: Cratis/Workflows/.github/workflows/cleanup-pr-artifacts.yml@main
+    with:
+      pull_request: ${{ github.event.pull_request.number }}
+    secrets: inherit
+```
+
+The workflow assumes packages are tagged or versioned using the PR number:
+
+| Package type | Expected pattern | Example |
+|---|---|---|
+| Container image (Docker) | tag `pr-{number}` | `pr-42` |
+| NuGet package | version contains `pr-{number}` | `1.0.0-pr-42.1` |
+
+Only packages linked to the calling repository are considered, so the cleanup is always scoped to the repository that called the workflow.
+
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `read:packages` + `delete:packages` scopes, or fine-grained PAT with **Packages** read/write
+
+---
+
 ## How it works
 
 ### Copilot instruction synchronization
@@ -221,6 +257,29 @@ For each non-archived repository (except `Workflows` itself), it:
 4. Opens a pull request targeting the repository's default branch.
 
 **Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Pull requests** + **Workflows** read/write
+
+---
+
+### `cleanup-pr-artifacts.yml`
+
+**Trigger:** `workflow_call` (invoked by any Cratis repository when a pull request is closed)
+
+Deletes GitHub Packages — container images (Docker) and NuGet packages — that were published during a pull request. Only package versions linked to the calling repository that match the PR number pattern are deleted.
+
+**Inputs:**
+
+| Input | Required | Description |
+|---|---|---|
+| `pull_request` | ✅ | The pull request number whose artifacts should be deleted. |
+
+**Expected naming conventions:**
+
+| Package type | Pattern | Example |
+|---|---|---|
+| Container image (Docker) | tag `pr-{number}` | `pr-42` |
+| NuGet package | version contains `pr-{number}` | `1.0.0-pr-42.1` |
+
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `read:packages` + `delete:packages` scopes, or fine-grained PAT with **Packages** read/write
 
 ---
 
