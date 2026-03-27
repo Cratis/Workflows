@@ -73,7 +73,13 @@ Both wrapper workflows require the `PAT_WORKFLOWS` secret to be set in the repos
 
 When a repository publishes Docker images or NuGet packages during pull requests (for example, pre-release builds tagged with the PR number), those packages should be removed once the pull request is closed to avoid accumulating stale artifacts.
 
-To enable automatic cleanup, add the following workflow to your repository:
+### Automatic setup (recommended)
+
+The easiest way is to trigger the [Bootstrap Cleanup PR Artifacts](#bootstrap-cleanup-pr-artifacts) workflow once — it will open a PR in every Cratis repository automatically, adding the wrapper workflow shown below.
+
+### Manual setup
+
+If you prefer to add the wrapper manually, create the following file in your repository:
 
 **`.github/workflows/cleanup-pr-artifacts.yml`**
 
@@ -280,6 +286,18 @@ Deletes GitHub Packages — container images (Docker) and NuGet packages — tha
 | NuGet package | version contains `pr-{number}` | `1.0.0-pr-42.1` |
 
 **Secrets required:** `PAT_WORKFLOWS` — classic PAT with `read:packages` + `delete:packages` scopes, or fine-grained PAT with **Packages** read/write
+
+---
+
+### `bootstrap-cleanup-pr-artifacts.yml`
+
+**Trigger:** `push` to `main` (when `cleanup-pr-artifacts.yml` or its script changes), or `workflow_dispatch`
+
+Opens a pull request in every non-archived Cratis repository to add (or update) the cleanup-pr-artifacts wrapper workflow.  Re-running this workflow is safe — it is fully idempotent: repositories where the wrapper is already up-to-date are skipped, and any stale open PRs for repos that no longer need changes are automatically closed.
+
+Repositories can be excluded from bootstrapping by adding their name to the `REPOS_TO_IGNORE` list in the workflow file.
+
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Pull requests** + **Workflows** read/write
 
 ---
 

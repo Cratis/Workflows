@@ -1,0 +1,89 @@
+name: Bootstrap Cleanup PR Artifacts
+# Ensures all Cratis repositories have the cleanup-pr-artifacts wrapper
+# workflow installed and up-to-date.  When a pull request is closed in any
+# Cratis repository, the wrapper delegates to the reusable workflow in this
+# repository to delete GitHub Packages published during that PR.
+#
+# Handles both initial bootstrap (new repos) and ongoing updates:
+#   • New repos:           adds .github/workflows/cleanup-pr-artifacts.yml
+#   • Already-bootstrapped: updates the wrapper if content has changed
+#   • Already up-to-date:  skips processing; closes any stale open PRs
+#
+# Triggered automatically on push to main whenever the reusable cleanup
+# workflow changes (so all repositories pick up the updated call).
+# Can also be run manually at any time via workflow_dispatch.
+#
+# Requires PAT_WORKFLOWS secret with permissions:
+#   Classic PAT:       repo + workflow scopes
+#   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
+#                      + Workflows (read/write)
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/cleanup-pr-artifacts.yml"
+      - ".github/scripts/bootstrap-cleanup-pr-artifacts.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Repositories to skip when bootstrapping the cleanup workflow.
+  # Add any repo name here that should never receive the wrapper.
+  # Workflows  - this repo; it holds the reusable workflow itself
+  # cratis.github.io, StudioIssues - do not publish GitHub Packages
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues"]'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify PAT can authenticate
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          auth_error=$(mktemp)
+          if ! gh api /user >/dev/null 2>"$auth_error"; then
+            echo "::error::Could not authenticate with PAT_WORKFLOWS. Is the secret set correctly?"
+            echo "::error::API error: $(cat "$auth_error")"
+            rm -f "$auth_error"
+            exit 1
+          fi
+          rm -f "$auth_error"
+          login=$(gh api /user --jq '.login')
+          echo "✓ Authenticated as $login"
+          echo "  gh auth status:"
+          gh auth status 2>&1 | sed 's/^/    /'
+          oauth_scopes=$(gh api /user -i 2>/dev/null | grep -i '^x-oauth-scopes:' | sed 's/[^:]*: //' | tr -d '\r' || true)
+          if [ -n "$oauth_scopes" ]; then
+            echo "  PAT type: classic"
+            echo "  OAuth scopes: $oauth_scopes"
+          else
+            echo "  PAT type: fine-grained (scopes not exposed via API)"
+          fi
+
+      - name: Get all Cratis repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          # Write all non-archived repos; ignore-list filtering is done in the script.
+          gh repo list Cratis --limit 1000 --json name,isArchived \
+            --jq '[.[] | select(.isArchived == false) | .name]' \
+            > "$GITHUB_WORKSPACE/repos.json"
+
+      - name: Bootstrap cleanup workflow in all repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          REPOS_FILE: ${{ github.workspace }}/repos.json
+          REPOS_IGNORE: ${{ env.REPOS_TO_IGNORE }}
+        run: |
+          echo "gh auth status (confirming PAT is used for PR creation):"
+          gh auth status 2>&1 | sed 's/^/  /' || true
+
+          bash .github/scripts/bootstrap-cleanup-pr-artifacts.sh
