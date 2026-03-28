@@ -7,7 +7,7 @@ name: Bootstrap Cleanup PR Artifacts
 # Handles both initial bootstrap (new repos) and ongoing updates:
 #   • New repos:           adds .github/workflows/cleanup-pr-artifacts.yml
 #   • Already-bootstrapped: updates the wrapper if content has changed
-#   • Already up-to-date:  skips processing; closes any stale open PRs
+#   • Already up-to-date:  skips processing
 #
 # Triggered automatically on push to main whenever the reusable cleanup
 # workflow changes (so all repositories pick up the updated call).
@@ -15,8 +15,11 @@ name: Bootstrap Cleanup PR Artifacts
 #
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
-#   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
-#                      + Workflows (read/write)
+#   Fine-grained PAT:  Contents (read/write) + Workflows (read/write)
+#
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.
 
 on:
   push:
@@ -83,7 +86,4 @@ jobs:
           REPOS_FILE: ${{ github.workspace }}/repos.json
           REPOS_IGNORE: ${{ env.REPOS_TO_IGNORE }}
         run: |
-          echo "gh auth status (confirming PAT is used for PR creation):"
-          gh auth status 2>&1 | sed 's/^/  /' || true
-
           bash .github/scripts/bootstrap-cleanup-pr-artifacts.sh

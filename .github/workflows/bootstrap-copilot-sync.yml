@@ -8,7 +8,7 @@ name: Bootstrap Copilot Sync
 #                             initial Copilot setup from Cratis/AI.
 #  • Already-bootstrapped:    updates wrapper workflows and Copilot files if
 #                             the content has changed since last run.
-#  • Already up-to-date:      skips processing; closes any stale open PRs.
+#  • Already up-to-date:      skips processing.
 #
 # Triggered automatically on push to main whenever this script changes
 # (e.g. updated wrapper content or a new Copilot folder path).  Can also
@@ -16,17 +16,20 @@ name: Bootstrap Copilot Sync
 #
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
-#   Fine-grained PAT:  Contents (read/write) + Pull requests (read/write)
-#                      + Workflows (read/write)
+#   Fine-grained PAT:  Contents (read/write) + Workflows (read/write)
 #
 # NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
-# instead of git push.  However, GitHub still enforces workflow-file protection
+# instead of git push.  GitHub still enforces workflow-file protection
 # on POST /git/trees when the tree contains .github/workflows/ paths, so the
 # PAT must include the Workflows permission.
 #
-# Re-running this workflow is safe: it force-updates the branch to a clean state,
-# skips repos where a PR already exists, and closes stale PRs when no changes
-# are needed.
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.
+#
+# Re-running this workflow is safe: it skips repos where content is already
+# up-to-date and pushes directly to the default branch for repos that need
+# changes.
 
 on:
   push:
@@ -74,9 +77,6 @@ jobs:
           else
             echo "  PAT type: fine-grained (scopes not exposed via API)"
           fi
-          # NOTE: PR-creation permission is validated implicitly per-repository during
-          # the main loop below.  A pre-flight probe against Cratis/Workflows would
-          # always fail for fine-grained PATs that (correctly) exclude this repo.
 
       - name: Get all Cratis repositories
         env:
@@ -89,14 +89,9 @@ jobs:
             --jq '[.[] | select(.isArchived == false) | .name]' \
             > "$GITHUB_WORKSPACE/repos.json"
 
-      - name: Create PRs in all repositories
+      - name: Bootstrap Copilot sync in all repositories
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           REPOS_FILE: ${{ github.workspace }}/repos.json
         run: |
-          # Confirm which credential gh is actually using — ensures PAT is active
-          # and not accidentally overridden by GITHUB_TOKEN.
-          echo "gh auth status (confirming PAT is used for PR creation):"
-          gh auth status 2>&1 | sed 's/^/  /' || true
-
           bash .github/scripts/bootstrap-copilot-sync.sh
