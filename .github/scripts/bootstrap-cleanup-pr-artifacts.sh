@@ -8,10 +8,12 @@
 # This script handles both initial bootstrap and ongoing updates:
 #   - New repos:            adds .github/workflows/cleanup-pr-artifacts.yml
 #   - Already-bootstrapped: updates the wrapper if its content has changed
-#   - Up-to-date repos:     skips processing; closes any stale open PRs
+#   - Up-to-date repos:     skips processing
 #
 # Expects:
-#   GH_TOKEN      - PAT with repo + pull_requests write + Workflows permissions
+#   GH_TOKEN      - PAT with repo + Workflows permissions; the PAT owner must
+#                   be a bypass actor on target repos' branch protection rulesets
+#                   so that direct pushes to the default branch are allowed.
 #   REPOS_FILE    - path to a JSON file containing the repos array
 #                   (written by the "Get all Cratis repositories" step)
 #   REPOS_IGNORE  - JSON array of repo names to skip (e.g. '["Workflows"]')
@@ -39,9 +41,7 @@ repos_file="${REPOS_FILE:-$GITHUB_WORKSPACE/repos.json}"
 repos_ignore="${REPOS_IGNORE:-[\"Workflows\"]}"
 repos=$(cat "$repos_file")
 
-prs_created_file=$(mktemp)
 failures_file=$(mktemp)
-pr_failures_file=$(mktemp)
 
 # Pre-computed base64 content for the wrapper workflow.
 # Using base64 avoids heredoc end-markers at column 0.
@@ -64,11 +64,6 @@ pr_failures_file=$(mktemp)
 #       secrets: inherit
 wrapper_b64="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
 
-pr_title="Add cleanup-pr-artifacts workflow"
-pr_body=$'Adds the reusable cleanup-pr-artifacts wrapper workflow.\n\nWhen a pull request is closed, this workflow automatically deletes GitHub Packages\n(container images and NuGet packages) published during that PR.\n\n**Added**:\n- `.github/workflows/cleanup-pr-artifacts.yml` — triggered on `pull_request` closed events;\n  delegates to `Cratis/Workflows/.github/workflows/cleanup-pr-artifacts.yml@main`.\n\nThe actual cleanup logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows)\nso it can be maintained in one place and updated across all repositories at once.'
-
-branch="add-cleanup-pr-artifacts-workflow"
-
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
 # ================================================================
@@ -83,7 +78,6 @@ if [ -n "$probe_repo" ]; then
     echo "  • Resource owner: Cratis"
     echo "  • Repository access: All repositories"
     echo "  • Permissions → Contents: Read and write"
-    echo "  • Permissions → Pull requests: Read and write"
     echo "  • Permissions → Workflows: Read and write"
     echo "Update the PAT at: https://github.com/settings/personal-access-tokens"
     exit 1
@@ -101,13 +95,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   echo "Processing Cratis/$repo..."
 
   # ----------------------------------------------------------------
-  # 1. Get default branch, HEAD SHA, and repository node ID
+  # 1. Get default branch and HEAD SHA
   # ----------------------------------------------------------------
   repo_info_error=$(mktemp)
-  repo_info_json=$(gh api "repos/Cratis/$repo" \
-    --jq '{default_branch: .default_branch, node_id: .node_id}' 2>"$repo_info_error" || true)
-  default_branch=$(echo "$repo_info_json" | jq -r '.default_branch // empty' 2>/dev/null || true)
-  repo_node_id=$(echo "$repo_info_json" | jq -r '.node_id // empty' 2>/dev/null || true)
+  default_branch=$(gh api "repos/Cratis/$repo" \
+    --jq '.default_branch' 2>"$repo_info_error" || true)
   if [ -z "$default_branch" ]; then
     repo_info_api_error=$(cat "$repo_info_error" 2>/dev/null || true)
     echo "  ⚠ Could not get default branch for $repo, skipping"
@@ -188,21 +180,6 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     2>/dev/null || true)
 
   if [ "$existing_wrapper" = "$wrapper_blob_sha" ]; then
-    # Close any stale open PR for this branch — the repo is already up-to-date.
-    _stale_pr_resp=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>/dev/null || true)
-    _stale_pr_num=$(echo "$_stale_pr_resp" | jq -r '.[0].number // empty' 2>/dev/null || true)
-    if [ -n "$_stale_pr_num" ] && [ "$_stale_pr_num" != "null" ]; then
-      _close_pr_error=$(mktemp)
-      if gh api -X PATCH "repos/Cratis/$repo/pulls/$_stale_pr_num" \
-          -f state=closed 2>"$_close_pr_error"; then
-        echo "  ✓ Closed stale PR #$_stale_pr_num for $repo (no changes needed)"
-      else
-        _close_pr_api_error=$(cat "$_close_pr_error" 2>/dev/null || true)
-        echo "  ⚠ Could not close stale PR #$_stale_pr_num for $repo"
-        [ -n "$_close_pr_api_error" ] && echo "    API error: $_close_pr_api_error"
-      fi
-      rm -f "$_close_pr_error"
-    fi
     echo "  ℹ No changes needed for $repo"
     continue
   fi
@@ -275,178 +252,42 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$commit_error"
 
   # ----------------------------------------------------------------
-  # 9. Create or force-update the branch (GraphQL — synchronous)
+  # 9. Push commit directly to the default branch
+  #
+  # A fast-forward (non-force) PATCH updates the ref only if the new
+  # commit is a descendant of the current HEAD — safe against races.
+  # The PAT owner must be configured as a bypass actor on the target
+  # repository's branch protection ruleset for this push to succeed.
   # ----------------------------------------------------------------
-  branch_error=$(mktemp)
+  push_error=$(mktemp)
+  push_result=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
+    -f sha="$new_commit_sha" \
+    -F force=false \
+    2>"$push_error" || true)
+  updated_sha=$(extract_sha "$push_result" '.object.sha')
 
-  existing_ref_result=$(gh api graphql \
-    -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){id target{oid}}}}' \
-    -f owner="Cratis" \
-    -f name="$repo" \
-    -f ref="refs/heads/$branch" \
-    2>/dev/null || true)
-  existing_ref_id=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.id // empty' 2>/dev/null || true)
-
-  if [ -n "$existing_ref_id" ] && [ "$existing_ref_id" != "null" ]; then
-    branch_result=$(gh api graphql \
-      -f query='mutation($refId:ID!,$oid:GitObjectID!){updateRef(input:{refId:$refId,oid:$oid,force:true}){ref{name target{oid}}}}' \
-      -f refId="$existing_ref_id" \
-      -f oid="$new_commit_sha" \
-      2>"$branch_error" || true)
-    branch_ok=$(echo "$branch_result" | jq -r '.data.updateRef.ref.name // empty' 2>/dev/null || true)
-  else
-    if [ -z "$repo_node_id" ]; then
-      echo "  ⚠ No repository node ID for $repo; cannot create branch via GraphQL"
-      echo "$repo" >> "$failures_file"
-      rm -f "$branch_error"
-      continue
-    fi
-    branch_result=$(gh api graphql \
-      -f query='mutation($repoId:ID!,$name:String!,$oid:GitObjectID!){createRef(input:{repositoryId:$repoId,name:$name,oid:$oid}){ref{name target{oid}}}}' \
-      -f repoId="$repo_node_id" \
-      -f name="refs/heads/$branch" \
-      -f oid="$new_commit_sha" \
-      2>"$branch_error" || true)
-    branch_ok=$(echo "$branch_result" | jq -r '.data.createRef.ref.name // empty' 2>/dev/null || true)
-  fi
-
-  if [ -z "$branch_ok" ] || [ "$branch_ok" = "null" ]; then
-    branch_api_error=$(cat "$branch_error" 2>/dev/null || true)
-    branch_gql_errors=$(echo "$branch_result" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
-    echo "  ⚠ Could not create/update branch for $repo (GraphQL)"
-    [ -n "$branch_api_error" ] && echo "    stderr: $branch_api_error"
-    [ -n "$branch_gql_errors" ] && echo "    GraphQL errors: $branch_gql_errors"
-    rm -f "$branch_error"
+  if [ -z "$updated_sha" ]; then
+    push_api_error=$(cat "$push_error" 2>/dev/null || true)
+    push_msg=$(echo "$push_result" | jq -r '.message // empty' 2>/dev/null || true)
+    echo "  ⚠ Could not push commit to $default_branch in $repo"
+    [ -n "$push_api_error" ] && echo "    API error: $push_api_error"
+    [ -n "$push_msg" ]       && echo "    GitHub message: $push_msg"
+    rm -f "$push_error"
     echo "$repo" >> "$failures_file"
     continue
   fi
-  rm -f "$branch_error"
+  rm -f "$push_error"
 
-  echo "  ✓ Branch $branch ready for $repo"
-
-  # ----------------------------------------------------------------
-  # 10. Create PR (skip if one already exists for this branch)
-  # ----------------------------------------------------------------
-  existing_pr=""
-  list_pr_error=$(mktemp)
-  if api_result=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>"$list_pr_error"); then
-    existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
-  else
-    list_pr_api_error=$(cat "$list_pr_error" 2>/dev/null || true)
-    echo "  ⚠ Could not list PRs for $repo"
-    [ -n "$list_pr_api_error" ] && echo "    API error: $list_pr_api_error"
-  fi
-  rm -f "$list_pr_error"
-
-  if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
-    pr_created=false
-
-    # Strategy 1: GraphQL createPullRequest mutation
-    if [ -n "$repo_node_id" ]; then
-      pr_error=$(mktemp)
-      gql_input_file=$(mktemp)
-      jq -n \
-        --arg query 'mutation($repoId:ID!,$base:String!,$head:String!,$title:String!,$body:String!){createPullRequest(input:{repositoryId:$repoId,baseRefName:$base,headRefName:$head,title:$title,body:$body}){pullRequest{url}}}' \
-        --arg repoId "$repo_node_id" \
-        --arg base "$default_branch" \
-        --arg head "$branch" \
-        --arg title "$pr_title" \
-        --arg body "$pr_body" \
-        '{query:$query,variables:{repoId:$repoId,base:$base,head:$head,title:$title,body:$body}}' \
-        > "$gql_input_file"
-
-      pr_response=$(gh api graphql --input "$gql_input_file" 2>"$pr_error" || true)
-      rm -f "$gql_input_file"
-
-      pr_url=$(echo "$pr_response" | jq -r '.data.createPullRequest.pullRequest.url // empty' 2>/dev/null || true)
-      if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
-        echo "  ✓ Created PR for $repo (GraphQL): $pr_url"
-        echo "$repo" >> "$prs_created_file"
-        pr_created=true
-      else
-        gql_err=$(cat "$pr_error" 2>/dev/null || true)
-        gql_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
-        gql_data_errors=$(echo "$pr_response" | jq -r '(.data.createPullRequest.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-        echo "  ℹ GraphQL PR creation failed for $repo"
-        [ -n "$gql_err" ] && echo "    stderr: $gql_err"
-        [ -n "$gql_errors" ] && echo "    GraphQL errors: $gql_errors"
-        [ -n "$gql_data_errors" ] && echo "    Mutation errors: $gql_data_errors"
-
-        if echo "$gql_errors$gql_data_errors" | grep -qi "already exists"; then
-          echo "  ℹ PR already exists for $repo (detected via GraphQL error)"
-          echo "$repo" >> "$prs_created_file"
-          pr_created=true
-        fi
-      fi
-      rm -f "$pr_error"
-    fi
-
-    # Strategy 2: REST API fallback
-    if [ "$pr_created" = "false" ]; then
-      echo "  ℹ Trying REST API fallback for $repo..."
-      pr_error=$(mktemp)
-      rest_input_file=$(mktemp)
-
-      jq -n \
-        --arg title "$pr_title" \
-        --arg body  "$pr_body" \
-        --arg head  "$branch" \
-        --arg base  "$default_branch" \
-        '{title:$title, body:$body, head:$head, base:$base}' \
-        > "$rest_input_file"
-
-      pr_response=$(gh api -X POST "repos/Cratis/$repo/pulls" \
-        --input "$rest_input_file" \
-        2>"$pr_error" || true)
-      rm -f "$rest_input_file"
-
-      pr_url=$(echo "$pr_response" | jq -r '.html_url // empty' 2>/dev/null || true)
-      if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
-        echo "  ✓ Created PR for $repo (REST): $pr_url"
-        echo "$repo" >> "$prs_created_file"
-        pr_created=true
-      else
-        rest_err=$(cat "$pr_error" 2>/dev/null || true)
-        rest_msg=$(echo "$pr_response" | jq -r '.message // empty' 2>/dev/null || true)
-        rest_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-        echo "  ⚠ REST PR creation also failed for $repo"
-        [ -n "$rest_err" ] && echo "    stderr: $rest_err"
-        [ -n "$rest_msg" ] && echo "    GitHub message: $rest_msg"
-        [ -n "$rest_errors" ] && echo "    Validation errors: $rest_errors"
-
-        if echo "$rest_errors$rest_msg" | grep -qi "already exists"; then
-          echo "  ℹ PR already exists for $repo (detected via REST 422)"
-          echo "$repo" >> "$prs_created_file"
-          pr_created=true
-        elif echo "$rest_errors" | grep -qi "no commits between"; then
-          echo "  ℹ No diff between $branch and $default_branch for $repo — skipping"
-        fi
-      fi
-      rm -f "$pr_error"
-    fi
-
-    if [ "$pr_created" = "false" ]; then
-      echo "$repo" >> "$pr_failures_file"
-    fi
-  else
-    echo "  ℹ PR already exists for $repo (#$existing_pr)"
-    echo "$repo" >> "$prs_created_file"
-  fi
+  echo "  ✓ Pushed $commit_message directly to $default_branch in $repo"
 done
 
-total_prs=$(wc -l < "$prs_created_file" 2>/dev/null || echo "0")
 total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")
-total_pr_failures=$(wc -l < "$pr_failures_file" 2>/dev/null || echo "0")
-rm -f "$prs_created_file" "$failures_file" "$pr_failures_file"
+rm -f "$failures_file"
 
 echo ""
-echo "Summary: $total_prs repo(s) with PR created or already open, $total_pr_failures repo(s) where PR could not be created, $total_failures branch setup failure(s)"
-
-if [ "$total_pr_failures" -gt 0 ]; then
-  echo "::warning::$total_pr_failures repo(s) could not have PRs auto-created. Branches were set up successfully. Ensure PAT_WORKFLOWS has pull_requests:write permission."
-fi
+echo "Summary: $total_failures failure(s)"
 
 if [ "$total_failures" -gt 0 ]; then
-  echo "::error::$total_failures repo(s) failed to set up branches. Check the log above for details."
+  echo "::error::$total_failures repo(s) failed. Check the log above for details."
   exit 1
 fi
