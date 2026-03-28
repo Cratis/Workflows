@@ -298,6 +298,15 @@ Opens a pull request in every non-archived Cratis repository to add (or update) 
 Repositories can be excluded from bootstrapping by adding their name to the `REPOS_TO_IGNORE` list in the workflow file.
 
 **Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Pull requests** + **Workflows** read/write
+### `propagate-pr-templates.yml`
+
+**Trigger:** `push` to `main` (when template files change) or `workflow_dispatch`
+
+Propagates the Pull Request and Issue templates from this repository (`Cratis/Workflows`) directly to the default branch of every other non-archived Cratis repository. Silently skips repositories where files are already up to date.
+
+**Excluded repositories:** `Workflows`, `cratis.github.io`, `StudioIssues` (same exceptions as `propagate-copilot-instructions.yml`).
+
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** read/write + **Metadata** read. The PAT owner must be a bypass actor on each target repository's branch protection ruleset.
 
 ---
 
@@ -346,6 +355,8 @@ The bypass actor can technically push any content to the default branch. The wor
 .github/skills/
 .github/prompts/
 .github/hooks/
+.github/ISSUE_TEMPLATE/
+.github/pull_request_template.md
 ```
 
 For an extra layer of defence you can add a **Restrict file paths** rule to the ruleset that blocks direct changes to files *outside* these paths from all other actors. The bypass actor is exempt from this restriction, but since the bypass is scoped to a dedicated service account whose only use is this workflow, the effective risk is minimal.
