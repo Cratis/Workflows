@@ -224,6 +224,18 @@ For each non-archived repository (except `Workflows` itself), it:
 
 ---
 
+### `propagate-pr-templates.yml`
+
+**Trigger:** `push` to `main` (when template files change) or `workflow_dispatch`
+
+Propagates the Pull Request and Issue templates from this repository (`Cratis/Workflows`) directly to the default branch of every other non-archived Cratis repository. Silently skips repositories where files are already up to date.
+
+**Excluded repositories:** `Workflows`, `cratis.github.io`, `StudioIssues` (same exceptions as `propagate-copilot-instructions.yml`).
+
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** read/write + **Metadata** read. The PAT owner must be a bypass actor on each target repository's branch protection ruleset.
+
+---
+
 ### `cleanup-copilot-sync-branches.yml`
 
 **Trigger:** `workflow_dispatch` (run manually when needed)
@@ -269,6 +281,8 @@ The bypass actor can technically push any content to the default branch. The wor
 .github/skills/
 .github/prompts/
 .github/hooks/
+.github/ISSUE_TEMPLATE/
+.github/pull_request_template.md
 ```
 
 For an extra layer of defence you can add a **Restrict file paths** rule to the ruleset that blocks direct changes to files *outside* these paths from all other actors. The bypass actor is exempt from this restriction, but since the bypass is scoped to a dedicated service account whose only use is this workflow, the effective risk is minimal.

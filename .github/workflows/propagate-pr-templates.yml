@@ -1,0 +1,80 @@
+name: Propagate PR and Issue Templates
+# Propagates the Pull Request and Issue templates from this repository
+# (Cratis/Workflows) to all other repositories in the Cratis organization
+# by pushing a commit directly to each target repository's default branch
+# (no PR).
+#
+# This workflow requires PAT_WORKFLOWS secret with permissions:
+#   Classic PAT:       repo scope
+#   Fine-grained PAT:  Contents (read/write) + Metadata (read)
+#
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.  See the README for setup instructions.
+#
+# NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
+# directly — no per-repository workflow dispatch is needed.
+#
+# Repositories are processed in parallel using a dynamic matrix built from the
+# list of non-archived Cratis repositories (excluding this repo and a small
+# ignore list).  Each matrix job handles exactly one target repository.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/pull_request_template.md"
+  workflow_dispatch:
+
+env:
+  # Repositories to skip when propagating templates.
+  # Must match the exceptions used in propagate-copilot-instructions.yml.
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues"]'
+
+permissions:
+  contents: read
+
+jobs:
+  get-repos:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Cratis' }}
+    outputs:
+      repos: ${{ steps.list-repos.outputs.repos }}
+
+    steps:
+      - name: Get all Cratis repositories
+        id: list-repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          # List all non-archived repos, excluding this repo and the repos in
+          # REPOS_TO_IGNORE.  The result is a compact JSON array used as the
+          # matrix.
+          repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
+            | jq -c --argjson ignore "$REPOS_TO_IGNORE" \
+            '[.[] | select(.isArchived == false) | .name
+              | select(. as $n | ($ignore | index($n)) == null)]')
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+
+  propagate:
+    needs: get-repos
+    if: ${{ needs.get-repos.outputs.repos != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.get-repos.outputs.repos) }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout Workflows repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_WORKFLOWS }}
+
+      - name: Propagate PR and Issue templates to ${{ matrix.repo }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          TARGET_REPO: ${{ matrix.repo }}
+        run: |
+          bash .github/scripts/propagate-pr-templates.sh
