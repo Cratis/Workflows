@@ -1,0 +1,142 @@
+name: Cleanup PR Artifacts
+# Reusable workflow that deletes GitHub Packages (container images and NuGet
+# packages) published during a pull request.
+#
+# Assumes packages are tagged/versioned with the PR number:
+#   Container image tag:    pr-{number}      (e.g. pr-42)
+#   NuGet package version:  *pr-{number}*    (e.g. 1.0.0-pr-42.1)
+#
+# Only packages linked to the calling repository are considered.
+#
+# Requires PAT_WORKFLOWS secret with permissions:
+#   Classic PAT:       read:packages + delete:packages
+#   Fine-grained PAT:  Packages (read/write)
+
+on:
+  workflow_call:
+    inputs:
+      pull_request:
+        description: 'Pull request number to clean up artifacts for'
+        required: true
+        type: number
+    secrets:
+      PAT_WORKFLOWS:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate inputs
+        run: |
+          owner="${{ github.repository_owner }}"
+          if [ "$owner" != "Cratis" ]; then
+            echo "::error::This workflow is for use by the Cratis organization only (got '$owner')"
+            exit 1
+          fi
+
+          pr="${{ inputs.pull_request }}"
+          if ! [[ "$pr" =~ ^[0-9]+$ ]] || [ "$pr" -le 0 ]; then
+            echo "::error::pull_request input must be a positive integer (got: $pr)"
+            exit 1
+          fi
+
+      - name: Delete container image versions tagged for this PR
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          CALLER_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull_request }}
+        run: |
+          ORG="${CALLER_REPO%%/*}"
+          REPO="${CALLER_REPO##*/}"
+          TAG="pr-${PR_NUMBER}"
+          echo "Looking for container images tagged '${TAG}' linked to ${ORG}/${REPO}..."
+
+          deleted=0
+          errors=0
+
+          while IFS= read -r pkg; do
+            [ -z "$pkg" ] && continue
+            echo "Scanning container package: ${pkg}"
+            pkg_encoded="${pkg//\//%2F}"
+
+            while IFS=$'\t' read -r ver_id ver_tags; do
+              [ -z "$ver_id" ] && continue
+              echo "  Deleting version ${ver_id} (tags: ${ver_tags})..."
+              if gh api -X DELETE \
+                   "orgs/${ORG}/packages/container/${pkg_encoded}/versions/${ver_id}" \
+                   2>/dev/null; then
+                echo "  ✓ Deleted"
+                deleted=$((deleted + 1))
+              else
+                echo "  ✗ Failed (may already be deleted)"
+                errors=$((errors + 1))
+              fi
+            done < <(gh api \
+              "orgs/${ORG}/packages/container/${pkg_encoded}/versions?per_page=100" \
+              --paginate \
+              --jq ".[] | select(.metadata.container.tags // [] | index(\"${TAG}\") != null) | [.id | tostring, (.metadata.container.tags | join(\",\"))] | @tsv" \
+              2>/dev/null || true)
+          done < <(gh api "orgs/${ORG}/packages?package_type=container&per_page=100" \
+            --paginate \
+            --jq ".[] | select(.repository.name == \"${REPO}\") | .name" \
+            2>/dev/null || true)
+
+          echo ""
+          if [ "$deleted" -eq 0 ] && [ "$errors" -eq 0 ]; then
+            echo "No container image versions tagged '${TAG}' found."
+          else
+            echo "Container images: ${deleted} version(s) deleted, ${errors} error(s)."
+          fi
+
+      - name: Delete NuGet package versions for this PR
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          CALLER_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull_request }}
+        run: |
+          ORG="${CALLER_REPO%%/*}"
+          REPO="${CALLER_REPO##*/}"
+          TAG="pr-${PR_NUMBER}"
+          echo "Looking for NuGet package versions matching '*${TAG}*' linked to ${ORG}/${REPO}..."
+
+          deleted=0
+          errors=0
+
+          while IFS= read -r pkg; do
+            [ -z "$pkg" ] && continue
+            echo "Scanning NuGet package: ${pkg}"
+            pkg_encoded="${pkg//\//%2F}"
+
+            while IFS=$'\t' read -r ver_id ver_name; do
+              [ -z "$ver_id" ] && continue
+              echo "  Deleting version '${ver_name}' (id: ${ver_id})..."
+              if gh api -X DELETE \
+                   "orgs/${ORG}/packages/nuget/${pkg_encoded}/versions/${ver_id}" \
+                   2>/dev/null; then
+                echo "  ✓ Deleted"
+                deleted=$((deleted + 1))
+              else
+                echo "  ✗ Failed (may already be deleted)"
+                errors=$((errors + 1))
+              fi
+            done < <(gh api \
+              "orgs/${ORG}/packages/nuget/${pkg_encoded}/versions?per_page=100" \
+              --paginate \
+              --jq ".[] | select(.name | contains(\"${TAG}\")) | [.id | tostring, .name] | @tsv" \
+              2>/dev/null || true)
+          done < <(gh api "orgs/${ORG}/packages?package_type=nuget&per_page=100" \
+            --paginate \
+            --jq ".[] | select(.repository.name == \"${REPO}\") | .name" \
+            2>/dev/null || true)
+
+          echo ""
+          if [ "$deleted" -eq 0 ] && [ "$errors" -eq 0 ]; then
+            echo "No NuGet package versions matching '*${TAG}*' found."
+          else
+            echo "NuGet packages: ${deleted} version(s) deleted, ${errors} error(s)."
+          fi
