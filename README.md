@@ -102,8 +102,8 @@ The workflow assumes packages are tagged or versioned using the PR number:
 
 | Package type | Expected pattern | Example |
 |---|---|---|
-| Container image (Docker) | tag `pr-{number}` | `pr-42` |
-| NuGet package | version contains `pr-{number}` | `1.0.0-pr-42.1` |
+| Container image (Docker) | tag contains `pr{number}` | `pr42` |
+| NuGet package | version contains `pr{number}` | `1.0.0-pr42.1` |
 
 Only packages linked to the calling repository are considered, so the cleanup is always scoped to the repository that called the workflow.
 
@@ -282,8 +282,8 @@ Deletes GitHub Packages — container images (Docker) and NuGet packages — tha
 
 | Package type | Pattern | Example |
 |---|---|---|
-| Container image (Docker) | tag `pr-{number}` | `pr-42` |
-| NuGet package | version contains `pr-{number}` | `1.0.0-pr-42.1` |
+| Container image (Docker) | tag contains `pr{number}` | `pr42` |
+| NuGet package | version contains `pr{number}` | `1.0.0-pr42.1` |
 
 **Secrets required:** `PAT_WORKFLOWS` — classic PAT with `read:packages` + `delete:packages` scopes, or fine-grained PAT with **Packages** read/write
 
