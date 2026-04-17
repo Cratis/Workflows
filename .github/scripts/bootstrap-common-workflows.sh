@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Propagates the cleanup-pr-artifacts wrapper workflow to all Cratis
-# repositories so that each repository automatically cleans up PR-published
-# GitHub Packages when a pull request is closed.
+# Propagates common wrapper workflows to all Cratis repositories so that
+# each repository has a standard set of reusable workflows.
 #
-# Called by .github/workflows/bootstrap-cleanup-pr-artifacts.yml after checkout.
+# Currently bootstraps:
+#   - cleanup-pr-artifacts.yml  — cleans up PR-published GitHub Packages
+#   - update-packages.yml       — weekly package updates (NuGet + NPM)
+#
+# Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
 #
 # This script handles both initial bootstrap and ongoing updates:
-#   - New repos:            adds .github/workflows/cleanup-pr-artifacts.yml
-#   - Already-bootstrapped: updates the wrapper if its content has changed
+#   - New repos:            adds missing wrapper workflows
+#   - Already-bootstrapped: updates wrappers if their content has changed
 #   - Up-to-date repos:     skips processing
 #
 # Expects:
@@ -43,26 +46,44 @@ repos=$(cat "$repos_file")
 
 failures_file=$(mktemp)
 
-# Pre-computed base64 content for the wrapper workflow.
-# Using base64 avoids heredoc end-markers at column 0.
+# ================================================================
+# Wrapper workflow definitions (base64-encoded)
+# ================================================================
+# To verify the encoded content, run:  echo "<value>" | base64 -d
 #
-# To verify the encoded content matches the wrapper format, run:
-#   echo "<wrapper_b64 value>" | base64 -d
-#
-# wrapper_b64 decodes to:
+# Each entry: path in target repo -> base64 content
+
+declare -A WRAPPERS
+
+# cleanup-pr-artifacts.yml — triggers on PR close, delegates to reusable workflow
+# Decodes to:
 #   name: Cleanup PR Artifacts
-#
 #   on:
 #     pull_request:
 #       types: [closed]
-#
 #   jobs:
 #     cleanup:
 #       uses: Cratis/Workflows/.github/workflows/cleanup-pr-artifacts.yml@main
 #       with:
 #         pull_request: ${{ github.event.pull_request.number }}
 #       secrets: inherit
-wrapper_b64="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
+WRAPPERS[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
+
+# update-packages.yml — weekly scheduled + manual trigger, delegates to reusable workflow
+# Decodes to:
+#   name: Update Packages
+#   on:
+#     schedule:
+#       - cron: '0 6 * * 1'
+#     workflow_dispatch:
+#   jobs:
+#     update:
+#       uses: Cratis/Workflows/.github/workflows/update-packages.yml@main
+#       with:
+#         package_types: 'NuGet, NPM'
+#       secrets:
+#         PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS }}
+WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogMScKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHBhY2thZ2VfdHlwZXM6ICdOdUdldCwgTlBNJwogICAgc2VjcmV0czoKICAgICAgUEFUX1dPUktGTE9XUzogJHt7IHNlY3JldHMuUEFUX1dPUktGTE9XUyB9fQo="
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
@@ -139,7 +160,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$tree_sha_error"
 
   # ----------------------------------------------------------------
-  # 3. Get the full recursive tree to check existing file
+  # 3. Get the full recursive tree to check existing files
   # ----------------------------------------------------------------
   subtree_error=$(mktemp)
   subtree=$(gh api "repos/Cratis/$repo/git/trees/$tree_sha?recursive=1" \
@@ -154,53 +175,71 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$subtree_error"
 
   # ----------------------------------------------------------------
-  # 4. Create blob for the wrapper workflow file
+  # 4. Create blobs and build tree entries for all wrapper workflows
   # ----------------------------------------------------------------
-  wrapper_blob_error=$(mktemp)
-  _wrapper_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
-    -f content="$wrapper_b64" -f encoding=base64 \
-    2>"$wrapper_blob_error" || true)
-  wrapper_blob_sha=$(extract_sha "$_wrapper_blob_resp")
+  tree_entries="[]"
+  has_changes=false
+  commit_parts=()
 
-  if [ -z "$wrapper_blob_sha" ]; then
-    wrapper_err=$(cat "$wrapper_blob_error" 2>/dev/null || true)
-    echo "  ⚠ Could not create blob for $repo"
-    [ -n "$wrapper_err" ] && echo "    blob error: $wrapper_err"
-    rm -f "$wrapper_blob_error"
-    echo "$repo" >> "$failures_file"
-    continue
-  fi
-  rm -f "$wrapper_blob_error"
+  for wrapper_path in "${!WRAPPERS[@]}"; do
+    wrapper_b64="${WRAPPERS[$wrapper_path]}"
+    wrapper_name=$(basename "$wrapper_path" .yml)
 
-  # ----------------------------------------------------------------
-  # 5. Check if the wrapper file already matches (idempotency)
-  # ----------------------------------------------------------------
-  existing_wrapper=$(echo "$subtree" | jq -r \
-    '.tree[] | select(.path == ".github/workflows/cleanup-pr-artifacts.yml") | .sha' \
-    2>/dev/null || true)
+    # Create blob
+    blob_error=$(mktemp)
+    _blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+      -f content="$wrapper_b64" -f encoding=base64 \
+      2>"$blob_error" || true)
+    blob_sha=$(extract_sha "$_blob_resp")
 
-  if [ "$existing_wrapper" = "$wrapper_blob_sha" ]; then
+    if [ -z "$blob_sha" ]; then
+      blob_err=$(cat "$blob_error" 2>/dev/null || true)
+      echo "  ⚠ Could not create blob for $wrapper_name in $repo"
+      [ -n "$blob_err" ] && echo "    blob error: $blob_err"
+      rm -f "$blob_error"
+      echo "$repo" >> "$failures_file"
+      continue 2  # skip entire repo on blob failure
+    fi
+    rm -f "$blob_error"
+
+    # Check if file already matches
+    existing_sha=$(echo "$subtree" | jq -r \
+      --arg path "$wrapper_path" \
+      '.tree[] | select(.path == $path) | .sha' \
+      2>/dev/null || true)
+
+    if [ "$existing_sha" = "$blob_sha" ]; then
+      echo "  ℹ $wrapper_name already up-to-date"
+      continue
+    fi
+
+    has_changes=true
+    if [ -n "$existing_sha" ]; then
+      commit_parts+=("update $wrapper_name")
+    else
+      commit_parts+=("add $wrapper_name")
+    fi
+
+    # Add tree entry
+    tree_entries=$(echo "$tree_entries" | jq \
+      --arg path "$wrapper_path" \
+      --arg sha  "$blob_sha" \
+      '. + [{path: $path, mode: "100644", type: "blob", sha: $sha}]')
+  done
+
+  if [ "$has_changes" != "true" ]; then
     echo "  ℹ No changes needed for $repo"
     continue
   fi
 
   # ----------------------------------------------------------------
-  # 6. Build the new tree JSON
+  # 5. Create the new tree object
   # ----------------------------------------------------------------
   new_tree_json=$(jq -n \
     --arg base_tree "$tree_sha" \
-    --arg path ".github/workflows/cleanup-pr-artifacts.yml" \
-    --arg sha  "$wrapper_blob_sha" \
-    '{
-      base_tree: $base_tree,
-      tree: [
-        {path: $path, mode: "100644", type: "blob", sha: $sha}
-      ]
-    }')
+    --argjson tree "$tree_entries" \
+    '{base_tree: $base_tree, tree: $tree}')
 
-  # ----------------------------------------------------------------
-  # 7. Create the new tree object
-  # ----------------------------------------------------------------
   tree_error=$(mktemp)
   _new_tree_resp=$(echo "$new_tree_json" | \
     gh api -X POST "repos/Cratis/$repo/git/trees" \
@@ -224,12 +263,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$tree_error"
 
   # ----------------------------------------------------------------
-  # 8. Create the commit
+  # 6. Create the commit
   # ----------------------------------------------------------------
-  commit_message="Add cleanup-pr-artifacts workflow"
-  if [ -n "$existing_wrapper" ]; then
-    commit_message="Update cleanup-pr-artifacts workflow"
-  fi
+  # Join commit parts: "Add/Update cleanup-pr-artifacts, add update-packages"
+  commit_message=$(IFS=', '; echo "Bootstrap common workflows: ${commit_parts[*]}")
+  commit_message="${commit_message^}"  # Capitalize first letter
 
   commit_error=$(mktemp)
   _commit_resp=$(jq -n \
@@ -252,12 +290,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$commit_error"
 
   # ----------------------------------------------------------------
-  # 9. Push commit directly to the default branch
-  #
-  # A fast-forward (non-force) PATCH updates the ref only if the new
-  # commit is a descendant of the current HEAD — safe against races.
-  # The PAT owner must be configured as a bypass actor on the target
-  # repository's branch protection ruleset for this push to succeed.
+  # 7. Push commit directly to the default branch
   # ----------------------------------------------------------------
   push_error=$(mktemp)
   push_result=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
@@ -278,7 +311,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   fi
   rm -f "$push_error"
 
-  echo "  ✓ Pushed $commit_message directly to $default_branch in $repo"
+  echo "  ✓ Pushed to $default_branch in $repo: $commit_message"
 done
 
 total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")

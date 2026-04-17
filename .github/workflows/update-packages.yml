@@ -35,19 +35,33 @@ jobs:
           token: ${{ secrets.PAT_WORKFLOWS }}
           fetch-depth: 0
 
-      - name: Parse package types
+      - name: Parse package types and detect projects
         id: parse
         run: |
           input="${{ inputs.package_types }}"
           # Normalize: lowercase, trim spaces
           normalized=$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+
+          # Check if NuGet was requested AND .sln or .csproj files exist
           if echo "$normalized" | grep -q 'nuget'; then
-            echo "update_nuget=true" >> "$GITHUB_OUTPUT"
+            if find . -maxdepth 5 -name '*.sln' -o -name '*.csproj' | grep -q .; then
+              echo "update_nuget=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "NuGet requested but no .sln or .csproj files found, skipping"
+              echo "update_nuget=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "update_nuget=false" >> "$GITHUB_OUTPUT"
           fi
+
+          # Check if NPM was requested AND package.json exists
           if echo "$normalized" | grep -q 'npm'; then
-            echo "update_npm=true" >> "$GITHUB_OUTPUT"
+            if [ -f "package.json" ]; then
+              echo "update_npm=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "NPM requested but no package.json found, skipping"
+              echo "update_npm=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "update_npm=false" >> "$GITHUB_OUTPUT"
           fi

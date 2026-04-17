@@ -1,17 +1,17 @@
-name: Bootstrap Cleanup PR Artifacts
-# Ensures all Cratis repositories have the cleanup-pr-artifacts wrapper
-# workflow installed and up-to-date.  When a pull request is closed in any
-# Cratis repository, the wrapper delegates to the reusable workflow in this
-# repository to delete GitHub Packages published during that PR.
+name: Bootstrap Common Workflows
+# Ensures all Cratis repositories have the standard set of common wrapper
+# workflows installed and up-to-date.  Currently bootstraps:
+#
+#   • cleanup-pr-artifacts.yml  — deletes GitHub Packages published during a PR
+#   • update-packages.yml       — weekly NuGet + NPM package updates
 #
 # Handles both initial bootstrap (new repos) and ongoing updates:
-#   • New repos:           adds .github/workflows/cleanup-pr-artifacts.yml
-#   • Already-bootstrapped: updates the wrapper if content has changed
-#   • Already up-to-date:  skips processing
+#   • New repos:            adds missing wrapper workflows
+#   • Already-bootstrapped: updates wrappers if content has changed
+#   • Already up-to-date:   skips processing
 #
-# Triggered automatically on push to main whenever the reusable cleanup
-# workflow changes (so all repositories pick up the updated call).
-# Can also be run manually at any time via workflow_dispatch.
+# Triggered automatically on push to main whenever the reusable workflows
+# or the bootstrap script changes.  Can also be run manually via workflow_dispatch.
 #
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
@@ -26,16 +26,16 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/cleanup-pr-artifacts.yml"
-      - ".github/scripts/bootstrap-cleanup-pr-artifacts.sh"
+      - ".github/workflows/update-packages.yml"
+      - ".github/scripts/bootstrap-common-workflows.sh"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  # Repositories to skip when bootstrapping the cleanup workflow.
-  # Add any repo name here that should never receive the wrapper.
-  # Workflows  - this repo; it holds the reusable workflow itself
+  # Repositories to skip when bootstrapping.
+  # Workflows  - this repo; it holds the reusable workflows themselves
   # cratis.github.io, StudioIssues - do not publish GitHub Packages
   REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues"]'
 
@@ -75,15 +75,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
         run: |
-          # Write all non-archived repos; ignore-list filtering is done in the script.
           gh repo list Cratis --limit 1000 --json name,isArchived \
             --jq '[.[] | select(.isArchived == false) | .name]' \
             > "$GITHUB_WORKSPACE/repos.json"
 
-      - name: Bootstrap cleanup workflow in all repositories
+      - name: Bootstrap common workflows in all repositories
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           REPOS_FILE: ${{ github.workspace }}/repos.json
           REPOS_IGNORE: ${{ env.REPOS_TO_IGNORE }}
         run: |
-          bash .github/scripts/bootstrap-cleanup-pr-artifacts.sh
+          bash .github/scripts/bootstrap-common-workflows.sh
