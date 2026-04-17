@@ -1,0 +1,114 @@
+name: Update Packages
+# Reusable workflow that updates NuGet and/or NPM packages in the calling
+# repository, builds to verify nothing is broken, and pushes the result
+# directly to the default branch.
+#
+# This workflow requires PAT_WORKFLOWS secret with permissions:
+#   Classic PAT:       repo scope
+#   Fine-grained PAT:  Contents (read/write) + Metadata (read)
+#
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.
+
+on:
+  workflow_call:
+    inputs:
+      package_types:
+        description: 'Comma-separated list of package types to update (NuGet, NPM)'
+        required: true
+        type: string
+    secrets:
+      PAT_WORKFLOWS:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_WORKFLOWS }}
+          fetch-depth: 0
+
+      - name: Parse package types
+        id: parse
+        run: |
+          input="${{ inputs.package_types }}"
+          # Normalize: lowercase, trim spaces
+          normalized=$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+          if echo "$normalized" | grep -q 'nuget'; then
+            echo "update_nuget=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_nuget=false" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$normalized" | grep -q 'npm'; then
+            echo "update_npm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_npm=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup .NET
+        if: steps.parse.outputs.update_nuget == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Update NuGet packages
+        if: steps.parse.outputs.update_nuget == 'true'
+        run: dotnet package update
+
+      - name: Build .NET
+        if: steps.parse.outputs.update_nuget == 'true'
+        run: dotnet build
+
+      - name: Setup Node.js
+        if: steps.parse.outputs.update_npm == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Update NPM packages
+        if: steps.parse.outputs.update_npm == 'true'
+        run: |
+          npx npm-check-updates -u
+          yarn install
+
+      - name: Build NPM
+        if: steps.parse.outputs.update_npm == 'true'
+        run: yarn ci
+
+      - name: Commit and push changes
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          # Check if there are any changes
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No package updates found. Nothing to commit."
+            exit 0
+          fi
+
+          # Configure git identity
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Build commit message from what was updated
+          updated_types=""
+          if [ "${{ steps.parse.outputs.update_nuget }}" == "true" ]; then
+            updated_types="NuGet"
+          fi
+          if [ "${{ steps.parse.outputs.update_npm }}" == "true" ]; then
+            if [ -n "$updated_types" ]; then
+              updated_types="$updated_types and NPM"
+            else
+              updated_types="NPM"
+            fi
+          fi
+
+          git add -A
+          git commit -m "chore: update ${updated_types} packages"
+          git push origin HEAD
