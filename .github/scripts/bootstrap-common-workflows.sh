@@ -69,12 +69,12 @@ declare -A WRAPPERS
 #       secrets: inherit
 WRAPPERS[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
 
-# update-packages.yml — weekly scheduled + manual trigger, delegates to reusable workflow
+# update-packages.yml — nightly scheduled + manual trigger, delegates to reusable workflow
 # Decodes to:
 #   name: Update Packages
 #   on:
 #     schedule:
-#       - cron: '0 6 * * 1'
+#       - cron: '0 6 * * *'
 #     workflow_dispatch:
 #   jobs:
 #     update:
@@ -83,7 +83,7 @@ WRAPPERS[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBB
 #         package_types: 'NuGet, NPM'
 #       secrets:
 #         PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS }}
-WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogMScKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHBhY2thZ2VfdHlwZXM6ICdOdUdldCwgTlBNJwogICAgc2VjcmV0czoKICAgICAgUEFUX1dPUktGTE9XUzogJHt7IHNlY3JldHMuUEFUX1dPUktGTE9XUyB9fQo="
+WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogKicKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHBhY2thZ2VfdHlwZXM6ICdOdUdldCwgTlBNJwogICAgc2VjcmV0czoKICAgICAgUEFUX1dPUktGTE9XUzogJHt7IHNlY3JldHMuUEFUX1dPUktGTE9XUyB9fQo="
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
