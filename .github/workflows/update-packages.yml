@@ -13,11 +13,6 @@ name: Update Packages
 
 on:
   workflow_call:
-    inputs:
-      package_types:
-        description: 'Comma-separated list of package types to update (NuGet, NPM)'
-        required: true
-        type: string
     secrets:
       PAT_WORKFLOWS:
         required: true
@@ -35,65 +30,58 @@ jobs:
           token: ${{ secrets.PAT_WORKFLOWS }}
           fetch-depth: 0
 
-      - name: Parse package types and detect projects
-        id: parse
+      - name: Detect package ecosystems in repo root
+        id: detect
         run: |
-          input="${{ inputs.package_types }}"
-          # Normalize: lowercase, trim spaces
-          normalized=$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-
-          # Check if NuGet was requested AND .sln or .csproj files exist
-          if echo "$normalized" | grep -q 'nuget'; then
-            if find . -maxdepth 5 -name '*.sln' -o -name '*.csproj' | grep -q .; then
-              echo "update_nuget=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "NuGet requested but no .sln or .csproj files found, skipping"
-              echo "update_nuget=false" >> "$GITHUB_OUTPUT"
-            fi
+          # .NET is enabled only when root contains at least one .sln/.slnx/.csproj.
+          if find . -maxdepth 1 -type f \( -name '*.sln' -o -name '*.slnx' -o -name '*.csproj' \) | grep -q .; then
+            echo "update_nuget=true" >> "$GITHUB_OUTPUT"
           else
+            echo "No root .sln, .slnx, or .csproj found; skipping .NET setup and NuGet update"
             echo "update_nuget=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # Check if NPM was requested AND package.json exists
-          if echo "$normalized" | grep -q 'npm'; then
-            if [ -f "package.json" ]; then
+          # NPM is enabled only when root package.json exists and defines scripts.ci.
+          if [ -f "package.json" ]; then
+            if jq -e '.scripts.ci | type == "string" and length > 0' package.json >/dev/null; then
               echo "update_npm=true" >> "$GITHUB_OUTPUT"
             else
-              echo "NPM requested but no package.json found, skipping"
+              echo "Root package.json has no \"ci\" script; skipping Node.js setup and NPM update"
               echo "update_npm=false" >> "$GITHUB_OUTPUT"
             fi
           else
+            echo "No root package.json found; skipping Node.js setup and NPM update"
             echo "update_npm=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup .NET
-        if: steps.parse.outputs.update_nuget == 'true'
+        if: steps.detect.outputs.update_nuget == 'true'
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
 
       - name: Update NuGet packages
-        if: steps.parse.outputs.update_nuget == 'true'
+        if: steps.detect.outputs.update_nuget == 'true'
         run: dotnet package update
 
       - name: Build .NET
-        if: steps.parse.outputs.update_nuget == 'true'
+        if: steps.detect.outputs.update_nuget == 'true'
         run: dotnet build
 
       - name: Setup Node.js
-        if: steps.parse.outputs.update_npm == 'true'
+        if: steps.detect.outputs.update_npm == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Update NPM packages
-        if: steps.parse.outputs.update_npm == 'true'
+        if: steps.detect.outputs.update_npm == 'true'
         run: |
           npx npm-check-updates -u
           yarn install
 
       - name: Build NPM
-        if: steps.parse.outputs.update_npm == 'true'
+        if: steps.detect.outputs.update_npm == 'true'
         run: yarn ci
 
       - name: Commit and push changes
@@ -112,10 +100,10 @@ jobs:
 
           # Build commit message from what was updated
           updated_types=""
-          if [ "${{ steps.parse.outputs.update_nuget }}" == "true" ]; then
+          if [ "${{ steps.detect.outputs.update_nuget }}" == "true" ]; then
             updated_types="NuGet"
           fi
-          if [ "${{ steps.parse.outputs.update_npm }}" == "true" ]; then
+          if [ "${{ steps.detect.outputs.update_npm }}" == "true" ]; then
             if [ -n "$updated_types" ]; then
               updated_types="$updated_types and NPM"
             else
