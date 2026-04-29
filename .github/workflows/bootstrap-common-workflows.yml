@@ -37,7 +37,7 @@ env:
   # Repositories to skip when bootstrapping.
   # Workflows  - this repo; it holds the reusable workflows themselves
   # cratis.github.io, StudioIssues - do not publish GitHub Packages
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI"]'
 
 jobs:
   bootstrap:
