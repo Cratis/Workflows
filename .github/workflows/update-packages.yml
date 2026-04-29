@@ -11,6 +11,9 @@ name: Update Packages
 # repository's branch protection ruleset so that direct pushes to the
 # default branch are permitted.
 
+env:
+  DOTNET_VERSION: "10.0.x"
+
 on:
   workflow_call:
     secrets:
@@ -58,7 +61,7 @@ jobs:
         if: steps.detect.outputs.update_nuget == 'true'
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Update NuGet packages
         if: steps.detect.outputs.update_nuget == 'true'
