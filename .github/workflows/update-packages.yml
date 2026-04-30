@@ -65,7 +65,24 @@ jobs:
 
       - name: Update NuGet packages
         if: steps.detect.outputs.update_nuget == 'true'
-        run: dotnet package update
+        run: |
+          set +e
+          output=$(dotnet package update 2>&1)
+          exit_code=$?
+          set -e
+
+          echo "$output"
+
+          if [ $exit_code -eq 0 ]; then
+            exit 0
+          fi
+
+          if [ $exit_code -eq 2 ] && echo "$output" | grep -q "All packages are up to date"; then
+            echo "No NuGet updates available; continuing."
+            exit 0
+          fi
+
+          exit $exit_code
 
       - name: Build .NET
         if: steps.detect.outputs.update_nuget == 'true'
