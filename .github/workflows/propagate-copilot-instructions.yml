@@ -33,7 +33,7 @@ on:
 env:
   # Repositories to skip when propagating Copilot instructions.
   # Add any repo name here that should never receive propagated changes.
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio"]'
 
 permissions:
   contents: read
