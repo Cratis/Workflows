@@ -244,7 +244,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # so identical content yields identical SHAs across repositories).
   ai_files_up_to_date=true
   if [ -n "$ai_copilot_files" ] && [ "$ai_copilot_files" != "[]" ]; then
-    while IFS=$'\t' read -r ai_chk_path ai_chk_sha ai_chk_mode; do
+    while IFS=$'\t' read -r ai_chk_path ai_chk_sha ai_chk_file_mode; do
       [ -z "$ai_chk_path" ] && continue
       existing_ai_sha=$(echo "$subtree" | jq -r \
         --arg p "$ai_chk_path" \
@@ -252,7 +252,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       existing_ai_mode=$(echo "$subtree" | jq -r \
         --arg p "$ai_chk_path" \
         '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
-      if [ "$existing_ai_sha" != "$ai_chk_sha" ] || [ "$existing_ai_mode" != "$ai_chk_mode" ]; then
+      if [ "$existing_ai_sha" != "$ai_chk_sha" ] || [ "$existing_ai_mode" != "$ai_chk_file_mode" ]; then
         ai_files_up_to_date=false
         break
       fi
@@ -276,8 +276,8 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   has_files_to_clean=false
   while IFS= read -r del_path; do
     [ -z "$del_path" ] && continue
-    del_sha_mode=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2 "\t" $3;exit}')
-    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha_mode"; then
+    del_sha_and_mode=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2 "\t" $3;exit}')
+    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha_and_mode"; then
       has_files_to_clean=true
       break
     fi

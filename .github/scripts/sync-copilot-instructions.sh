@@ -183,7 +183,7 @@ fi
 #    (git blob SHAs are content-addressed across repositories)
 # ----------------------------------------------------------------
 files_up_to_date=true
-while IFS=$'\t' read -r chk_path chk_sha chk_mode; do
+while IFS=$'\t' read -r chk_path chk_sha chk_file_mode; do
   [ -z "$chk_path" ] && continue
   existing_sha=$(echo "$comparison_subtree" | jq -r \
     --arg p "$chk_path" \
@@ -191,7 +191,7 @@ while IFS=$'\t' read -r chk_path chk_sha chk_mode; do
   existing_mode=$(echo "$comparison_subtree" | jq -r \
     --arg p "$chk_path" \
     '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
-  if [ "$existing_sha" != "$chk_sha" ] || [ "$existing_mode" != "$chk_mode" ]; then
+  if [ "$existing_sha" != "$chk_sha" ] || [ "$existing_mode" != "$chk_file_mode" ]; then
     files_up_to_date=false
     break
   fi
