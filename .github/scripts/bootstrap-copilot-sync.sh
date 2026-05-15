@@ -276,8 +276,8 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   has_files_to_clean=false
   while IFS= read -r del_path; do
     [ -z "$del_path" ] && continue
-    del_sha_and_mode=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2 "\t" $3;exit}')
-    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha_and_mode"; then
+    del_sha_mode=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2 "\t" $3;exit}')
+    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha_mode"; then
       has_files_to_clean=true
       break
     fi
