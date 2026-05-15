@@ -88,8 +88,8 @@ ai_tree_raw=$(gh api "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_er
 if [ -n "$ai_tree_raw" ]; then
   ai_copilot_files=$(echo "$ai_tree_raw" | jq -c \
     '[.tree[] | select(.type == "blob") |
-     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
-     {path: .path, sha: .sha}]' 2>/dev/null || true)
+     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)")) |
+     {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 fi
 if [ -z "$ai_copilot_files" ] || [ "$ai_copilot_files" = "[]" ]; then
   ai_tree_api_error=$(cat "$ai_tree_error" 2>/dev/null || true)
@@ -236,7 +236,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # instructions/, agents/, skills/, prompts/, and hooks/ sub-directories.
   files_to_delete=$(echo "$subtree" | jq -r \
     '.tree[] | select(.type == "blob") |
-     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
+     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)")) |
      .path' 2>/dev/null || true)
 
   # Check whether Copilot files from Cratis/AI are already present in
@@ -244,16 +244,19 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # so identical content yields identical SHAs across repositories).
   ai_files_up_to_date=true
   if [ -n "$ai_copilot_files" ] && [ "$ai_copilot_files" != "[]" ]; then
-    while IFS=' ' read -r ai_chk_path ai_chk_sha; do
+    while IFS=$'\t' read -r ai_chk_path ai_chk_sha ai_chk_mode; do
       [ -z "$ai_chk_path" ] && continue
       existing_ai_sha=$(echo "$subtree" | jq -r \
         --arg p "$ai_chk_path" \
         '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
-      if [ "$existing_ai_sha" != "$ai_chk_sha" ]; then
+      existing_ai_mode=$(echo "$subtree" | jq -r \
+        --arg p "$ai_chk_path" \
+        '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
+      if [ "$existing_ai_sha" != "$ai_chk_sha" ] || [ "$existing_ai_mode" != "$ai_chk_mode" ]; then
         ai_files_up_to_date=false
         break
       fi
-    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
+    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
   fi
 
   # Check whether any copilot files in the repo need to be cleaned up —
@@ -266,15 +269,15 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # repeated jq invocations inside the loop.
   repo_copilot_shas=$(echo "$subtree" | jq -r \
     '[.tree[] | select(.type == "blob") |
-      select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)"))] |
-      .[] | .path + "\t" + .sha' 2>/dev/null || true)
-  ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha' 2>/dev/null || true)
+      select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)"))] |
+      .[] | .path + "\t" + .sha + "\t" + .mode' 2>/dev/null || true)
+  ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)
 
   has_files_to_clean=false
   while IFS= read -r del_path; do
     [ -z "$del_path" ] && continue
-    del_sha=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2;exit}')
-    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha"; then
+    del_sha_mode=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2 "\t" $3;exit}')
+    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha_mode"; then
       has_files_to_clean=true
       break
     fi
@@ -372,7 +375,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       '{"base_tree": $base_tree, "tree": []}')
 
     ai_copy_failed=false
-    while IFS=' ' read -r ai_path ai_sha; do
+    while IFS=$'\t' read -r ai_path ai_sha ai_mode; do
       [ -z "$ai_path" ] && continue
 
       # Fetch blob content from Cratis/AI (returned as base64 by the API)
@@ -413,8 +416,9 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       ai_second_tree_json=$(echo "$ai_second_tree_json" | jq \
         --arg p "$ai_path" \
         --arg s "$target_blob_sha" \
-        '.tree += [{path: $p, mode: "100644", type: "blob", sha: $s}]')
-    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
+        --arg m "$ai_mode" \
+        '.tree += [{path: $p, mode: $m, type: "blob", sha: $s}]')
+    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
 
     if [ "$ai_copy_failed" = "false" ]; then
       ai_second_tree_error=$(mktemp)
