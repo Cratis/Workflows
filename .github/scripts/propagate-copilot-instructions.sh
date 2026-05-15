@@ -45,7 +45,7 @@ fi
 
 copilot_files=$(echo "$source_tree_raw" | jq -c \
   '[.tree[] | select(.type == "blob") |
-   select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)")) |
+   select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/.+|\\.claude/.+)")) |
    {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 
 if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then

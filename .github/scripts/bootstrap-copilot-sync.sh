@@ -88,7 +88,7 @@ ai_tree_raw=$(gh api "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_er
 if [ -n "$ai_tree_raw" ]; then
   ai_copilot_files=$(echo "$ai_tree_raw" | jq -c \
     '[.tree[] | select(.type == "blob") |
-     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)")) |
+     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/.+|\\.claude/.+)")) |
      {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 fi
 if [ -z "$ai_copilot_files" ] || [ "$ai_copilot_files" = "[]" ]; then
@@ -236,7 +236,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # instructions/, agents/, skills/, prompts/, and hooks/ sub-directories.
   files_to_delete=$(echo "$subtree" | jq -r \
     '.tree[] | select(.type == "blob") |
-     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)")) |
+     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/.+|\\.claude/.+)")) |
      .path' 2>/dev/null || true)
 
   # Check whether Copilot files from Cratis/AI are already present in
@@ -269,7 +269,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # repeated jq invocations inside the loop.
   repo_copilot_shas=$(echo "$subtree" | jq -r \
     '[.tree[] | select(.type == "blob") |
-      select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/|\\.claude/)"))] |
+      select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/.+|\\.claude/.+)"))] |
       .[] | .path + "\t" + .sha + "\t" + .mode' 2>/dev/null || true)
   ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)
 
