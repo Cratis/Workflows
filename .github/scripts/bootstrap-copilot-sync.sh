@@ -68,7 +68,7 @@ gh_api_with_retry() {
 # Validate branch names to avoid treating JSON error responses as branch refs.
 is_valid_branch_name() {
   local branch="${1:-}"
-  [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] &&
+  [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] &&
     [[ "$branch" != */ ]] &&
     [[ "$branch" != /* ]]
 }
