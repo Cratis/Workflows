@@ -40,14 +40,14 @@ gh_api_with_retry() {
     err=$(cat "$err_file" 2>/dev/null || true)
     rm -f "$out_file" "$err_file"
 
-    if echo "$response"$'\n'"$err" | grep -qiE 'API rate limit exceeded|secondary rate limit'; then
+    if printf '%s\n%s' "$response" "$err" | grep -qiE 'API rate limit exceeded|secondary rate limit'; then
       local wait_seconds
       wait_seconds=$((attempt * 15))
       if [ "$wait_seconds" -gt 300 ]; then
         wait_seconds=300
       fi
 
-      echo "  ⏳ GitHub API rate limit hit; waiting ${wait_seconds}s before retry (attempt $attempt/$max_attempts)"
+      echo "  ⏳ GitHub API rate limit hit; waiting ${wait_seconds} seconds before retry (attempt $attempt/$max_attempts)" >&2
       sleep "$wait_seconds"
       attempt=$((attempt + 1))
       continue
@@ -68,7 +68,8 @@ is_valid_branch_name() {
   local branch="${1:-}"
   [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] &&
     [[ "$branch" != */ ]] &&
-    [[ "$branch" != /* ]]
+    [[ "$branch" != /* ]] &&
+    [[ "$branch" != *. ]]
 }
 
 # Extract a SHA from a gh api JSON response.  Returns empty string if:
