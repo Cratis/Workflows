@@ -129,6 +129,8 @@ The artifacts that are synchronized are:
 | `.github/skills/` | Folder of skill files |
 | `.github/prompts/` | Folder of prompt files |
 | `.github/hooks/` | Folder of hook files |
+| `.ai/` | AI setup folder (including prompts, skills, agents, hooks, and rules) |
+| `.claude/` | Claude setup folder (including symlinks such as `.claude/* -> .ai/*`) |
 
 ### Excluding files from synchronization
 
