@@ -41,12 +41,10 @@ gh_api_with_retry() {
     rm -f "$out_file" "$err_file"
 
     if echo "$response"$'\n'"$err" | grep -qiE 'API rate limit exceeded|secondary rate limit'; then
-      local reset_epoch now wait_seconds
-      reset_epoch=$(gh api /rate_limit --jq '.resources.core.reset // .rate.reset // 0' 2>/dev/null || echo "0")
-      now=$(date +%s)
-      wait_seconds=$((reset_epoch - now + 5))
-      if [ "$wait_seconds" -lt 5 ]; then
-        wait_seconds=$((attempt * 5))
+      local wait_seconds
+      wait_seconds=$((attempt * 15))
+      if [ "$wait_seconds" -gt 300 ]; then
+        wait_seconds=300
       fi
 
       echo "  ⏳ GitHub API rate limit hit; waiting ${wait_seconds}s before retry (attempt $attempt/$max_attempts)"
