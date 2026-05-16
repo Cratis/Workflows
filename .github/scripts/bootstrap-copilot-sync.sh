@@ -200,6 +200,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   fi
   if ! is_valid_branch_name "$default_branch"; then
     echo "  ⚠ Invalid default branch value for $repo ('$default_branch'), skipping"
+    echo "    Expected a non-empty ref-safe branch name (no leading/trailing '/', no trailing '.', no '..', no '.lock')."
     rm -f "$repo_info_error"
     continue
   fi
