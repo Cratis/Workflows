@@ -17,6 +17,62 @@
 
 set -euo pipefail
 
+# Wrapper for gh api that retries on GitHub API rate limiting.
+# Prints API response body to stdout on success.
+gh_api_with_retry() {
+  local max_attempts=8
+  local attempt=1
+  local response=""
+  local err=""
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    local out_file err_file
+    out_file=$(mktemp)
+    err_file=$(mktemp)
+
+    if gh api "$@" >"$out_file" 2>"$err_file"; then
+      cat "$out_file"
+      rm -f "$out_file" "$err_file"
+      return 0
+    fi
+
+    response=$(cat "$out_file" 2>/dev/null || true)
+    err=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$out_file" "$err_file"
+
+    if echo "$response"$'\n'"$err" | grep -qiE 'API rate limit exceeded|secondary rate limit'; then
+      local reset_epoch now wait_seconds
+      reset_epoch=$(gh api /rate_limit --jq '.resources.core.reset // .rate.reset // 0' 2>/dev/null || echo "0")
+      now=$(date +%s)
+      wait_seconds=$((reset_epoch - now + 5))
+      if [ "$wait_seconds" -lt 5 ]; then
+        wait_seconds=$((attempt * 5))
+      fi
+
+      echo "  ⏳ GitHub API rate limit hit; waiting ${wait_seconds}s before retry (attempt $attempt/$max_attempts)"
+      sleep "$wait_seconds"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    [ -n "$response" ] && echo "$response"
+    [ -n "$err" ] && echo "$err" >&2
+    return 1
+  done
+
+  [ -n "$response" ] && echo "$response"
+  [ -n "$err" ] && echo "$err" >&2
+  return 1
+}
+
+# Validate branch names to avoid treating JSON error responses as branch refs.
+is_valid_branch_name() {
+  local branch="${1:-}"
+  [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] &&
+    [[ "$branch" != */ ]] &&
+    [[ "$branch" != /* ]]
+}
+
 # Extract a SHA from a gh api JSON response.  Returns empty string if:
 #   - the response is empty
 #   - the jq path does not exist
@@ -84,7 +140,7 @@ propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoO
 # Fetch the Copilot setup tree from Cratis/AI once; reused for every repo.
 ai_copilot_files=""
 ai_tree_error=$(mktemp)
-ai_tree_raw=$(gh api "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_error" || true)
+ai_tree_raw=$(gh_api_with_retry "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_error" || true)
 if [ -n "$ai_tree_raw" ]; then
   ai_copilot_files=$(echo "$ai_tree_raw" | jq -c \
     '[.tree[] | select(.type == "blob") |
@@ -105,7 +161,7 @@ rm -f "$ai_tree_error"
 # ================================================================
 probe_repo=$(echo "$repos" | jq -r '[.[] | select(. != "Workflows")][0] // empty')
 if [ -n "$probe_repo" ]; then
-  probe_perms=$(gh api "repos/Cratis/$probe_repo" --jq '.permissions.push // false' 2>/dev/null || true)
+  probe_perms=$(gh_api_with_retry "repos/Cratis/$probe_repo" --jq '.permissions.push // false' 2>/dev/null || true)
   if [ "$probe_perms" != "true" ]; then
     echo "::error::PAT_WORKFLOWS does not have write (push) access to Cratis/$probe_repo."
     echo "The fine-grained PAT must be configured with:"
@@ -132,9 +188,9 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 1. Get default branch and HEAD SHA
   # ----------------------------------------------------------------
   repo_info_error=$(mktemp)
-  default_branch=$(gh api "repos/Cratis/$repo" \
+  default_branch=$(gh_api_with_retry "repos/Cratis/$repo" \
     --jq '.default_branch' 2>"$repo_info_error" || true)
-  if [ -z "$default_branch" ]; then
+  if [ -z "$default_branch" ] || ! is_valid_branch_name "$default_branch"; then
     repo_info_api_error=$(cat "$repo_info_error" 2>/dev/null || true)
     echo "  ⚠ Could not get default branch for $repo, skipping"
     [ -n "$repo_info_api_error" ] && echo "    API error: $repo_info_api_error"
@@ -144,7 +200,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   rm -f "$repo_info_error"
 
   head_sha_error=$(mktemp)
-  _head_sha_resp=$(gh api "repos/Cratis/$repo/git/ref/heads/$default_branch" \
+  _head_sha_resp=$(gh_api_with_retry "repos/Cratis/$repo/git/ref/heads/$default_branch" \
     2>"$head_sha_error" || true)
   head_sha=$(extract_sha "$_head_sha_resp" '.object.sha')
   if [ -z "$head_sha" ]; then
@@ -160,7 +216,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 2. Get the commit's tree SHA
   # ----------------------------------------------------------------
   tree_sha_error=$(mktemp)
-  _tree_sha_resp=$(gh api "repos/Cratis/$repo/git/commits/$head_sha" \
+  _tree_sha_resp=$(gh_api_with_retry "repos/Cratis/$repo/git/commits/$head_sha" \
     2>"$tree_sha_error" || true)
   tree_sha=$(extract_sha "$_tree_sha_resp" '.tree.sha')
   if [ -z "$tree_sha" ]; then
@@ -176,7 +232,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 3. Get the full recursive tree to find instruction files to delete
   # ----------------------------------------------------------------
   subtree_error=$(mktemp)
-  subtree=$(gh api "repos/Cratis/$repo/git/trees/$tree_sha?recursive=1" \
+  subtree=$(gh_api_with_retry "repos/Cratis/$repo/git/trees/$tree_sha?recursive=1" \
     2>"$subtree_error" || true)
   if [ -z "$subtree" ]; then
     subtree_api_error=$(cat "$subtree_error" 2>/dev/null || true)
@@ -193,12 +249,12 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   #    The Workflows permission is checked later when creating the tree.
   # ----------------------------------------------------------------
   sync_blob_error=$(mktemp)
-  _sync_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+  _sync_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \
     -f content="$sync_b64" -f encoding=base64 \
     2>"$sync_blob_error" || true)
   sync_blob_sha=$(extract_sha "$_sync_blob_resp")
   propagate_blob_error=$(mktemp)
-  _prop_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+  _prop_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \
     -f content="$propagate_b64" -f encoding=base64 \
     2>"$propagate_blob_error" || true)
   propagate_blob_sha=$(extract_sha "$_prop_blob_resp")
@@ -381,7 +437,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
       # Fetch blob content from Cratis/AI (returned as base64 by the API)
       ai_blob_error=$(mktemp)
-      ai_blob_content=$(gh api "repos/Cratis/AI/git/blobs/$ai_sha" \
+      ai_blob_content=$(gh_api_with_retry "repos/Cratis/AI/git/blobs/$ai_sha" \
         --jq '.content' 2>"$ai_blob_error" || true)
 
       if [ -z "$ai_blob_content" ]; then
@@ -398,7 +454,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       clean_ai_b64=$(echo "$ai_blob_content" | tr -d '\n')
 
       target_blob_error=$(mktemp)
-      _target_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+      _target_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \
         -f "content=$clean_ai_b64" \
         -f encoding=base64 \
         2>"$target_blob_error" || true)
@@ -466,7 +522,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # repository's branch protection ruleset for this push to succeed.
   # ----------------------------------------------------------------
   push_error=$(mktemp)
-  push_result=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
+  push_result=$(gh_api_with_retry -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
     -f sha="$new_commit_sha" \
     -F force=false \
     2>"$push_error" || true)
