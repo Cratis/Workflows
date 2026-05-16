@@ -40,7 +40,7 @@ gh_api_with_retry() {
     err=$(cat "$err_file" 2>/dev/null || true)
     rm -f "$out_file" "$err_file"
 
-    if printf '%s\n%s' "$response" "$err" | grep -qiE 'API rate limit exceeded|secondary rate limit'; then
+    if printf '%s\n%s' "$response" "$err" | grep -qiE 'API rate limit exceeded|secondary rate limit|rate_limit|abuse'; then
       local wait_seconds
       wait_seconds=$((attempt * 15))
       if [ "$wait_seconds" -gt 300 ]; then
@@ -69,7 +69,9 @@ is_valid_branch_name() {
   [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] &&
     [[ "$branch" != */ ]] &&
     [[ "$branch" != /* ]] &&
-    [[ "$branch" != *. ]]
+    [[ "$branch" != *. ]] &&
+    [[ "$branch" != *..* ]] &&
+    [[ "$branch" != *.lock ]]
 }
 
 # Extract a SHA from a gh api JSON response.  Returns empty string if:
@@ -189,10 +191,15 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   repo_info_error=$(mktemp)
   default_branch=$(gh_api_with_retry "repos/Cratis/$repo" \
     --jq '.default_branch' 2>"$repo_info_error" || true)
-  if [ -z "$default_branch" ] || ! is_valid_branch_name "$default_branch"; then
+  if [ -z "$default_branch" ]; then
     repo_info_api_error=$(cat "$repo_info_error" 2>/dev/null || true)
     echo "  ⚠ Could not get default branch for $repo, skipping"
     [ -n "$repo_info_api_error" ] && echo "    API error: $repo_info_api_error"
+    rm -f "$repo_info_error"
+    continue
+  fi
+  if ! is_valid_branch_name "$default_branch"; then
+    echo "  ⚠ Invalid default branch value for $repo ('$default_branch'), skipping"
     rm -f "$repo_info_error"
     continue
   fi
