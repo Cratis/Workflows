@@ -94,7 +94,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install NPM dependencies
+      - name: Install dependencies
         if: steps.detect.outputs.update_npm == 'true'
         run: yarn install
 
