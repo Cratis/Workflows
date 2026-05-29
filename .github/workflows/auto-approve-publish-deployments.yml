@@ -8,7 +8,7 @@ on:
       workflow_run_id:
         description: Workflow run id to approve pending deployments for
         required: true
-        type: string
+        type: number
 
 permissions:
   actions: read
