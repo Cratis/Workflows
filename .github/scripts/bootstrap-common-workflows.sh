@@ -3,8 +3,9 @@
 # each repository has a standard set of reusable workflows.
 #
 # Currently bootstraps:
-#   - cleanup-pr-artifacts.yml  — cleans up PR-published GitHub Packages
-#   - update-packages.yml       — weekly package updates (NuGet + NPM)
+#   - cleanup-pr-artifacts.yml             — cleans up PR-published GitHub Packages
+#   - update-packages.yml                  — weekly package updates (NuGet + NPM)
+#   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
 #
@@ -82,6 +83,25 @@ WRAPPERS[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBB
 #       secrets:
 #         PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS }}
 WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogKicKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHNlY3JldHM6CiAgICAgIFBBVF9XT1JLRkxPV1M6ICR7eyBzZWNyZXRzLlBBVF9XT1JLRkxPV1MgfX0K"
+
+# auto-approve-publish-deployments.yml — approves pending npm/nuget deployments
+# for Publish workflow runs (trusted publishing environments).
+# Decodes to:
+#   name: Auto-Approve Publish Deployments
+#   on:
+#     workflow_run:
+#       workflows: ["Publish"]
+#       types: [requested]
+#   permissions:
+#     actions: read
+#     deployments: write
+#   jobs:
+#     approve:
+#       uses: Cratis/Workflows/.github/workflows/auto-approve-publish-deployments.yml@main
+#       with:
+#         workflow_run_id: ${{ github.event.workflow_run.id }}
+#       secrets: inherit
+WRAPPERS[".github/workflows/auto-approve-publish-deployments.yml"]="bmFtZTogQXV0by1BcHByb3ZlIFB1Ymxpc2ggRGVwbG95bWVudHMKCm9uOgogIHdvcmtmbG93X3J1bjoKICAgIHdvcmtmbG93czogWyJQdWJsaXNoIl0KICAgIHR5cGVzOiBbcmVxdWVzdGVkXQoKcGVybWlzc2lvbnM6CiAgYWN0aW9uczogcmVhZAogIGRlcGxveW1lbnRzOiB3cml0ZQoKam9iczoKICBhcHByb3ZlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9hdXRvLWFwcHJvdmUtcHVibGlzaC1kZXBsb3ltZW50cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgd29ya2Zsb3dfcnVuX2lkOiAke3sgZ2l0aHViLmV2ZW50LndvcmtmbG93X3J1bi5pZCB9fQogICAgc2VjcmV0czogaW5oZXJpdAo="
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
