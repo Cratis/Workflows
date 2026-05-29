@@ -113,6 +113,37 @@ Only packages linked to the calling repository are considered, so the cleanup is
 
 ---
 
+## Auto-approving publish deployments
+
+For repositories using trusted publishing with npm and NuGet environments, you can install a wrapper workflow that automatically approves pending `npm` / `nuget` deployments for the `Publish` workflow run.
+
+**`.github/workflows/auto-approve-publish-deployments.yml`**
+
+```yaml
+name: Auto-Approve Publish Deployments
+
+on:
+  workflow_run:
+    workflows: ["Publish"]
+    types: [requested]
+
+permissions:
+  actions: read
+  deployments: write
+
+jobs:
+  approve:
+    uses: Cratis/Workflows/.github/workflows/auto-approve-publish-deployments.yml@main
+    with:
+      workflow_run_id: ${{ github.event.workflow_run.id }}
+    secrets: inherit
+```
+
+> [!NOTE]
+> This wrapper is included in the common workflow bootstrap process and will be propagated alongside other default wrapper workflows.
+
+---
+
 ## How it works
 
 ### Copilot instruction synchronization

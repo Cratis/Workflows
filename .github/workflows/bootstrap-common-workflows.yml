@@ -2,8 +2,9 @@ name: Bootstrap Common Workflows
 # Ensures all Cratis repositories have the standard set of common wrapper
 # workflows installed and up-to-date.  Currently bootstraps:
 #
-#   • cleanup-pr-artifacts.yml  — deletes GitHub Packages published during a PR
-#   • update-packages.yml       — weekly NuGet + NPM package updates
+#   • cleanup-pr-artifacts.yml            — deletes GitHub Packages published during a PR
+#   • update-packages.yml                 — weekly NuGet + NPM package updates
+#   • auto-approve-publish-deployments.yml — approves npm/nuget trusted publishing deployments
 #
 # Handles both initial bootstrap (new repos) and ongoing updates:
 #   • New repos:            adds missing wrapper workflows
@@ -27,6 +28,7 @@ on:
     paths:
       - ".github/workflows/cleanup-pr-artifacts.yml"
       - ".github/workflows/update-packages.yml"
+      - ".github/workflows/auto-approve-publish-deployments.yml"
       - ".github/scripts/bootstrap-common-workflows.sh"
   workflow_dispatch:
 
