@@ -109,9 +109,10 @@ BOOTSTRAPPED_FILES[".github/workflows/auto-approve-publish-deployments.yml"]="bm
 #   name: "Cratis CodeQL config"
 #
 #   query-filters:
+#     # CA1031 is intentionally excluded from the shared baseline.
 #     - exclude:
 #         id: ca1031
-BOOTSTRAPPED_FILES[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
+BOOTSTRAPPED_FILES[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAjIENBMTAzMSBpcyBpbnRlbnRpb25hbGx5IGV4Y2x1ZGVkIGZyb20gdGhlIHNoYXJlZCBiYXNlbGluZS4KICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
