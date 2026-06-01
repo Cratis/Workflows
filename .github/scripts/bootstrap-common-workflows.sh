@@ -212,7 +212,17 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
   for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
     file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
-    file_label="$file_path"
+    case "$file_path" in
+      .github/codeql/codeql-config.yml)
+        file_label="codeql-config"
+        ;;
+      *.yml)
+        file_label=$(basename "$file_path" .yml)
+        ;;
+      *)
+        file_label=$(basename "$file_path")
+        ;;
+    esac
 
     # Create blob
     blob_error=$(mktemp)
