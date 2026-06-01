@@ -1,0 +1,5 @@
+name: "Cratis CodeQL config"
+
+query-filters:
+  - exclude:
+      id: ca1031

@@ -6,6 +6,7 @@
 #   - cleanup-pr-artifacts.yml             — cleans up PR-published GitHub Packages
 #   - update-packages.yml                  — weekly package updates (NuGet + NPM)
 #   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
+#   - .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
 #
@@ -48,7 +49,7 @@ repos=$(cat "$repos_file")
 failures_file=$(mktemp)
 
 # ================================================================
-# Wrapper workflow definitions (base64-encoded)
+# Bootstrapped file definitions (base64-encoded)
 # ================================================================
 # To verify the encoded content, run:  echo "<value>" | base64 -d
 #
@@ -102,6 +103,15 @@ WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzC
 #         workflow_run_id: ${{ github.event.workflow_run.id }}
 #       secrets: inherit
 WRAPPERS[".github/workflows/auto-approve-publish-deployments.yml"]="bmFtZTogQXV0by1BcHByb3ZlIFB1Ymxpc2ggRGVwbG95bWVudHMKCm9uOgogIHdvcmtmbG93X3J1bjoKICAgIHdvcmtmbG93czogWyJQdWJsaXNoIl0KICAgIHR5cGVzOiBbcmVxdWVzdGVkXQoKcGVybWlzc2lvbnM6CiAgYWN0aW9uczogcmVhZAogIGRlcGxveW1lbnRzOiB3cml0ZQoKam9iczoKICBhcHByb3ZlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9hdXRvLWFwcHJvdmUtcHVibGlzaC1kZXBsb3ltZW50cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgd29ya2Zsb3dfcnVuX2lkOiAke3sgZ2l0aHViLmV2ZW50LndvcmtmbG93X3J1bi5pZCB9fQogICAgc2VjcmV0czogaW5oZXJpdAo="
+
+# .github/codeql/codeql-config.yml — shared CodeQL configuration
+# Decodes to:
+#   name: "Cratis CodeQL config"
+#
+#   query-filters:
+#     - exclude:
+#         id: ca1031
+WRAPPERS[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
