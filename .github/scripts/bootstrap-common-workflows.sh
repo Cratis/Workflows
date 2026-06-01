@@ -55,7 +55,7 @@ failures_file=$(mktemp)
 #
 # Each entry: path in target repo -> base64 content
 
-declare -A WRAPPERS
+declare -A BOOTSTRAPPED_FILES
 
 # cleanup-pr-artifacts.yml — triggers on PR close, delegates to reusable workflow
 # Decodes to:
@@ -69,7 +69,7 @@ declare -A WRAPPERS
 #       with:
 #         pull_request: ${{ github.event.pull_request.number }}
 #       secrets: inherit
-WRAPPERS[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
+BOOTSTRAPPED_FILES[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
 
 # update-packages.yml — nightly scheduled + manual trigger, delegates to reusable workflow
 # Decodes to:
@@ -83,7 +83,7 @@ WRAPPERS[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBB
 #       uses: Cratis/Workflows/.github/workflows/update-packages.yml@main
 #       secrets:
 #         PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS }}
-WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogKicKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHNlY3JldHM6CiAgICAgIFBBVF9XT1JLRkxPV1M6ICR7eyBzZWNyZXRzLlBBVF9XT1JLRkxPV1MgfX0K"
+BOOTSTRAPPED_FILES[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogKicKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHNlY3JldHM6CiAgICAgIFBBVF9XT1JLRkxPV1M6ICR7eyBzZWNyZXRzLlBBVF9XT1JLRkxPV1MgfX0K"
 
 # auto-approve-publish-deployments.yml — approves pending npm/nuget deployments
 # for Publish workflow runs (trusted publishing environments).
@@ -102,7 +102,7 @@ WRAPPERS[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzC
 #       with:
 #         workflow_run_id: ${{ github.event.workflow_run.id }}
 #       secrets: inherit
-WRAPPERS[".github/workflows/auto-approve-publish-deployments.yml"]="bmFtZTogQXV0by1BcHByb3ZlIFB1Ymxpc2ggRGVwbG95bWVudHMKCm9uOgogIHdvcmtmbG93X3J1bjoKICAgIHdvcmtmbG93czogWyJQdWJsaXNoIl0KICAgIHR5cGVzOiBbcmVxdWVzdGVkXQoKcGVybWlzc2lvbnM6CiAgYWN0aW9uczogcmVhZAogIGRlcGxveW1lbnRzOiB3cml0ZQoKam9iczoKICBhcHByb3ZlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9hdXRvLWFwcHJvdmUtcHVibGlzaC1kZXBsb3ltZW50cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgd29ya2Zsb3dfcnVuX2lkOiAke3sgZ2l0aHViLmV2ZW50LndvcmtmbG93X3J1bi5pZCB9fQogICAgc2VjcmV0czogaW5oZXJpdAo="
+BOOTSTRAPPED_FILES[".github/workflows/auto-approve-publish-deployments.yml"]="bmFtZTogQXV0by1BcHByb3ZlIFB1Ymxpc2ggRGVwbG95bWVudHMKCm9uOgogIHdvcmtmbG93X3J1bjoKICAgIHdvcmtmbG93czogWyJQdWJsaXNoIl0KICAgIHR5cGVzOiBbcmVxdWVzdGVkXQoKcGVybWlzc2lvbnM6CiAgYWN0aW9uczogcmVhZAogIGRlcGxveW1lbnRzOiB3cml0ZQoKam9iczoKICBhcHByb3ZlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9hdXRvLWFwcHJvdmUtcHVibGlzaC1kZXBsb3ltZW50cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgd29ya2Zsb3dfcnVuX2lkOiAke3sgZ2l0aHViLmV2ZW50LndvcmtmbG93X3J1bi5pZCB9fQogICAgc2VjcmV0czogaW5oZXJpdAo="
 
 # .github/codeql/codeql-config.yml — shared CodeQL configuration
 # Decodes to:
@@ -111,7 +111,7 @@ WRAPPERS[".github/workflows/auto-approve-publish-deployments.yml"]="bmFtZTogQXV0
 #   query-filters:
 #     - exclude:
 #         id: ca1031
-WRAPPERS[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
+BOOTSTRAPPED_FILES[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
@@ -209,20 +209,20 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   has_changes=false
   commit_parts=()
 
-  for wrapper_path in "${!WRAPPERS[@]}"; do
-    wrapper_b64="${WRAPPERS[$wrapper_path]}"
-    wrapper_name=$(basename "$wrapper_path" .yml)
+  for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
+    file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
+    file_name=$(basename "$file_path")
 
     # Create blob
     blob_error=$(mktemp)
     _blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
-      -f content="$wrapper_b64" -f encoding=base64 \
+      -f content="$file_b64" -f encoding=base64 \
       2>"$blob_error" || true)
     blob_sha=$(extract_sha "$_blob_resp")
 
     if [ -z "$blob_sha" ]; then
       blob_err=$(cat "$blob_error" 2>/dev/null || true)
-      echo "  ⚠ Could not create blob for $wrapper_name in $repo"
+      echo "  ⚠ Could not create blob for $file_name in $repo"
       [ -n "$blob_err" ] && echo "    blob error: $blob_err"
       rm -f "$blob_error"
       echo "$repo" >> "$failures_file"
@@ -232,25 +232,25 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
     # Check if file already matches
     existing_sha=$(echo "$subtree" | jq -r \
-      --arg path "$wrapper_path" \
+      --arg path "$file_path" \
       '.tree[] | select(.path == $path) | .sha' \
       2>/dev/null || true)
 
     if [ "$existing_sha" = "$blob_sha" ]; then
-      echo "  ℹ $wrapper_name already up-to-date"
+      echo "  ℹ $file_name already up-to-date"
       continue
     fi
 
     has_changes=true
     if [ -n "$existing_sha" ]; then
-      commit_parts+=("update $wrapper_name")
+      commit_parts+=("update $file_name")
     else
-      commit_parts+=("add $wrapper_name")
+      commit_parts+=("add $file_name")
     fi
 
     # Add tree entry
     tree_entries=$(echo "$tree_entries" | jq \
-      --arg path "$wrapper_path" \
+      --arg path "$file_path" \
       --arg sha  "$blob_sha" \
       '. + [{path: $path, mode: "100644", type: "blob", sha: $sha}]')
   done
