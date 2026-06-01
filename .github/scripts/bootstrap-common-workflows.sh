@@ -211,7 +211,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
   for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
     file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
-    file_name=$(basename "$file_path")
+    file_label="$file_path"
 
     # Create blob
     blob_error=$(mktemp)
@@ -222,7 +222,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
     if [ -z "$blob_sha" ]; then
       blob_err=$(cat "$blob_error" 2>/dev/null || true)
-      echo "  ⚠ Could not create blob for $file_name in $repo"
+      echo "  ⚠ Could not create blob for $file_label in $repo"
       [ -n "$blob_err" ] && echo "    blob error: $blob_err"
       rm -f "$blob_error"
       echo "$repo" >> "$failures_file"
@@ -237,15 +237,15 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       2>/dev/null || true)
 
     if [ "$existing_sha" = "$blob_sha" ]; then
-      echo "  ℹ $file_name already up-to-date"
+      echo "  ℹ $file_label already up-to-date"
       continue
     fi
 
     has_changes=true
     if [ -n "$existing_sha" ]; then
-      commit_parts+=("update $file_name")
+      commit_parts+=("update $file_label")
     else
-      commit_parts+=("add $file_name")
+      commit_parts+=("add $file_label")
     fi
 
     # Add tree entry
