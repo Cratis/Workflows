@@ -5,6 +5,7 @@ name: Bootstrap Common Workflows
 #   • cleanup-pr-artifacts.yml            — deletes GitHub Packages published during a PR
 #   • update-packages.yml                 — weekly NuGet + NPM package updates
 #   • auto-approve-publish-deployments.yml — approves npm/nuget trusted publishing deployments
+#   • .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Handles both initial bootstrap (new repos) and ongoing updates:
 #   • New repos:            adds missing wrapper workflows
@@ -29,6 +30,7 @@ on:
       - ".github/workflows/cleanup-pr-artifacts.yml"
       - ".github/workflows/update-packages.yml"
       - ".github/workflows/auto-approve-publish-deployments.yml"
+      - ".github/codeql/codeql-config.yml"
       - ".github/scripts/bootstrap-common-workflows.sh"
   workflow_dispatch:
 

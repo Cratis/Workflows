@@ -144,6 +144,12 @@ jobs:
 
 ---
 
+## Shared CodeQL configuration
+
+The common workflow bootstrap also propagates **`.github/codeql/codeql-config.yml`** to repositories. The shared config currently excludes rule `ca1031`.
+
+---
+
 ## How it works
 
 ### Copilot instruction synchronization
