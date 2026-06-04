@@ -56,13 +56,6 @@ jobs:
               exit 0
             fi
 
-            # If the run is in progress (not queued/waiting) and there are no pending deployments,
-            # it means approvals have already been processed or were never needed
-            if [ "$run_status" = "in_progress" ]; then
-              echo "Run ${WORKFLOW_RUN_ID} is in progress with no pending deployments - approvals already processed or not needed"
-              exit 0
-            fi
-
             echo "Attempt ${attempt}/${max_attempts}: no pending npm/nuget deployments yet for run ${WORKFLOW_RUN_ID}; run status is ${run_status}. Waiting ${sleep_seconds}s..."
             sleep "$sleep_seconds"
           done
