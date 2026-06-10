@@ -115,32 +115,34 @@ Only packages linked to the calling repository are considered, so the cleanup is
 
 ## Auto-approving publish deployments
 
-For repositories using trusted publishing with npm and NuGet environments, you can install a wrapper workflow that automatically approves pending `npm` / `nuget` deployments for the `Publish` workflow run.
+For repositories using trusted publishing with npm and NuGet environments, automatically approve pending deployments by adding a job to your `publish.yml` workflow.
 
-**`.github/workflows/auto-approve-publish-deployments.yml`**
+The `auto-approve-publish-deployments` reusable workflow approves pending `npm` and `nuget` environment deployments after your packages are published. This prevents deployments from being stuck awaiting manual approval.
+
+### Setup
+
+Add this job to the end of your `publish.yml` workflow. It should run after your package publishing jobs complete:
 
 ```yaml
-name: Auto-Approve Publish Deployments
-
-on:
-  workflow_run:
-    workflows: ["Publish"]
-    types: [requested]
-
-permissions:
-  actions: read
-  deployments: write
-
-jobs:
-  approve:
+  auto-approve-deployments:
+    name: Auto-Approve Pending Deployments
+    needs: [publish-dotnet-packages, publish-npm-packages]
+    # Only run if package publishing jobs completed successfully
+    if: needs.publish-dotnet-packages.result == 'success' && needs.publish-npm-packages.result == 'success'
     uses: Cratis/Workflows/.github/workflows/auto-approve-publish-deployments.yml@main
     with:
-      workflow_run_id: ${{ github.event.workflow_run.id }}
-    secrets: inherit
+      workflow_run_id: ${{ github.run_id }}
 ```
 
+### Key points
+
+- The `workflow_run_id` should be set to `${{ github.run_id }}` to reference the current workflow run
+- The job should depend on your package publishing jobs via `needs:`
+- It checks that the publishing jobs completed successfully before attempting approval
+- The workflow will wait up to 30 minutes for pending deployments to appear, then approve them automatically
+
 > [!NOTE]
-> This wrapper is included in the common workflow bootstrap process and will be propagated alongside other default wrapper workflows.
+> See [publish.template.yml](/.github/workflows/publish.template.yml) for a complete example.
 
 ---
 
