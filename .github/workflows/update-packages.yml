@@ -1,0 +1,140 @@
+name: Update Packages
+# Reusable workflow that updates NuGet and/or NPM packages in the calling
+# repository, builds to verify nothing is broken, and pushes the result
+# directly to the default branch.
+#
+# This workflow requires PAT_WORKFLOWS secret with permissions:
+#   Classic PAT:       repo scope
+#   Fine-grained PAT:  Contents (read/write) + Metadata (read)
+#
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.
+
+env:
+  DOTNET_VERSION: "10.0.x"
+
+on:
+  workflow_call:
+    secrets:
+      PAT_WORKFLOWS:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_WORKFLOWS }}
+          fetch-depth: 0
+
+      - name: Detect package ecosystems in repo root
+        id: detect
+        run: |
+          # .NET is enabled only when root contains at least one .sln/.slnx/.csproj.
+          if find . -maxdepth 1 -type f \( -name '*.sln' -o -name '*.slnx' -o -name '*.csproj' \) | grep -q .; then
+            echo "update_nuget=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No root .sln, .slnx, or .csproj found; skipping .NET setup and NuGet update"
+            echo "update_nuget=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # NPM is enabled only when root package.json exists and defines scripts.ci.
+          if [ -f "package.json" ]; then
+            if jq -e '.scripts.ci | type == "string" and length > 0' package.json >/dev/null; then
+              echo "update_npm=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Root package.json has no \"ci\" script; skipping Node.js setup and NPM update"
+              echo "update_npm=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No root package.json found; skipping Node.js setup and NPM update"
+            echo "update_npm=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup .NET
+        if: steps.detect.outputs.update_nuget == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Update NuGet packages
+        if: steps.detect.outputs.update_nuget == 'true'
+        run: |
+          set +e
+          output=$(dotnet package update 2>&1)
+          exit_code=$?
+          set -e
+
+          echo "$output"
+
+          if [ $exit_code -eq 0 ]; then
+            exit 0
+          fi
+
+          if [ $exit_code -eq 2 ] && echo "$output" | grep -q "All packages are up to date"; then
+            echo "No NuGet updates available; continuing."
+            exit 0
+          fi
+
+          exit $exit_code
+
+      - name: Build .NET
+        if: steps.detect.outputs.update_nuget == 'true'
+        run: dotnet build
+
+      - name: Setup Node.js
+        if: steps.detect.outputs.update_npm == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        if: steps.detect.outputs.update_npm == 'true'
+        run: yarn install
+
+      - name: Update NPM packages
+        if: steps.detect.outputs.update_npm == 'true'
+        run: |
+          npx npm-check-updates -u
+          yarn install
+
+      - name: Build NPM
+        if: steps.detect.outputs.update_npm == 'true'
+        run: yarn ci
+
+      - name: Commit and push changes
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          # Check if there are any changes
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No package updates found. Nothing to commit."
+            exit 0
+          fi
+
+          # Configure git identity
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Build commit message from what was updated
+          updated_types=""
+          if [ "${{ steps.detect.outputs.update_nuget }}" == "true" ]; then
+            updated_types="NuGet"
+          fi
+          if [ "${{ steps.detect.outputs.update_npm }}" == "true" ]; then
+            if [ -n "$updated_types" ]; then
+              updated_types="$updated_types and NPM"
+            else
+              updated_types="NPM"
+            fi
+          fi
+
+          git add -A
+          git commit -m "chore: update ${updated_types} packages"
+          git push origin HEAD

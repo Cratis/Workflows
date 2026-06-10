@@ -1,0 +1,92 @@
+name: Bootstrap Common Workflows
+# Ensures all Cratis repositories have the standard set of common wrapper
+# workflows installed and up-to-date.  Currently bootstraps:
+#
+#   • cleanup-pr-artifacts.yml            — deletes GitHub Packages published during a PR
+#   • update-packages.yml                 — weekly NuGet + NPM package updates
+#   • auto-approve-publish-deployments.yml — approves npm/nuget trusted publishing deployments
+#   • .github/codeql/codeql-config.yml     — shared CodeQL query filters
+#
+# Handles both initial bootstrap (new repos) and ongoing updates:
+#   • New repos:            adds missing wrapper workflows
+#   • Already-bootstrapped: updates wrappers if content has changed
+#   • Already up-to-date:   skips processing
+#
+# Triggered automatically on push to main whenever the reusable workflows
+# or the bootstrap script changes.  Can also be run manually via workflow_dispatch.
+#
+# Requires PAT_WORKFLOWS secret with permissions:
+#   Classic PAT:       repo + workflow scopes
+#   Fine-grained PAT:  Contents (read/write) + Workflows (read/write)
+#
+# The PAT owner must also be configured as a bypass actor on each target
+# repository's branch protection ruleset so that direct pushes to the
+# default branch are permitted.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/cleanup-pr-artifacts.yml"
+      - ".github/workflows/update-packages.yml"
+      - ".github/workflows/auto-approve-publish-deployments.yml"
+      - ".github/codeql/codeql-config.yml"
+      - ".github/scripts/bootstrap-common-workflows.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Repositories to skip when bootstrapping.
+  # Workflows  - this repo; it holds the reusable workflows themselves
+  # cratis.github.io, StudioIssues - do not publish GitHub Packages
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action"]'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify PAT can authenticate
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          auth_error=$(mktemp)
+          if ! gh api /user >/dev/null 2>"$auth_error"; then
+            echo "::error::Could not authenticate with PAT_WORKFLOWS. Is the secret set correctly?"
+            echo "::error::API error: $(cat "$auth_error")"
+            rm -f "$auth_error"
+            exit 1
+          fi
+          rm -f "$auth_error"
+          login=$(gh api /user --jq '.login')
+          echo "✓ Authenticated as $login"
+          echo "  gh auth status:"
+          gh auth status 2>&1 | sed 's/^/    /'
+          oauth_scopes=$(gh api /user -i 2>/dev/null | grep -i '^x-oauth-scopes:' | sed 's/[^:]*: //' | tr -d '\r' || true)
+          if [ -n "$oauth_scopes" ]; then
+            echo "  PAT type: classic"
+            echo "  OAuth scopes: $oauth_scopes"
+          else
+            echo "  PAT type: fine-grained (scopes not exposed via API)"
+          fi
+
+      - name: Get all Cratis repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: |
+          gh repo list Cratis --limit 1000 --json name,isArchived \
+            --jq '[.[] | select(.isArchived == false) | .name]' \
+            > "$GITHUB_WORKSPACE/repos.json"
+
+      - name: Bootstrap common workflows in all repositories
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          REPOS_FILE: ${{ github.workspace }}/repos.json
+          REPOS_IGNORE: ${{ env.REPOS_TO_IGNORE }}
+        run: |
+          bash .github/scripts/bootstrap-common-workflows.sh

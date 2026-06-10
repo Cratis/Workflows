@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Propagates Copilot instruction files from the source repository to a single
+# Propagates PR and Issue template files from Cratis/Workflows to a single
 # target repository in the Cratis organization, pushing the commit directly to
 # the default branch (no PR).
-# Called by .github/workflows/propagate-copilot-instructions.yml for each
-# matrix job (one per target repository).
+# Called by .github/workflows/propagate-pr-templates.yml for each matrix job
+# (one per target repository).
 #
 # Expects:
-#   GH_TOKEN      - PAT with Contents (r/w).  The PAT owner must be a bypass
-#                   actor on the target repository's branch protection ruleset
-#                   so that the direct push to the default branch is allowed.
-#   SOURCE_REPO   - source repository in owner/repo format (e.g. Cratis/AI)
-#   TARGET_REPO   - target repository name (e.g. Chronicle)
+#   GH_TOKEN    - PAT with Contents (r/w).  The PAT owner must be a bypass
+#                 actor on the target repository's branch protection ruleset
+#                 so that the direct push to the default branch is allowed.
+#   TARGET_REPO - target repository name (e.g. Chronicle)
 
 set -euo pipefail
 
@@ -29,13 +28,13 @@ extract_sha() {
   fi
 }
 
-source_repo="${SOURCE_REPO:?SOURCE_REPO must be set}"
+source_repo="Cratis/Workflows"
 repo="${TARGET_REPO:?TARGET_REPO must be set}"
 
 # ----------------------------------------------------------------
-# Fetch Copilot files from the source repository
+# Fetch template files from the source repository
 # ----------------------------------------------------------------
-echo "Fetching Copilot instruction files from ${source_repo}..."
+echo "Fetching PR and Issue template files from ${source_repo}..."
 source_tree_raw=$(gh api "repos/${source_repo}/git/trees/HEAD?recursive=1" 2>/dev/null || true)
 
 if [ -z "$source_tree_raw" ]; then
@@ -43,28 +42,16 @@ if [ -z "$source_tree_raw" ]; then
   exit 1
 fi
 
-copilot_files=$(echo "$source_tree_raw" | jq -c \
+template_files=$(echo "$source_tree_raw" | jq -c \
   '[.tree[] | select(.type == "blob") |
-   select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
-   {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
+   select(.path | test("^\\.github/(ISSUE_TEMPLATE/|pull_request_template\\.md$)")) |
+   {path: .path, sha: .sha}]' 2>/dev/null || true)
 
-if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
-  echo "No Copilot instruction files found in ${source_repo} — nothing to propagate."
+if [ -z "$template_files" ] || [ "$template_files" = "[]" ]; then
+  echo "No template files found in ${source_repo} — nothing to propagate."
   exit 0
 fi
-echo "✓ Found $(echo "$copilot_files" | jq 'length') Copilot file(s) in ${source_repo}"
-
-# ----------------------------------------------------------------
-# Filter out files matching .copilot-sync-ignore patterns
-# ----------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=copilot-sync-ignore-filter.sh
-source "${SCRIPT_DIR}/copilot-sync-ignore-filter.sh"
-
-if ! _apply_copilot_sync_ignore; then
-  echo "All Copilot files excluded by .copilot-sync-ignore — nothing to propagate."
-  exit 0
-fi
+echo "✓ Found $(echo "$template_files" | jq 'length') template file(s) in ${source_repo}"
 
 echo "Processing Cratis/${repo}..."
 
@@ -126,34 +113,20 @@ fi
 rm -f "$subtree_error"
 
 # ----------------------------------------------------------------
-# 2b. Filter out files the target repo does not want to receive
-# ----------------------------------------------------------------
-target_tree_raw="$subtree"
-target_repo_name="Cratis/${repo}"
-
-if ! _apply_copilot_sync_receive_ignore; then
-  echo "All Copilot files excluded by .copilot-sync-receive-ignore in ${repo} — nothing to propagate."
-  exit 0
-fi
-
-# ----------------------------------------------------------------
-# 3. Check whether all copilot files are already up to date
+# 3. Check whether all template files are already up to date
 #    (git blob SHAs are content-addressed across repositories)
 # ----------------------------------------------------------------
 files_up_to_date=true
-while IFS=$'\t' read -r chk_path chk_sha chk_mode; do
+while IFS=' ' read -r chk_path chk_sha; do
   [ -z "$chk_path" ] && continue
   existing_sha=$(echo "$subtree" | jq -r \
     --arg p "$chk_path" \
     '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
-  existing_mode=$(echo "$subtree" | jq -r \
-    --arg p "$chk_path" \
-    '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
-  if [ "$existing_sha" != "$chk_sha" ] || [ "$existing_mode" != "$chk_mode" ]; then
+  if [ "$existing_sha" != "$chk_sha" ]; then
     files_up_to_date=false
     break
   fi
-done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
+done <<< "$(echo "$template_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
 
 if [ "$files_up_to_date" = "true" ]; then
   echo "ℹ No changes needed for ${repo} (files already up to date)"
@@ -166,7 +139,7 @@ fi
 new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
   '{"base_tree": $base_tree, "tree": []}')
 
-while IFS=$'\t' read -r src_path src_sha src_mode; do
+while IFS=' ' read -r src_path src_sha; do
   [ -z "$src_path" ] && continue
 
   # Fetch blob content from source repo (returned as base64 by API).
@@ -211,9 +184,8 @@ while IFS=$'\t' read -r src_path src_sha src_mode; do
   new_tree_json=$(echo "$new_tree_json" | jq \
     --arg p "$src_path" \
     --arg s "$target_blob_sha" \
-    --arg m "$src_mode" \
-    '.tree += [{path: $p, mode: $m, type: "blob", sha: $s}]')
-done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
+    '.tree += [{path: $p, mode: "100644", type: "blob", sha: $s}]')
+done <<< "$(echo "$template_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
 
 # ----------------------------------------------------------------
 # 5. Create new tree and commit
@@ -235,7 +207,7 @@ rm -f "$new_tree_error"
 
 commit_error=$(mktemp)
 _commit_resp=$(jq -n \
-  --arg msg  "Sync Copilot instructions from ${source_repo}" \
+  --arg msg  "Sync PR and Issue templates from ${source_repo}" \
   --arg tree "$new_tree_sha" \
   --arg parent "$head_sha" \
   '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
@@ -280,4 +252,4 @@ if [ -z "$updated_sha" ]; then
 fi
 rm -f "$push_error"
 
-echo "✓ Pushed Copilot instructions directly to ${default_branch} in ${repo}"
+echo "✓ Pushed PR and Issue templates directly to ${default_branch} in ${repo}"

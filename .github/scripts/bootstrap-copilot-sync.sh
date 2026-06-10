@@ -1,12 +1,78 @@
 #!/usr/bin/env bash
 # Main logic for the Bootstrap Copilot Sync workflow.
 # Called by .github/workflows/bootstrap-copilot-sync.yml after checkout.
+#
+# This script handles both initial bootstrap and ongoing updates for all
+# Cratis repositories:
+#   - New repos: adds wrapper workflows and copies initial Copilot setup from Cratis/AI.
+#   - Already-bootstrapped repos: updates wrapper workflows and Copilot files if needed.
+#   - Up-to-date repos: skips processing.
+#
 # Expects:
-#   GH_TOKEN          - PAT with repo + pull_requests write permissions
+#   GH_TOKEN          - PAT with repo + Workflows permissions; the PAT owner must
+#                       be a bypass actor on target repos' branch protection rulesets
+#                       so that direct pushes to the default branch are allowed.
 #   REPOS_FILE        - path to a JSON file containing the repos array
 #                       (written by the "Get all Cratis repositories" step)
 
 set -euo pipefail
+
+# Wrapper for gh api that retries on GitHub API rate limiting.
+# Prints API response body to stdout on success.
+gh_api_with_retry() {
+  local max_attempts=8
+  local attempt=1
+  local response=""
+  local err=""
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    local out_file err_file
+    out_file=$(mktemp)
+    err_file=$(mktemp)
+
+    if gh api "$@" >"$out_file" 2>"$err_file"; then
+      cat "$out_file"
+      rm -f "$out_file" "$err_file"
+      return 0
+    fi
+
+    response=$(cat "$out_file" 2>/dev/null || true)
+    err=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$out_file" "$err_file"
+
+    if printf '%s\n%s' "$response" "$err" | grep -qiE 'API rate limit exceeded|secondary rate limit|rate_limit|abuse'; then
+      local wait_seconds
+      wait_seconds=$((attempt * 15))
+      if [ "$wait_seconds" -gt 300 ]; then
+        wait_seconds=300
+      fi
+
+      echo "  ⏳ GitHub API rate limit hit; waiting ${wait_seconds} seconds before retry (attempt $attempt/$max_attempts)" >&2
+      sleep "$wait_seconds"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    [ -n "$response" ] && echo "$response"
+    [ -n "$err" ] && echo "$err" >&2
+    return 1
+  done
+
+  [ -n "$response" ] && echo "$response"
+  [ -n "$err" ] && echo "$err" >&2
+  return 1
+}
+
+# Validate branch names to avoid treating JSON error responses as branch refs.
+is_valid_branch_name() {
+  local branch="${1:-}"
+  [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] &&
+    [[ "$branch" != */ ]] &&
+    [[ "$branch" != /* ]] &&
+    [[ "$branch" != *. ]] &&
+    [[ "$branch" != *..* ]] &&
+    [[ "$branch" != *.lock ]]
+}
 
 # Extract a SHA from a gh api JSON response.  Returns empty string if:
 #   - the response is empty
@@ -26,9 +92,7 @@ extract_sha() {
 repos_file="${REPOS_FILE:-$GITHUB_WORKSPACE/repos.json}"
 repos=$(cat "$repos_file")
 
-prs_created_file=$(mktemp)
 failures_file=$(mktemp)
-pr_failures_file=$(mktemp)
 
 # Pre-computed base64 content for wrapper workflows.
 # Using base64 avoids heredoc end-markers at column 0,
@@ -57,6 +121,8 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #     push:
 #       branches: ["main"]
 #       paths:
+#         - ".ai/**"
+#         - ".claude/**"
 #         - ".github/copilot-instructions.md"
 #         - ".github/instructions/**"
 #         - ".github/agents/**"
@@ -70,21 +136,17 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #       with:
 #         event_name: ${{ github.event_name }}
 #       secrets: inherit
-propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmdpdGh1Yi9jb3BpbG90LWluc3RydWN0aW9ucy5tZCIKICAgICAgLSAiLmdpdGh1Yi9pbnN0cnVjdGlvbnMvKioiCiAgICAgIC0gIi5naXRodWIvYWdlbnRzLyoqIgogICAgICAtICIuZ2l0aHViL3NraWxscy8qKiIKICAgICAgLSAiLmdpdGh1Yi9wcm9tcHRzLyoqIgogICAgICAtICIuZ2l0aHViL2hvb2tzLyoqIgogIHdvcmtmbG93X2Rpc3BhdGNoOgoKam9iczoKICBwcm9wYWdhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3Byb3BhZ2F0ZS1jb3BpbG90LWluc3RydWN0aW9ucy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgZXZlbnRfbmFtZTogJHt7IGdpdGh1Yi5ldmVudF9uYW1lIH19CiAgICBzZWNyZXRzOiBpbmhlcml0Cg=="
-
-pr_body=$'Bootstraps centralized Copilot instruction management for this repository.\n\n### Changes\n\n**Removed** (if present):\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder\n- `.github/agents/` folder\n- `.github/skills/` folder\n- `.github/prompts/` folder\n- `.github/hooks/` folder\n\n**Added**:\n- `.github/workflows/sync-copilot-instructions.yml` \u2014 triggered via `workflow_dispatch` to pull Copilot instructions from a source repository and open a PR with the changes.\n- `.github/workflows/propagate-copilot-instructions.yml` \u2014 triggered on push to `main` when Copilot instruction files change, propagating updates to all Cratis repositories.\n\n**Copied from [Cratis/AI](https://github.com/Cratis/AI)**:\n- `.github/copilot-instructions.md`\n- `.github/instructions/` folder (if present)\n- `.github/agents/` folder (if present)\n- `.github/skills/` folder (if present)\n- `.github/prompts/` folder (if present)\n- `.github/hooks/` folder (if present)\n\nThe actual logic lives in [Cratis/Workflows](https://github.com/Cratis/Workflows) so it can be maintained in one place. Copilot instructions will be managed centrally and synced to this repository via the workflows above.'
-
-branch="add-copilot-sync-workflows"
+propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmFpLyoqIgogICAgICAtICIuY2xhdWRlLyoqIgogICAgICAtICIuZ2l0aHViL2NvcGlsb3QtaW5zdHJ1Y3Rpb25zLm1kIgogICAgICAtICIuZ2l0aHViL2luc3RydWN0aW9ucy8qKiIKICAgICAgLSAiLmdpdGh1Yi9hZ2VudHMvKioiCiAgICAgIC0gIi5naXRodWIvc2tpbGxzLyoqIgogICAgICAtICIuZ2l0aHViL3Byb21wdHMvKioiCiAgICAgIC0gIi5naXRodWIvaG9va3MvKioiCiAgd29ya2Zsb3dfZGlzcGF0Y2g6Cgpqb2JzOgogIHByb3BhZ2F0ZToKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvcHJvcGFnYXRlLWNvcGlsb3QtaW5zdHJ1Y3Rpb25zLnltbEBtYWluCiAgICB3aXRoOgogICAgICBldmVudF9uYW1lOiAke3sgZ2l0aHViLmV2ZW50X25hbWUgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
 
 # Fetch the Copilot setup tree from Cratis/AI once; reused for every repo.
 ai_copilot_files=""
 ai_tree_error=$(mktemp)
-ai_tree_raw=$(gh api "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_error" || true)
+ai_tree_raw=$(gh_api_with_retry "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_error" || true)
 if [ -n "$ai_tree_raw" ]; then
   ai_copilot_files=$(echo "$ai_tree_raw" | jq -c \
     '[.tree[] | select(.type == "blob") |
-     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
-     {path: .path, sha: .sha}]' 2>/dev/null || true)
+     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
+     {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 fi
 if [ -z "$ai_copilot_files" ] || [ "$ai_copilot_files" = "[]" ]; then
   ai_tree_api_error=$(cat "$ai_tree_error" 2>/dev/null || true)
@@ -100,14 +162,13 @@ rm -f "$ai_tree_error"
 # ================================================================
 probe_repo=$(echo "$repos" | jq -r '[.[] | select(. != "Workflows")][0] // empty')
 if [ -n "$probe_repo" ]; then
-  probe_perms=$(gh api "repos/Cratis/$probe_repo" --jq '.permissions.push // false' 2>/dev/null || true)
+  probe_perms=$(gh_api_with_retry "repos/Cratis/$probe_repo" --jq '.permissions.push // false' 2>/dev/null || true)
   if [ "$probe_perms" != "true" ]; then
     echo "::error::PAT_WORKFLOWS does not have write (push) access to Cratis/$probe_repo."
     echo "The fine-grained PAT must be configured with:"
     echo "  • Resource owner: Cratis"
     echo "  • Repository access: All repositories"
     echo "  • Permissions → Contents: Read and write"
-    echo "  • Permissions → Pull requests: Read and write"
     echo "  • Permissions → Workflows: Read and write"
     echo "Update the PAT at: https://github.com/settings/personal-access-tokens"
     exit 1
@@ -125,13 +186,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   echo "Processing Cratis/$repo..."
 
   # ----------------------------------------------------------------
-  # 1. Get default branch, HEAD SHA, and repository node ID
+  # 1. Get default branch and HEAD SHA
   # ----------------------------------------------------------------
   repo_info_error=$(mktemp)
-  repo_info_json=$(gh api "repos/Cratis/$repo" \
-    --jq '{default_branch: .default_branch, node_id: .node_id}' 2>"$repo_info_error" || true)
-  default_branch=$(echo "$repo_info_json" | jq -r '.default_branch // empty' 2>/dev/null || true)
-  repo_node_id=$(echo "$repo_info_json" | jq -r '.node_id // empty' 2>/dev/null || true)
+  default_branch=$(gh_api_with_retry "repos/Cratis/$repo" \
+    --jq '.default_branch' 2>"$repo_info_error" || true)
   if [ -z "$default_branch" ]; then
     repo_info_api_error=$(cat "$repo_info_error" 2>/dev/null || true)
     echo "  ⚠ Could not get default branch for $repo, skipping"
@@ -139,10 +198,16 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     rm -f "$repo_info_error"
     continue
   fi
+  if ! is_valid_branch_name "$default_branch"; then
+    echo "  ⚠ Invalid default branch value for $repo ('$default_branch'), skipping"
+    echo "    Expected a non-empty ref-safe branch name (no leading/trailing '/', no trailing '.', no '..', no '.lock')."
+    rm -f "$repo_info_error"
+    continue
+  fi
   rm -f "$repo_info_error"
 
   head_sha_error=$(mktemp)
-  _head_sha_resp=$(gh api "repos/Cratis/$repo/git/ref/heads/$default_branch" \
+  _head_sha_resp=$(gh_api_with_retry "repos/Cratis/$repo/git/ref/heads/$default_branch" \
     2>"$head_sha_error" || true)
   head_sha=$(extract_sha "$_head_sha_resp" '.object.sha')
   if [ -z "$head_sha" ]; then
@@ -158,7 +223,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 2. Get the commit's tree SHA
   # ----------------------------------------------------------------
   tree_sha_error=$(mktemp)
-  _tree_sha_resp=$(gh api "repos/Cratis/$repo/git/commits/$head_sha" \
+  _tree_sha_resp=$(gh_api_with_retry "repos/Cratis/$repo/git/commits/$head_sha" \
     2>"$tree_sha_error" || true)
   tree_sha=$(extract_sha "$_tree_sha_resp" '.tree.sha')
   if [ -z "$tree_sha" ]; then
@@ -174,7 +239,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # 3. Get the full recursive tree to find instruction files to delete
   # ----------------------------------------------------------------
   subtree_error=$(mktemp)
-  subtree=$(gh api "repos/Cratis/$repo/git/trees/$tree_sha?recursive=1" \
+  subtree=$(gh_api_with_retry "repos/Cratis/$repo/git/trees/$tree_sha?recursive=1" \
     2>"$subtree_error" || true)
   if [ -z "$subtree" ]; then
     subtree_api_error=$(cat "$subtree_error" 2>/dev/null || true)
@@ -191,12 +256,12 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   #    The Workflows permission is checked later when creating the tree.
   # ----------------------------------------------------------------
   sync_blob_error=$(mktemp)
-  _sync_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+  _sync_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \
     -f content="$sync_b64" -f encoding=base64 \
     2>"$sync_blob_error" || true)
   sync_blob_sha=$(extract_sha "$_sync_blob_resp")
   propagate_blob_error=$(mktemp)
-  _prop_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+  _prop_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \
     -f content="$propagate_b64" -f encoding=base64 \
     2>"$propagate_blob_error" || true)
   propagate_blob_sha=$(extract_sha "$_prop_blob_resp")
@@ -234,7 +299,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # instructions/, agents/, skills/, prompts/, and hooks/ sub-directories.
   files_to_delete=$(echo "$subtree" | jq -r \
     '.tree[] | select(.type == "blob") |
-     select(.path | test("^\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)")) |
+     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
      .path' 2>/dev/null || true)
 
   # Check whether Copilot files from Cratis/AI are already present in
@@ -242,21 +307,49 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # so identical content yields identical SHAs across repositories).
   ai_files_up_to_date=true
   if [ -n "$ai_copilot_files" ] && [ "$ai_copilot_files" != "[]" ]; then
-    while IFS=' ' read -r ai_chk_path ai_chk_sha; do
+    while IFS=$'\t' read -r ai_chk_path ai_chk_sha ai_chk_mode; do
       [ -z "$ai_chk_path" ] && continue
       existing_ai_sha=$(echo "$subtree" | jq -r \
         --arg p "$ai_chk_path" \
         '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
-      if [ "$existing_ai_sha" != "$ai_chk_sha" ]; then
+      existing_ai_mode=$(echo "$subtree" | jq -r \
+        --arg p "$ai_chk_path" \
+        '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
+      if [ "$existing_ai_sha" != "$ai_chk_sha" ] || [ "$existing_ai_mode" != "$ai_chk_mode" ]; then
         ai_files_up_to_date=false
         break
       fi
-    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
+    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
   fi
+
+  # Check whether any copilot files in the repo need to be cleaned up —
+  # i.e., files that match the delete pattern but are not part of the
+  # expected AI file set (with the correct SHA).  If AI is up-to-date and
+  # every file in files_to_delete is already covered by the AI set, there
+  # is nothing to delete; otherwise at least one file needs removal.
+  #
+  # Pre-build tab-separated "path\tsha" lookup tables once to avoid
+  # repeated jq invocations inside the loop.
+  repo_copilot_shas=$(echo "$subtree" | jq -r \
+    '[.tree[] | select(.type == "blob") |
+      select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)"))] |
+      .[] | .path + "\t" + .sha + "\t" + .mode' 2>/dev/null || true)
+  ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)
+
+  has_files_to_clean=false
+  while IFS= read -r del_path; do
+    [ -z "$del_path" ] && continue
+    del_sha_mode=$(printf '%s' "$repo_copilot_shas" | awk -F'\t' -v p="$del_path" '$1==p{print $2 "\t" $3;exit}')
+    [ -z "$del_sha_mode" ] && continue
+    if ! printf '%s' "$ai_path_sha_set" | grep -qF "$del_path"$'\t'"$del_sha_mode"; then
+      has_files_to_clean=true
+      break
+    fi
+  done <<< "$files_to_delete"
 
   if [ "$existing_sync" = "$sync_blob_sha" ] && \
      [ "$existing_propagate" = "$propagate_blob_sha" ] && \
-     [ -z "$files_to_delete" ] && \
+     [ "$has_files_to_clean" = "false" ] && \
      [ "$ai_files_up_to_date" = "true" ]; then
     echo "  ℹ No changes needed for $repo"
     continue
@@ -346,12 +439,12 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       '{"base_tree": $base_tree, "tree": []}')
 
     ai_copy_failed=false
-    while IFS=' ' read -r ai_path ai_sha; do
+    while IFS=$'\t' read -r ai_path ai_sha ai_mode; do
       [ -z "$ai_path" ] && continue
 
       # Fetch blob content from Cratis/AI (returned as base64 by the API)
       ai_blob_error=$(mktemp)
-      ai_blob_content=$(gh api "repos/Cratis/AI/git/blobs/$ai_sha" \
+      ai_blob_content=$(gh_api_with_retry "repos/Cratis/AI/git/blobs/$ai_sha" \
         --jq '.content' 2>"$ai_blob_error" || true)
 
       if [ -z "$ai_blob_content" ]; then
@@ -368,7 +461,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       clean_ai_b64=$(echo "$ai_blob_content" | tr -d '\n')
 
       target_blob_error=$(mktemp)
-      _target_blob_resp=$(gh api -X POST "repos/Cratis/$repo/git/blobs" \
+      _target_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \
         -f "content=$clean_ai_b64" \
         -f encoding=base64 \
         2>"$target_blob_error" || true)
@@ -387,8 +480,9 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       ai_second_tree_json=$(echo "$ai_second_tree_json" | jq \
         --arg p "$ai_path" \
         --arg s "$target_blob_sha" \
-        '.tree += [{path: $p, mode: "100644", type: "blob", sha: $s}]')
-    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + " " + .sha' 2>/dev/null || true)"
+        --arg m "$ai_mode" \
+        '.tree += [{path: $p, mode: $m, type: "blob", sha: $s}]')
+    done <<< "$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
 
     if [ "$ai_copy_failed" = "false" ]; then
       ai_second_tree_error=$(mktemp)
@@ -399,7 +493,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
       if [ -z "$ai_second_tree_sha" ]; then
         ai_second_tree_api_error=$(cat "$ai_second_tree_error" 2>/dev/null || true)
-        echo "  ⚠ Could not create second tree for $repo; branch will use first commit only"
+        echo "  ⚠ Could not create second tree for $repo; will push first commit only"
         [ -n "$ai_second_tree_api_error" ] && echo "    API error: $ai_second_tree_api_error"
       else
         ai_second_commit_error=$(mktemp)
@@ -414,7 +508,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
 
         if [ -z "$ai_second_commit_sha" ]; then
           ai_second_commit_api_error=$(cat "$ai_second_commit_error" 2>/dev/null || true)
-          echo "  ⚠ Could not create second commit for $repo; branch will use first commit only"
+          echo "  ⚠ Could not create second commit for $repo; will push first commit only"
           [ -n "$ai_second_commit_api_error" ] && echo "    API error: $ai_second_commit_api_error"
         else
           echo "  ✓ Added Copilot setup from Cratis/AI (second commit)"
@@ -427,211 +521,42 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   fi
 
   # ----------------------------------------------------------------
-  # 10. Create or force-update the feature branch (via GraphQL)
+  # 10. Push commit directly to the default branch
   #
-  # The REST Git Data API (POST /git/refs) creates low-level refs that
-  # are NOT registered in GitHub's branch index.  The Pulls API and
-  # GraphQL createPullRequest require the branch to be in the index,
-  # which is why every previous attempt got "Head ref must be a branch".
-  #
-  # GraphQL createRef / updateRef go through the higher-level branch
-  # service and properly register the branch.
+  # A fast-forward (non-force) PATCH updates the ref only if the new
+  # commit is a descendant of the current HEAD — safe against races.
+  # The PAT owner must be configured as a bypass actor on the target
+  # repository's branch protection ruleset for this push to succeed.
   # ----------------------------------------------------------------
-  branch_error=$(mktemp)
-  branch_ok=""
+  push_error=$(mktemp)
+  push_result=$(gh_api_with_retry -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
+    -f sha="$new_commit_sha" \
+    -F force=false \
+    2>"$push_error" || true)
+  updated_sha=$(extract_sha "$push_result" '.object.sha')
 
-  # Check if the branch already exists via GraphQL
-  existing_ref_result=$(gh api graphql \
-    -f query='query($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){id target{oid}}}}' \
-    -f owner="Cratis" \
-    -f name="$repo" \
-    -f ref="refs/heads/$branch" \
-    2>/dev/null || true)
-  existing_ref_id=$(echo "$existing_ref_result" | jq -r '.data.repository.ref.id // empty' 2>/dev/null || true)
-
-  if [ -n "$existing_ref_id" ] && [ "$existing_ref_id" != "null" ]; then
-    # Branch exists — force-update it
-    branch_result=$(gh api graphql \
-      -f query='mutation($refId:ID!,$oid:GitObjectID!){updateRef(input:{refId:$refId,oid:$oid,force:true}){ref{name target{oid}}}}' \
-      -f refId="$existing_ref_id" \
-      -f oid="$new_commit_sha" \
-      2>"$branch_error" || true)
-    branch_ok=$(echo "$branch_result" | jq -r '.data.updateRef.ref.name // empty' 2>/dev/null || true)
-  else
-    # Branch doesn't exist — create it
-    if [ -z "$repo_node_id" ]; then
-      echo "  ⚠ No repository node ID for $repo; cannot create branch via GraphQL"
-      echo "$repo" >> "$failures_file"
-      rm -f "$branch_error"
-      continue
-    fi
-    branch_result=$(gh api graphql \
-      -f query='mutation($repoId:ID!,$name:String!,$oid:GitObjectID!){createRef(input:{repositoryId:$repoId,name:$name,oid:$oid}){ref{name target{oid}}}}' \
-      -f repoId="$repo_node_id" \
-      -f name="refs/heads/$branch" \
-      -f oid="$new_commit_sha" \
-      2>"$branch_error" || true)
-    branch_ok=$(echo "$branch_result" | jq -r '.data.createRef.ref.name // empty' 2>/dev/null || true)
-  fi
-
-  if [ -z "$branch_ok" ] || [ "$branch_ok" = "null" ]; then
-    branch_api_error=$(cat "$branch_error" 2>/dev/null || true)
-    branch_gql_errors=$(echo "$branch_result" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
-    echo "  ⚠ Could not create/update branch for $repo (GraphQL)"
-    [ -n "$branch_api_error" ] && echo "    stderr: $branch_api_error"
-    [ -n "$branch_gql_errors" ] && echo "    GraphQL errors: $branch_gql_errors"
-    echo "    Full response: $(echo "$branch_result" | head -c 500)"
-    rm -f "$branch_error"
+  if [ -z "$updated_sha" ]; then
+    push_api_error=$(cat "$push_error" 2>/dev/null || true)
+    push_msg=$(echo "$push_result" | jq -r '.message // empty' 2>/dev/null || true)
+    echo "  ⚠ Could not push commit to $default_branch in $repo"
+    [ -n "$push_api_error" ] && echo "    API error: $push_api_error"
+    [ -n "$push_msg" ]       && echo "    GitHub message: $push_msg"
+    rm -f "$push_error"
     echo "$repo" >> "$failures_file"
     continue
   fi
-  rm -f "$branch_error"
+  rm -f "$push_error"
 
-  echo "  ✓ Branch $branch ready for $repo (GraphQL)"
-
-  # ----------------------------------------------------------------
-  # 11. Create PR (skip if one already exists for this branch)
-  # ----------------------------------------------------------------
-  # No polling needed — GraphQL createRef/updateRef registers the
-  # branch in the branch index synchronously.
-
-  # Check for an existing open PR for this branch.
-  existing_pr=""
-  list_pr_error=$(mktemp)
-  if api_result=$(gh api "repos/Cratis/$repo/pulls?state=open&head=Cratis:$branch" 2>"$list_pr_error"); then
-    existing_pr=$(echo "$api_result" | jq -r '.[0].number // empty' 2>/dev/null || true)
-  else
-    list_pr_api_error=$(cat "$list_pr_error" 2>/dev/null || true)
-    echo "  ⚠ Could not list PRs for $repo"
-    [ -n "$list_pr_api_error" ] && echo "    API error: $list_pr_api_error"
-  fi
-  rm -f "$list_pr_error"
-
-  if [ -z "$existing_pr" ] || [ "$existing_pr" = "null" ]; then
-    pr_created=false
-
-    # ------------------------------------------------------------------
-    # Strategy 1: GraphQL createPullRequest mutation
-    # The raw GraphQL mutation resolves headRefName within the
-    # repository identified by repositoryId — no local git checkout
-    # needed and no cross-repo branch resolution issues.
-    # ------------------------------------------------------------------
-    if [ -n "$repo_node_id" ]; then
-      pr_error=$(mktemp)
-      # Write the body to a temp file so we can pass it cleanly via --input
-      # without any shell escaping issues with backticks/newlines/markdown.
-      gql_input_file=$(mktemp)
-      jq -n \
-        --arg query 'mutation($repoId:ID!,$base:String!,$head:String!,$title:String!,$body:String!){createPullRequest(input:{repositoryId:$repoId,baseRefName:$base,headRefName:$head,title:$title,body:$body}){pullRequest{url}}}' \
-        --arg repoId "$repo_node_id" \
-        --arg base "$default_branch" \
-        --arg head "$branch" \
-        --arg title "Bootstrap Copilot sync workflows" \
-        --arg body "$pr_body" \
-        '{query:$query,variables:{repoId:$repoId,base:$base,head:$head,title:$title,body:$body}}' \
-        > "$gql_input_file"
-
-      pr_response=$(gh api graphql --input "$gql_input_file" 2>"$pr_error" || true)
-      rm -f "$gql_input_file"
-
-      pr_url=$(echo "$pr_response" | jq -r '.data.createPullRequest.pullRequest.url // empty' 2>/dev/null || true)
-      if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
-        echo "  ✓ Created PR for $repo (GraphQL): $pr_url"
-        echo "$repo" >> "$prs_created_file"
-        pr_created=true
-      else
-        gql_err=$(cat "$pr_error" 2>/dev/null || true)
-        gql_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message) | join("; ")' 2>/dev/null || true)
-        gql_data_errors=$(echo "$pr_response" | jq -r '(.data.createPullRequest.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-        echo "  ℹ GraphQL PR creation failed for $repo"
-        [ -n "$gql_err" ] && echo "    stderr: $gql_err"
-        [ -n "$gql_errors" ] && echo "    GraphQL errors: $gql_errors"
-        [ -n "$gql_data_errors" ] && echo "    Mutation errors: $gql_data_errors"
-        echo "    Full response: $(echo "$pr_response" | head -c 800)"
-
-        # Check for "already exists" in GraphQL error
-        if echo "$gql_errors$gql_data_errors" | grep -qi "already exists"; then
-          echo "  ℹ PR already exists for $repo (detected via GraphQL error)"
-          echo "$repo" >> "$prs_created_file"
-          pr_created=true
-        fi
-      fi
-      rm -f "$pr_error"
-    fi
-
-    # ------------------------------------------------------------------
-    # Strategy 2: REST API fallback with JSON body via --input
-    # Pass the full payload as JSON file to avoid any shell escaping
-    # issues with the PR body (contains markdown, backticks, URLs).
-    # ------------------------------------------------------------------
-    if [ "$pr_created" = "false" ]; then
-      echo "  ℹ Trying REST API fallback for $repo..."
-      pr_error=$(mktemp)
-      rest_input_file=$(mktemp)
-
-      jq -n \
-        --arg title "Bootstrap Copilot sync workflows" \
-        --arg body "$pr_body" \
-        --arg head "$branch" \
-        --arg base "$default_branch" \
-        '{title:$title, body:$body, head:$head, base:$base}' \
-        > "$rest_input_file"
-
-      pr_response=$(gh api -X POST "repos/Cratis/$repo/pulls" \
-        --input "$rest_input_file" \
-        2>"$pr_error" || true)
-      rm -f "$rest_input_file"
-
-      pr_url=$(echo "$pr_response" | jq -r '.html_url // empty' 2>/dev/null || true)
-
-      if [ -n "$pr_url" ] && [ "$pr_url" != "null" ]; then
-        echo "  ✓ Created PR for $repo (REST): $pr_url"
-        echo "$repo" >> "$prs_created_file"
-        pr_created=true
-      else
-        rest_err=$(cat "$pr_error" 2>/dev/null || true)
-        rest_msg=$(echo "$pr_response" | jq -r '.message // empty' 2>/dev/null || true)
-        rest_errors=$(echo "$pr_response" | jq -r '(.errors // []) | map(.message // .code // "unknown") | join("; ")' 2>/dev/null || true)
-        echo "  ⚠ REST PR creation also failed for $repo"
-        [ -n "$rest_err" ] && echo "    stderr: $rest_err"
-        [ -n "$rest_msg" ] && echo "    GitHub message: $rest_msg"
-        [ -n "$rest_errors" ] && echo "    Validation errors: $rest_errors"
-        echo "    Full response: $(echo "$pr_response" | head -c 800)"
-
-        # Handle known 422 cases gracefully
-        if echo "$rest_errors$rest_msg" | grep -qi "already exists"; then
-          echo "  ℹ PR already exists for $repo (detected via REST 422)"
-          echo "$repo" >> "$prs_created_file"
-          pr_created=true
-        elif echo "$rest_errors" | grep -qi "no commits between"; then
-          echo "  ℹ No diff between $branch and $default_branch for $repo — skipping"
-        fi
-      fi
-      rm -f "$pr_error"
-    fi
-
-    if [ "$pr_created" = "false" ]; then
-      echo "$repo" >> "$pr_failures_file"
-    fi
-  else
-    echo "  ℹ PR already exists for $repo (#$existing_pr)"
-    echo "$repo" >> "$prs_created_file"
-  fi
+  echo "  ✓ Pushed Bootstrap Copilot sync workflows directly to $default_branch in $repo"
 done
 
-total_prs=$(wc -l < "$prs_created_file" 2>/dev/null || echo "0")
 total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")
-total_pr_failures=$(wc -l < "$pr_failures_file" 2>/dev/null || echo "0")
-rm -f "$prs_created_file" "$failures_file" "$pr_failures_file"
+rm -f "$failures_file"
 
 echo ""
-echo "Summary: $total_prs repo(s) with PR created or already open, $total_pr_failures repo(s) where PR could not be created, $total_failures branch setup failure(s)"
-
-if [ "$total_pr_failures" -gt 0 ]; then
-  echo "::warning::$total_pr_failures repo(s) could not have PRs auto-created. Branches were set up successfully. Ensure PAT_WORKFLOWS has pull_requests:write permission to enable automatic PR creation."
-fi
+echo "Summary: $total_failures failure(s)"
 
 if [ "$total_failures" -gt 0 ]; then
-  echo "::error::$total_failures repo(s) failed to set up branches. Check the log above for details."
+  echo "::error::$total_failures repo(s) failed. Check the log above for details."
   exit 1
 fi
