@@ -1,14 +1,11 @@
 name: Auto-Approve Publish Deployments
-# Reusable workflow that approves pending environment deployments (npm/nuget)
-# for a workflow run, intended for trusted publishing flows.
+# Workflow that automatically approves pending environment deployments (npm/nuget)
+# from publish workflows, intended for trusted publishing flows.
 
 on:
-  workflow_call:
-    inputs:
-      workflow_run_id:
-        description: Workflow run id to approve pending deployments for
-        required: true
-        type: number
+  workflow_run:
+    workflows: ["Publish"]
+    types: [completed]
 
 permissions:
   actions: read
@@ -21,7 +18,7 @@ jobs:
       - name: Approve pending npm/nuget deployments
         env:
           GH_TOKEN: ${{ github.token }}
-          WORKFLOW_RUN_ID: ${{ inputs.workflow_run_id }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 

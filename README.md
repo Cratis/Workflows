@@ -115,34 +115,24 @@ Only packages linked to the calling repository are considered, so the cleanup is
 
 ## Auto-approving publish deployments
 
-For repositories using trusted publishing with npm and NuGet environments, automatically approve pending deployments by adding a job to your `publish.yml` workflow.
+For repositories using trusted publishing with npm and NuGet environments, the `auto-approve-publish-deployments` workflow automatically approves pending `npm` and `nuget` environment deployments when a publish workflow completes.
 
-The `auto-approve-publish-deployments` reusable workflow approves pending `npm` and `nuget` environment deployments after your packages are published. This prevents deployments from being stuck awaiting manual approval.
+This workflow is distributed to all Cratis repositories via the common bootstrap process. It runs automatically whenever the `Publish` workflow finishes — no additional configuration is needed.
 
-### Setup
+### How it works
 
-Add this job to the end of your `publish.yml` workflow. It should run after your package publishing jobs complete:
+1. When a `Publish` workflow completes (whether successful or not)
+2. The `Auto-Approve Publish Deployments` workflow is triggered
+3. It waits up to 30 minutes for pending npm/nuget deployments to appear
+4. Any pending deployments to `npm` or `nuget` environments are automatically approved
+5. Publishing proceeds without manual intervention
 
-```yaml
-  auto-approve-deployments:
-    name: Auto-Approve Pending Deployments
-    needs: [publish-dotnet-packages, publish-npm-packages]
-    # Only run if package publishing jobs completed successfully
-    if: needs.publish-dotnet-packages.result == 'success' && needs.publish-npm-packages.result == 'success'
-    uses: Cratis/Workflows/.github/workflows/auto-approve-publish-deployments.yml@main
-    with:
-      workflow_run_id: ${{ github.run_id }}
-```
+### Distributed via bootstrap
 
-### Key points
-
-- The `workflow_run_id` should be set to `${{ github.run_id }}` to reference the current workflow run
-- The job should depend on your package publishing jobs via `needs:`
-- It checks that the publishing jobs completed successfully before attempting approval
-- The workflow will wait up to 30 minutes for pending deployments to appear, then approve them automatically
+This workflow is included in the common workflow bootstrap process and is automatically propagated to all Cratis repositories alongside other default workflows.
 
 > [!NOTE]
-> See [publish.template.yml](/.github/workflows/publish.template.yml) for a complete example.
+> See [publish.template.yml](/.github/workflows/publish.template.yml) for an example of a publish workflow that this auto-approve workflow will watch.
 
 ---
 

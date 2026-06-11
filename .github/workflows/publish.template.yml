@@ -1,12 +1,8 @@
-# Template for publish workflow with auto-approve support
+# Template for publish workflow
 # 
-# This template shows how to use the auto-approve-publish-deployments workflow
-# to automatically approve pending npm and nuget deployments.
-#
-# To use this template in your repository:
-# 1. Copy the relevant sections from this file to your publish.yml
-# 2. Ensure you have the auto-approve-deployments job that calls the reusable workflow
-# 3. The auto-approve job should run after your package publishing jobs complete
+# The auto-approve-publish-deployments workflow will automatically watch for
+# this workflow completing and approve any pending npm/nuget deployments.
+# No additional configuration is needed in your publish.yml.
 
 name: Publish
 
@@ -94,12 +90,3 @@ jobs:
     steps:
       # ... publish npm packages ...
 
-  # ⬇️ ADD THIS JOB TO APPROVE PENDING DEPLOYMENTS ⬇️
-  auto-approve-deployments:
-    name: Auto-Approve Pending Deployments
-    needs: [publish-dotnet-packages, publish-npm-packages]
-    # Only run if package publishing jobs completed successfully
-    if: needs.publish-dotnet-packages.result == 'success' && needs.publish-npm-packages.result == 'success'
-    uses: Cratis/Workflows/.github/workflows/auto-approve-publish-deployments.yml@main
-    with:
-      workflow_run_id: ${{ github.run_id }}
