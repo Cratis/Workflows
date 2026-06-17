@@ -43,10 +43,14 @@ on:
     paths:
       - ".ai/**"
       - ".claude/**"
+      - ".agents/**"
+      - "AGENTS.md"
       - ".github/copilot-instructions.md"
       - ".github/instructions/**"
       - ".github/agents/**"
+      - ".github/skills"
       - ".github/skills/**"
+      - ".github/prompts"
       - ".github/prompts/**"
       - ".github/hooks/**"
   workflow_dispatch:
@@ -160,6 +164,10 @@ The artifacts that are synchronized are:
 | `.github/hooks/` | Folder of hook files |
 | `.ai/` | AI setup folder (including prompts, skills, agents, hooks, and rules) |
 | `.claude/` | Claude setup folder (including symlinks such as `.claude/* -> .ai/*`) |
+| `.agents/` | Codex adapter folder |
+| `AGENTS.md` | Root Codex instructions file |
+
+File adapters that point at canonical `.ai/` files are materialized when they are propagated, so target repositories receive usable instruction content. Directory adapters such as `.github/skills`, `.github/prompts`, `.claude/skills`, and `.agents/skills` remain symlinks to the synchronized `.ai/` tree.
 
 ### Excluding files from synchronization
 
@@ -202,8 +210,10 @@ sequenceDiagram
     Source->>Propagate: push to main<br/>(copilot paths changed)
     Propagate->>Propagate: Validate caller is Cratis org
     Propagate->>Propagate: List all Cratis repositories
+    Propagate->>Source: Fetch copilot files once
+    Propagate->>Propagate: Upload source files as workflow artifact
     loop For each target repo (except source)
-        Propagate->>Source: Fetch copilot files
+        Propagate->>Propagate: Download source artifact
         Propagate->>Target: Create blob/tree/commit objects
         Propagate->>Target: Push commit directly to main<br/>(commit message: "Sync Copilot instructions from …")
         Note over Target: Commit message guard prevents<br/>recursive re-propagation
@@ -256,7 +266,7 @@ Fetches the Copilot artifacts from the `source_repository` via the GitHub API an
 
 **Trigger:** `workflow_call` (invoked by the source repository on push to `main`)
 
-Lists all repositories in the Cratis organization and pushes the Copilot instruction files directly to the default branch of each one (except the caller). Silently skips repositories where files are already up to date.
+Lists all repositories in the Cratis organization and pushes the Copilot instruction files directly to the default branch of each one (except the caller). The source files are fetched once and reused from a workflow artifact while target repositories are processed with bounded parallelism. Silently skips repositories where files are already up to date.
 
 **Anti-loop protection:** commits made by this workflow start with `Sync Copilot instructions from`, which the workflow detects on subsequent pushes and skips — preventing recursive propagation chains.
 

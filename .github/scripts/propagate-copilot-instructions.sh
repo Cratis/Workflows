@@ -11,8 +11,14 @@
 #                   so that the direct push to the default branch is allowed.
 #   SOURCE_REPO   - source repository in owner/repo format (e.g. Cratis/AI)
 #   TARGET_REPO   - target repository name (e.g. Chronicle)
+#   COPILOT_SOURCE_FILES_PATH - optional prepared artifact directory containing
+#                               copilot-files.json and blobs/*.b64
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=github-api-retry.sh
+source "${SCRIPT_DIR}/github-api-retry.sh"
 
 # Extract a SHA from a gh api JSON response.  Returns empty string if:
 #   - the response is empty
@@ -31,22 +37,48 @@ extract_sha() {
 
 source_repo="${SOURCE_REPO:?SOURCE_REPO must be set}"
 repo="${TARGET_REPO:?TARGET_REPO must be set}"
+source_files_path="${COPILOT_SOURCE_FILES_PATH:-}"
+source_blobs_dir=""
 
 # ----------------------------------------------------------------
-# Fetch Copilot files from the source repository
+# Fetch or load Copilot files from the source repository
 # ----------------------------------------------------------------
-echo "Fetching Copilot instruction files from ${source_repo}..."
-source_tree_raw=$(gh api "repos/${source_repo}/git/trees/HEAD?recursive=1" 2>/dev/null || true)
+if [ -n "$source_files_path" ]; then
+  source_files_path="${source_files_path%/}"
+  source_blobs_dir="${source_files_path}/blobs"
+  copilot_files_file="${source_files_path}/copilot-files.json"
 
-if [ -z "$source_tree_raw" ]; then
-  echo "::error::Could not fetch tree from ${source_repo}"
-  exit 1
+  echo "Using prepared Copilot source artifact from ${source_files_path}..."
+
+  if [ ! -f "$copilot_files_file" ]; then
+    echo "::error::Missing prepared Copilot file list: ${copilot_files_file}"
+    exit 1
+  fi
+  if [ ! -d "$source_blobs_dir" ]; then
+    echo "::error::Missing prepared Copilot blob directory: ${source_blobs_dir}"
+    exit 1
+  fi
+
+  copilot_files=$(jq -c '.' "$copilot_files_file" 2>/dev/null || true)
+  if [ -z "$copilot_files" ]; then
+    echo "::error::Invalid prepared Copilot file list: ${copilot_files_file}"
+    exit 1
+  fi
+else
+  source_files_path=$(mktemp -d)
+  source_blobs_dir="${source_files_path}/blobs"
+
+  SOURCE_REPO="$source_repo" \
+    OUTPUT_DIR="$source_files_path" \
+    bash "${SCRIPT_DIR}/prepare-copilot-source-artifact.sh"
+
+  copilot_files_file="${source_files_path}/copilot-files.json"
+  copilot_files=$(jq -c '.' "$copilot_files_file" 2>/dev/null || true)
+  if [ -z "$copilot_files" ]; then
+    echo "::error::Invalid prepared Copilot file list: ${copilot_files_file}"
+    exit 1
+  fi
 fi
-
-copilot_files=$(echo "$source_tree_raw" | jq -c \
-  '[.tree[] | select(.type == "blob") |
-   select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
-   {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 
 if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
   echo "No Copilot instruction files found in ${source_repo} — nothing to propagate."
@@ -54,25 +86,13 @@ if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
 fi
 echo "✓ Found $(echo "$copilot_files" | jq 'length') Copilot file(s) in ${source_repo}"
 
-# ----------------------------------------------------------------
-# Filter out files matching .copilot-sync-ignore patterns
-# ----------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=copilot-sync-ignore-filter.sh
-source "${SCRIPT_DIR}/copilot-sync-ignore-filter.sh"
-
-if ! _apply_copilot_sync_ignore; then
-  echo "All Copilot files excluded by .copilot-sync-ignore — nothing to propagate."
-  exit 0
-fi
-
 echo "Processing Cratis/${repo}..."
 
 # ----------------------------------------------------------------
 # 1. Get default branch and HEAD SHA
 # ----------------------------------------------------------------
 repo_info_error=$(mktemp)
-default_branch=$(gh api "repos/Cratis/${repo}" \
+default_branch=$(gh_api_with_retry "repos/Cratis/${repo}" \
   --jq '.default_branch' \
   2>"$repo_info_error" || true)
 if [ -z "$default_branch" ]; then
@@ -85,7 +105,7 @@ fi
 rm -f "$repo_info_error"
 
 head_sha_error=$(mktemp)
-_head_sha_resp=$(gh api "repos/Cratis/${repo}/git/ref/heads/${default_branch}" \
+_head_sha_resp=$(gh_api_with_retry "repos/Cratis/${repo}/git/ref/heads/${default_branch}" \
   2>"$head_sha_error" || true)
 head_sha=$(extract_sha "$_head_sha_resp" '.object.sha')
 if [ -z "$head_sha" ]; then
@@ -101,7 +121,7 @@ rm -f "$head_sha_error"
 # 2. Get the commit's tree SHA and current full tree
 # ----------------------------------------------------------------
 tree_sha_error=$(mktemp)
-_tree_sha_resp=$(gh api "repos/Cratis/${repo}/git/commits/${head_sha}" \
+_tree_sha_resp=$(gh_api_with_retry "repos/Cratis/${repo}/git/commits/${head_sha}" \
   2>"$tree_sha_error" || true)
 tree_sha=$(extract_sha "$_tree_sha_resp" '.tree.sha')
 if [ -z "$tree_sha" ]; then
@@ -114,7 +134,7 @@ fi
 rm -f "$tree_sha_error"
 
 subtree_error=$(mktemp)
-subtree=$(gh api "repos/Cratis/${repo}/git/trees/${tree_sha}?recursive=1" \
+subtree=$(gh_api_with_retry "repos/Cratis/${repo}/git/trees/${tree_sha}?recursive=1" \
   2>"$subtree_error" || true)
 if [ -z "$subtree" ]; then
   subtree_api_error=$(cat "$subtree_error" 2>/dev/null || true)
@@ -158,33 +178,42 @@ new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
 while IFS=$'\t' read -r src_path src_sha src_mode; do
   [ -z "$src_path" ] && continue
 
-  # Fetch blob content from source repo (returned as base64 by API).
-  # NOTE: zero-byte files return {"content":"","encoding":"base64"} — the
-  # content field is legitimately empty.  We must check whether the API call
-  # itself succeeded (non-empty JSON response), not whether content is empty.
-  blob_error=$(mktemp)
-  blob_resp=$(gh api "repos/${source_repo}/git/blobs/${src_sha}" \
-    2>"$blob_error" || true)
-  blob_api_error=$(cat "$blob_error" 2>/dev/null || true)
-  rm -f "$blob_error"
+  if [ -n "$source_blobs_dir" ]; then
+    blob_file="${source_blobs_dir}/${src_sha}.b64"
+    if [ ! -f "$blob_file" ]; then
+      echo "::error::Prepared source artifact is missing blob for ${src_path} (${src_sha})"
+      exit 1
+    fi
+    clean_b64=$(tr -d '\n' < "$blob_file")
+  else
+    # Fetch blob content from source repo (returned as base64 by API).
+    # NOTE: zero-byte files return {"content":"","encoding":"base64"} — the
+    # content field is legitimately empty.  We must check whether the API call
+    # itself succeeded (non-empty JSON response), not whether content is empty.
+    blob_error=$(mktemp)
+    blob_resp=$(gh_api_with_retry "repos/${source_repo}/git/blobs/${src_sha}" \
+      2>"$blob_error" || true)
+    blob_api_error=$(cat "$blob_error" 2>/dev/null || true)
+    rm -f "$blob_error"
 
-  if [ -z "$blob_resp" ]; then
-    echo "::error::Could not fetch blob for ${src_path} from ${source_repo}"
-    [ -n "$blob_api_error" ] && echo "  API error: $blob_api_error"
-    exit 1
+    if [ -z "$blob_resp" ]; then
+      echo "::error::Could not fetch blob for ${src_path} from ${source_repo}"
+      [ -n "$blob_api_error" ] && echo "  API error: $blob_api_error"
+      exit 1
+    fi
+
+    # Extract content; empty string is valid for zero-byte files
+    blob_content=$(echo "$blob_resp" | jq -r '.content' 2>/dev/null || true)
+
+    # Strip embedded newlines that the API inserts into base64 output
+    clean_b64=$(echo "$blob_content" | tr -d '\n')
   fi
-
-  # Extract content; empty string is valid for zero-byte files
-  blob_content=$(echo "$blob_resp" | jq -r '.content' 2>/dev/null || true)
-
-  # Strip embedded newlines that the API inserts into base64 output
-  clean_b64=$(echo "$blob_content" | tr -d '\n')
 
   target_blob_error=$(mktemp)
   _target_blob_resp=$(jq -n \
     --arg content "$clean_b64" \
     '{"content": $content, "encoding": "base64"}' | \
-    gh api -X POST "repos/Cratis/${repo}/git/blobs" \
+    gh_api_with_retry -X POST "repos/Cratis/${repo}/git/blobs" \
     --input - \
     2>"$target_blob_error" || true)
   target_blob_api_error=$(cat "$target_blob_error" 2>/dev/null || true)
@@ -209,7 +238,7 @@ done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.
 # ----------------------------------------------------------------
 new_tree_error=$(mktemp)
 _new_tree_resp=$(echo "$new_tree_json" | \
-  gh api -X POST "repos/Cratis/${repo}/git/trees" \
+  gh_api_with_retry -X POST "repos/Cratis/${repo}/git/trees" \
   --input - 2>"$new_tree_error" || true)
 new_tree_sha=$(extract_sha "$_new_tree_resp")
 
@@ -228,7 +257,7 @@ _commit_resp=$(jq -n \
   --arg tree "$new_tree_sha" \
   --arg parent "$head_sha" \
   '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
-  gh api -X POST "repos/Cratis/${repo}/git/commits" \
+  gh_api_with_retry -X POST "repos/Cratis/${repo}/git/commits" \
   --input - 2>"$commit_error" || true)
 new_commit_sha=$(extract_sha "$_commit_resp")
 
@@ -252,7 +281,7 @@ echo "✓ Created commit ${new_commit_sha} in ${repo}"
 # repository's branch protection ruleset for this push to succeed.
 # ----------------------------------------------------------------
 push_error=$(mktemp)
-push_result=$(gh api -X PATCH "repos/Cratis/${repo}/git/refs/heads/${default_branch}" \
+push_result=$(gh_api_with_retry -X PATCH "repos/Cratis/${repo}/git/refs/heads/${default_branch}" \
   -f sha="$new_commit_sha" \
   -F force=false \
   2>"$push_error" || true)

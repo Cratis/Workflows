@@ -10,6 +10,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Extract a SHA from a gh api JSON response.  Returns empty string if:
 #   - the response is empty
 #   - the jq path does not exist
@@ -46,22 +48,17 @@ pr_body="Synchronizes Copilot instruction files from [${source_repo}](https://gi
 echo "Syncing Copilot instructions from ${source_repo} to ${target_repo}..."
 
 # ----------------------------------------------------------------
-# 1. Fetch Copilot files from the source repository
+# 1. Prepare Copilot source files
 # ----------------------------------------------------------------
-source_tree_error=$(mktemp)
-source_tree_raw=$(gh api "repos/${source_repo}/git/trees/HEAD?recursive=1" \
-  2>"$source_tree_error" || true)
-rm -f "$source_tree_error"
+source_files_path=$(mktemp -d)
+source_blobs_dir="${source_files_path}/blobs"
 
-if [ -z "$source_tree_raw" ]; then
-  echo "::error::Could not fetch tree from ${source_repo}"
-  exit 1
-fi
+SOURCE_REPO="$source_repo" \
+  OUTPUT_DIR="$source_files_path" \
+  bash "${SCRIPT_DIR}/prepare-copilot-source-artifact.sh"
 
-copilot_files=$(echo "$source_tree_raw" | jq -c \
-  '[.tree[] | select(.type == "blob") |
-   select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
-   {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
+copilot_files_file="${source_files_path}/copilot-files.json"
+copilot_files=$(jq -c '.' "$copilot_files_file" 2>/dev/null || true)
 
 if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
   echo "No Copilot instruction files found in ${source_repo} — nothing to sync."
@@ -69,18 +66,6 @@ if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
 fi
 
 echo "✓ Found $(echo "$copilot_files" | jq 'length') Copilot file(s) in ${source_repo}"
-
-# ----------------------------------------------------------------
-# 1b. Filter out files matching .copilot-sync-ignore patterns
-# ----------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=copilot-sync-ignore-filter.sh
-source "${SCRIPT_DIR}/copilot-sync-ignore-filter.sh"
-
-if ! _apply_copilot_sync_ignore; then
-  echo "All Copilot files excluded by .copilot-sync-ignore — nothing to sync."
-  exit 0
-fi
 
 # ----------------------------------------------------------------
 # 2. Get target repository info (default branch, node ID, HEAD SHA)
@@ -216,20 +201,14 @@ copy_failed=false
 while IFS=$'\t' read -r src_path src_sha src_mode; do
   [ -z "$src_path" ] && continue
 
-  # Fetch blob content from source repo (returned as base64 by API)
-  blob_error=$(mktemp)
-  blob_content=$(gh api "repos/${source_repo}/git/blobs/${src_sha}" \
-    --jq '.content' 2>"$blob_error" || true)
-  rm -f "$blob_error"
-
-  if [ -z "$blob_content" ]; then
-    echo "  ⚠ Could not fetch blob for ${src_path} from ${source_repo}"
+  blob_file="${source_blobs_dir}/${src_sha}.b64"
+  if [ ! -f "$blob_file" ]; then
+    echo "  ⚠ Prepared source artifact is missing blob for ${src_path} (${src_sha})"
     copy_failed=true
     break
   fi
 
-  # Strip embedded newlines that the API inserts into base64 output
-  clean_b64=$(echo "$blob_content" | tr -d '\n')
+  clean_b64=$(tr -d '\n' < "$blob_file")
 
   target_blob_error=$(mktemp)
   _target_blob_resp=$(gh api -X POST "repos/${target_repo}/git/blobs" \
