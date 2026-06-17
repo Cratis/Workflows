@@ -280,6 +280,8 @@ Lists all repositories in the Cratis organization and pushes the Copilot instruc
 
 **Trigger:** `workflow_dispatch` (run once, manually)
 
+This workflow is intentionally manual because it performs organization-wide writes and can consume a large GitHub REST API budget. Use it for planned bootstrap or wrapper rollout work, not as a merge-triggered check.
+
 One-time setup workflow. For every non-archived repository in the Cratis organization (except `Workflows` itself), it:
 
 1. Creates a branch `add-copilot-sync-workflows`

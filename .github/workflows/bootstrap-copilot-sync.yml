@@ -10,9 +10,8 @@ name: Bootstrap Copilot Sync
 #                             the content has changed since last run.
 #  • Already up-to-date:      skips processing.
 #
-# Triggered automatically on push to main whenever this script changes
-# (e.g. updated wrapper content or a new Copilot folder path).  Can also
-# be run manually at any time via workflow_dispatch.
+# This workflow is intentionally manual. It performs org-wide writes and can
+# consume a large GitHub REST API budget, so it should not run as a merge check.
 #
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
@@ -32,18 +31,19 @@ name: Bootstrap Copilot Sync
 # changes.
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - ".github/scripts/bootstrap-copilot-sync.sh"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: bootstrap-copilot-sync
+  cancel-in-progress: false
+
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
