@@ -123,10 +123,14 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #       paths:
 #         - ".ai/**"
 #         - ".claude/**"
+#         - ".agents/**"
+#         - "AGENTS.md"
 #         - ".github/copilot-instructions.md"
 #         - ".github/instructions/**"
 #         - ".github/agents/**"
+#         - ".github/skills"
 #         - ".github/skills/**"
+#         - ".github/prompts"
 #         - ".github/prompts/**"
 #         - ".github/hooks/**"
 #     workflow_dispatch:
@@ -136,26 +140,20 @@ sync_b64="bmFtZTogU3luYyBDb3BpbG90IEluc3RydWN0aW9ucwoKb246CiAgd29ya2Zsb3dfZGlzcG
 #       with:
 #         event_name: ${{ github.event_name }}
 #       secrets: inherit
-propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmFpLyoqIgogICAgICAtICIuY2xhdWRlLyoqIgogICAgICAtICIuZ2l0aHViL2NvcGlsb3QtaW5zdHJ1Y3Rpb25zLm1kIgogICAgICAtICIuZ2l0aHViL2luc3RydWN0aW9ucy8qKiIKICAgICAgLSAiLmdpdGh1Yi9hZ2VudHMvKioiCiAgICAgIC0gIi5naXRodWIvc2tpbGxzLyoqIgogICAgICAtICIuZ2l0aHViL3Byb21wdHMvKioiCiAgICAgIC0gIi5naXRodWIvaG9va3MvKioiCiAgd29ya2Zsb3dfZGlzcGF0Y2g6Cgpqb2JzOgogIHByb3BhZ2F0ZToKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvcHJvcGFnYXRlLWNvcGlsb3QtaW5zdHJ1Y3Rpb25zLnltbEBtYWluCiAgICB3aXRoOgogICAgICBldmVudF9uYW1lOiAke3sgZ2l0aHViLmV2ZW50X25hbWUgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
+propagate_b64="bmFtZTogUHJvcGFnYXRlIENvcGlsb3QgSW5zdHJ1Y3Rpb25zCgpvbjoKICBwdXNoOgogICAgYnJhbmNoZXM6IFsibWFpbiJdCiAgICBwYXRoczoKICAgICAgLSAiLmFpLyoqIgogICAgICAtICIuY2xhdWRlLyoqIgogICAgICAtICIuYWdlbnRzLyoqIgogICAgICAtICJBR0VOVFMubWQiCiAgICAgIC0gIi5naXRodWIvY29waWxvdC1pbnN0cnVjdGlvbnMubWQiCiAgICAgIC0gIi5naXRodWIvaW5zdHJ1Y3Rpb25zLyoqIgogICAgICAtICIuZ2l0aHViL2FnZW50cy8qKiIKICAgICAgLSAiLmdpdGh1Yi9za2lsbHMiCiAgICAgIC0gIi5naXRodWIvc2tpbGxzLyoqIgogICAgICAtICIuZ2l0aHViL3Byb21wdHMiCiAgICAgIC0gIi5naXRodWIvcHJvbXB0cy8qKiIKICAgICAgLSAiLmdpdGh1Yi9ob29rcy8qKiIKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgcHJvcGFnYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9wcm9wYWdhdGUtY29waWxvdC1pbnN0cnVjdGlvbnMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIGV2ZW50X25hbWU6ICR7eyBnaXRodWIuZXZlbnRfbmFtZSB9fQogICAgc2VjcmV0czogaW5oZXJpdAo="
 
-# Fetch the Copilot setup tree from Cratis/AI once; reused for every repo.
+# Prepare the Copilot setup from Cratis/AI once; reused for every repo.
+ai_copilot_source_dir=$(mktemp -d)
 ai_copilot_files=""
-ai_tree_error=$(mktemp)
-ai_tree_raw=$(gh_api_with_retry "repos/Cratis/AI/git/trees/main?recursive=1" 2>"$ai_tree_error" || true)
-if [ -n "$ai_tree_raw" ]; then
-  ai_copilot_files=$(echo "$ai_tree_raw" | jq -c \
-    '[.tree[] | select(.type == "blob") |
-     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
-     {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
+if SOURCE_REPO="Cratis/AI" OUTPUT_DIR="$ai_copilot_source_dir" \
+  bash .github/scripts/prepare-copilot-source-artifact.sh; then
+  ai_copilot_files=$(jq -c '.' "${ai_copilot_source_dir}/copilot-files.json" 2>/dev/null || true)
 fi
 if [ -z "$ai_copilot_files" ] || [ "$ai_copilot_files" = "[]" ]; then
-  ai_tree_api_error=$(cat "$ai_tree_error" 2>/dev/null || true)
   echo "⚠ No Copilot setup files found in Cratis/AI; second commit will be skipped"
-  [ -n "$ai_tree_api_error" ] && echo "  API error: $ai_tree_api_error"
 else
   echo "✓ Found $(echo "$ai_copilot_files" | jq 'length') Copilot setup file(s) in Cratis/AI"
 fi
-rm -f "$ai_tree_error"
 
 # ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
@@ -299,7 +297,8 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # instructions/, agents/, skills/, prompts/, and hooks/ sub-directories.
   files_to_delete=$(echo "$subtree" | jq -r \
     '.tree[] | select(.type == "blob") |
-     select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)")) |
+     select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/)")) |
+     select(.path != ".claude/settings.local.json") |
      .path' 2>/dev/null || true)
 
   # Check whether Copilot files from Cratis/AI are already present in
@@ -332,7 +331,8 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # repeated jq invocations inside the loop.
   repo_copilot_shas=$(echo "$subtree" | jq -r \
     '[.tree[] | select(.type == "blob") |
-      select(.path | test("^(\\.github/(copilot-instructions\\.md$|instructions/|agents/|skills/|prompts/|hooks/)|\\.ai/[^/]+(/.*)?|\\.claude/[^/]+(/.*)?)"))] |
+      select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/)")) |
+      select(.path != ".claude/settings.local.json")] |
       .[] | .path + "\t" + .sha + "\t" + .mode' 2>/dev/null || true)
   ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)
 
@@ -442,23 +442,14 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     while IFS=$'\t' read -r ai_path ai_sha ai_mode; do
       [ -z "$ai_path" ] && continue
 
-      # Fetch blob content from Cratis/AI (returned as base64 by the API)
-      ai_blob_error=$(mktemp)
-      ai_blob_content=$(gh_api_with_retry "repos/Cratis/AI/git/blobs/$ai_sha" \
-        --jq '.content' 2>"$ai_blob_error" || true)
-
-      if [ -z "$ai_blob_content" ]; then
-        ai_blob_api_error=$(cat "$ai_blob_error" 2>/dev/null || true)
-        echo "  ⚠ Could not fetch blob for $ai_path from Cratis/AI; skipping second commit"
-        [ -n "$ai_blob_api_error" ] && echo "    API error: $ai_blob_api_error"
-        rm -f "$ai_blob_error"
+      ai_blob_file="${ai_copilot_source_dir}/blobs/${ai_sha}.b64"
+      if [ ! -f "$ai_blob_file" ]; then
+        echo "  ⚠ Prepared source artifact is missing blob for $ai_path ($ai_sha); skipping second commit"
         ai_copy_failed=true
         break
       fi
-      rm -f "$ai_blob_error"
 
-      # Strip embedded newlines that the API inserts into base64 output
-      clean_ai_b64=$(echo "$ai_blob_content" | tr -d '\n')
+      clean_ai_b64=$(tr -d '\n' < "$ai_blob_file")
 
       target_blob_error=$(mktemp)
       _target_blob_resp=$(gh_api_with_retry -X POST "repos/Cratis/$repo/git/blobs" \

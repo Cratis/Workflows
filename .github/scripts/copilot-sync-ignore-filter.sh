@@ -20,8 +20,13 @@ _apply_copilot_sync_ignore() {
 
   echo "ℹ Found .copilot-sync-ignore in ${source_repo}"
   local ignore_blob
-  ignore_blob=$(gh api "repos/${source_repo}/git/blobs/${ignore_sha}" \
-    --jq '.content' 2>/dev/null || true)
+  if declare -F gh_api_with_retry >/dev/null 2>&1; then
+    ignore_blob=$(gh_api_with_retry "repos/${source_repo}/git/blobs/${ignore_sha}" \
+      --jq '.content' 2>/dev/null || true)
+  else
+    ignore_blob=$(gh api "repos/${source_repo}/git/blobs/${ignore_sha}" \
+      --jq '.content' 2>/dev/null || true)
+  fi
   local ignore_content
   ignore_content=$(echo "$ignore_blob" | base64 -d 2>/dev/null || true)
 
@@ -33,7 +38,9 @@ _apply_copilot_sync_ignore() {
   #   *   → [^/]*       (match within a single directory)
   #   ?   → [^/]        (match a single character)
   #   .   → \.          (literal dot)
-  # Patterns without a .github/ prefix get one prepended automatically.
+  # Patterns without an explicit root prefix default to .github/ for backward
+  # compatibility. Use .ai/, .claude/, .agents/, or AGENTS.md explicitly to
+  # target those propagated AI surfaces.
   local combined_regex=""
   local pattern regex
   while IFS= read -r pattern || [ -n "$pattern" ]; do
@@ -41,8 +48,14 @@ _apply_copilot_sync_ignore() {
     [ -z "$pattern" ] && continue
     [[ "$pattern" == \#* ]] && continue
 
-    # Normalize: ensure .github/ prefix
-    [[ "$pattern" != .github/* ]] && pattern=".github/${pattern}"
+    # Normalize: default unscoped patterns to .github/ for backward compatibility.
+    if [[ "$pattern" != .github/* && \
+          "$pattern" != .ai/* && \
+          "$pattern" != .claude/* && \
+          "$pattern" != .agents/* && \
+          "$pattern" != AGENTS.md ]]; then
+      pattern=".github/${pattern}"
+    fi
 
     # Convert glob → regex (order matters: ** before *)
     regex=$(printf '%s' "$pattern" \

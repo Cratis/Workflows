@@ -14,9 +14,10 @@ name: Propagate Copilot Instructions
 # NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
 # directly — no per-repository workflow dispatch is needed.
 #
-# Repositories are processed in parallel using a dynamic matrix built from the
-# list of non-archived Cratis repositories (excluding the source repo and a small
-# ignore list).  Each matrix job handles exactly one target repository.
+# Repositories are processed with a bounded dynamic matrix built from the list
+# of non-archived Cratis repositories (excluding the source repo and a small
+# ignore list).  The source Copilot files are fetched once, uploaded as an
+# artifact, and then reused by each target repository job.
 
 on:
   workflow_call:
@@ -44,8 +45,17 @@ jobs:
     if: ${{ github.repository_owner == 'Cratis' }}
     outputs:
       repos: ${{ steps.list-repos.outputs.repos }}
+      source_artifact_name: ${{ steps.source_artifact.outputs.name }}
+      source_file_count: ${{ steps.source_artifact.outputs.file_count }}
 
     steps:
+      - name: Checkout Workflows repository
+        uses: actions/checkout@v4
+        with:
+          repository: Cratis/Workflows
+          ref: main
+          token: ${{ secrets.PAT_WORKFLOWS }}
+
       - name: Get all Cratis repositories
         id: list-repos
         env:
@@ -54,6 +64,8 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ inputs.event_name }}
         run: |
+          source .github/scripts/github-api-retry.sh
+
           source_name="${SOURCE_REPO##*/}"
 
           # Skip propagation when the triggering commit is itself a Copilot sync
@@ -81,14 +93,14 @@ jobs:
           # sync PRs from other canonical sources.  For regular merges the
           # propagation proceeds; the per-repo "up to date" content check in the
           # propagation script naturally prevents creating redundant PRs.
-          actual_event=$(gh api "repos/${SOURCE_REPO}/actions/runs/${GITHUB_RUN_ID}" \
+          actual_event=$(gh_api_with_retry "repos/${SOURCE_REPO}/actions/runs/${GITHUB_RUN_ID}" \
             --jq '.event' 2>/dev/null || true)
           if [ -z "$actual_event" ]; then
             actual_event="${EVENT_NAME:-push}"
           fi
 
           if [ "$actual_event" != "workflow_dispatch" ]; then
-            commit_msg=$(gh api "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
+            commit_msg=$(gh_api_with_retry "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
               --jq '.message' 2>/dev/null || true)
             if echo "$commit_msg" | grep -qiE '^Sync Copilot instructions from'; then
               echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
@@ -100,18 +112,40 @@ jobs:
           # List all non-archived repos, excluding the source repo and the
           # repos in REPOS_TO_IGNORE.  The result is a compact JSON array
           # used as the matrix.
-          repos=$(gh repo list Cratis --limit 1000 --json name,isArchived \
-            | jq -c --arg src "$source_name" --argjson ignore "$REPOS_TO_IGNORE" \
-            '[.[] | select(.isArchived == false) | .name
+          repos=$(gh_api_with_retry --paginate "orgs/Cratis/repos?type=all&per_page=100" \
+            | jq -s -c --arg src "$source_name" --argjson ignore "$REPOS_TO_IGNORE" \
+            '[.[][] | select(.archived == false) | .name
               | select(. != $src)
               | select(. as $n | ($ignore | index($n)) == null)]')
           echo "repos=$repos" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare Copilot source artifact
+        id: source_artifact
+        if: ${{ steps.list-repos.outputs.repos != '[]' }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          SOURCE_REPO: ${{ github.repository }}
+          OUTPUT_DIR: ${{ runner.temp }}/copilot-source
+        run: |
+          bash .github/scripts/prepare-copilot-source-artifact.sh
+          echo "name=copilot-source-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "file_count=$(jq -r '.file_count' "${OUTPUT_DIR}/metadata.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Copilot source artifact
+        if: ${{ steps.list-repos.outputs.repos != '[]' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.source_artifact.outputs.name }}
+          path: ${{ runner.temp }}/copilot-source
+          retention-days: 1
+          if-no-files-found: error
+
   propagate:
     needs: get-repos
-    if: ${{ needs.get-repos.outputs.repos != '[]' }}
+    if: ${{ needs.get-repos.outputs.repos != '[]' && needs.get-repos.outputs.source_file_count != '0' }}
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 3
       matrix:
         repo: ${{ fromJson(needs.get-repos.outputs.repos) }}
       fail-fast: false
@@ -124,10 +158,17 @@ jobs:
           ref: main
           token: ${{ secrets.PAT_WORKFLOWS }}
 
+      - name: Download Copilot source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.get-repos.outputs.source_artifact_name }}
+          path: ${{ runner.temp }}/copilot-source
+
       - name: Propagate Copilot instructions to ${{ matrix.repo }}
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           SOURCE_REPO: ${{ github.repository }}
           TARGET_REPO: ${{ matrix.repo }}
+          COPILOT_SOURCE_FILES_PATH: ${{ runner.temp }}/copilot-source
         run: |
           bash .github/scripts/propagate-copilot-instructions.sh
