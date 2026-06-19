@@ -90,8 +90,8 @@ jobs:
           # pattern also matches regular merge commits ("Merge pull request #N
           # from …/copilot-sync/update-instructions"), which would incorrectly
           # suppress propagation in repos that regularly receive — and merge —
-          # sync PRs from other canonical sources.  For regular merges the
-          # propagation proceeds; the per-repo "up to date" content check in the
+          # sync PRs from other sources.  For regular merges the propagation
+          # proceeds; the per-repo "up to date" content check in the
           # propagation script naturally prevents creating redundant PRs.
           actual_event=$(gh_api_with_retry "repos/${SOURCE_REPO}/actions/runs/${GITHUB_RUN_ID}" \
             --jq '.event' 2>/dev/null || true)

@@ -150,7 +150,7 @@ The common workflow bootstrap also propagates **`.github/codeql/codeql-config.ym
 
 ### Copilot instruction synchronization
 
-Copilot artifacts are kept in one authoritative repository and automatically propagated to all other Cratis repositories whenever they change.
+Copilot and AI-assistant artifacts are broadcast between Cratis repositories whenever they change.
 
 The artifacts that are synchronized are:
 
@@ -167,7 +167,7 @@ The artifacts that are synchronized are:
 | `.agents/` | Codex adapter folder |
 | `AGENTS.md` | Root Codex instructions file |
 
-File adapters that point at canonical `.ai/` files are materialized when they are propagated, so target repositories receive usable instruction content. Directory adapters such as `.github/skills`, `.github/prompts`, `.claude/skills`, and `.agents/skills` remain symlinks to the synchronized `.ai/` tree.
+Adapters are normalized and propagated as adapters. When a matching canonical `.ai` file exists in the source tree, known adapter paths are written as symlinks or path-reference files, even if the source repository currently contains copied content at that adapter path. This keeps `.ai/` as the synchronized source of truth instead of duplicating `.ai` content into tool-specific files.
 
 ### Excluding files from synchronization
 
@@ -199,18 +199,18 @@ When the `.copilot-sync-ignore` file is present in the source repository, any ma
 
 ### Propagation flow
 
-When Copilot instruction files are pushed to `main` in any Cratis repository:
+When AI corpus files are pushed to `main` in any Cratis repository:
 
 ```mermaid
 sequenceDiagram
-    participant Source as Source Repo<br/>(e.g. Chronicle)
+    participant Source as Source Repo<br/>(e.g. Chronicle or AI)
     participant Propagate as propagate-copilot-instructions<br/>(Cratis/Workflows)
     participant Target as Target Repo<br/>(e.g. Arc, Fundamentals, …)
 
-    Source->>Propagate: push to main<br/>(copilot paths changed)
+    Source->>Propagate: push to main<br/>(AI corpus paths changed)
     Propagate->>Propagate: Validate caller is Cratis org
     Propagate->>Propagate: List all Cratis repositories
-    Propagate->>Source: Fetch copilot files once
+    Propagate->>Source: Fetch AI corpus files once<br/>(normalize adapters)
     Propagate->>Propagate: Upload source files as workflow artifact
     loop For each target repo (except source)
         Propagate->>Propagate: Download source artifact
