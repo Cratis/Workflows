@@ -5,6 +5,11 @@
 #   GH_TOKEN    - PAT with read access to SOURCE_REPO
 #   SOURCE_REPO - source repository in owner/repo format
 #   OUTPUT_DIR  - directory to populate with copilot-files.json and blobs/*.b64
+#
+# The artifact normalizes known adapter paths so broadcast propagation keeps the
+# Cratis AI corpus shape intact. A source repository may already contain copied
+# content at an adapter path; propagation should repair that back to an adapter
+# when the matching canonical .ai file exists in the source tree.
 
 set -euo pipefail
 
@@ -16,95 +21,118 @@ source_repo="${SOURCE_REPO:?SOURCE_REPO must be set}"
 output_dir="${OUTPUT_DIR:?OUTPUT_DIR must be set}"
 blobs_dir="${output_dir}/blobs"
 
-mkdir -p "$blobs_dir"
+source_tree_has_path() {
+  local path="$1"
 
-normalize_source_path() {
-  python3 - "$1" "$2" <<'PY'
-import os.path
-import sys
-
-print(os.path.normpath(os.path.join(sys.argv[1], sys.argv[2])))
-PY
+  echo "$source_tree_raw" | jq -e \
+    --arg p "$path" \
+    '.tree[] | select(.path == $p)' >/dev/null 2>&1
 }
 
-is_path_reference_adapter() {
-  case "$1" in
-    AGENTS.md | \
-    .github/copilot-instructions.md | \
-    .github/instructions/* | \
-    .github/agents/* | \
-    .claude/CLAUDE.md | \
-    .claude/rules/* | \
-    .claude/commands/*)
-      return 0
+source_tree_has_prefix() {
+  local prefix="$1"
+
+  echo "$source_tree_raw" | jq -e \
+    --arg p "$prefix" \
+    '.tree[] | select(.path | startswith($p))' >/dev/null 2>&1
+}
+
+adapter_spec_for_path() {
+  local path="$1"
+  local file name target
+
+  case "$path" in
+    AGENTS.md)
+      source_tree_has_path ".ai/rules/general.md" && printf '120000\t.ai/rules/general.md\n'
       ;;
-    *)
-      return 1
+    .github/copilot-instructions.md)
+      source_tree_has_path ".ai/rules/general.md" && printf '100644\t../.ai/rules/general.md\n'
+      ;;
+    .claude/CLAUDE.md)
+      source_tree_has_path ".ai/rules/general.md" && printf '120000\t../.ai/rules/general.md\n'
+      ;;
+    .agents/skills)
+      source_tree_has_prefix ".ai/skills/" && printf '120000\t../.ai/skills\n'
+      ;;
+    .github/prompts)
+      source_tree_has_prefix ".ai/prompts/" && printf '120000\t../.ai/prompts\n'
+      ;;
+    .github/skills)
+      source_tree_has_prefix ".ai/skills/" && printf '120000\t../.ai/skills\n'
+      ;;
+    .claude/agents)
+      source_tree_has_prefix ".ai/agents/" && printf '120000\t../.ai/agents\n'
+      ;;
+    .claude/skills)
+      source_tree_has_prefix ".ai/skills/" && printf '120000\t../.ai/skills\n'
+      ;;
+    .github/instructions/*.instructions.md)
+      file="${path##*/}"
+      name="${file%.instructions.md}"
+      target=".ai/rules/${name}.md"
+      source_tree_has_path "$target" && printf '100644\t../../.ai/rules/%s.md\n' "$name"
+      ;;
+    .claude/rules/*.md)
+      file="${path##*/}"
+      name="${file%.md}"
+      target=".ai/rules/${name}.md"
+      source_tree_has_path "$target" && printf '120000\t../../.ai/rules/%s.md\n' "$name"
+      ;;
+    .github/agents/*.agent.md)
+      file="${path##*/}"
+      name="${file%.agent.md}"
+      target=".ai/agents/${name}.md"
+      source_tree_has_path "$target" && printf '120000\t../../.ai/agents/%s.md\n' "$name"
+      ;;
+    .claude/commands/*.md)
+      file="${path##*/}"
+      name="${file%.md}"
+      target=".ai/prompts/${name}.prompt.md"
+      source_tree_has_path "$target" && printf '120000\t../../.ai/prompts/%s.prompt.md\n' "$name"
       ;;
   esac
 }
 
-looks_like_adapter_target() {
-  local target="$1"
+write_synthetic_blob() {
+  local content="$1"
+  local sha
 
-  [ -n "$target" ] &&
-    [ "${#target}" -le 512 ] &&
-    [[ "$target" != /* ]] &&
-    [[ "$target" != *$'\n'* ]] &&
-    [[ "$target" != *$'\r'* ]]
+  sha=$(printf '%s' "$content" | git hash-object --stdin)
+  printf '%s' "$content" | base64 | tr -d '\n' > "${blobs_dir}/${sha}.b64"
+  printf '%s' "$sha"
 }
 
-find_real_blob_for_path() {
-  local resolved_path="$1"
-
-  echo "$source_tree_raw" | jq -r \
-    --arg p "$resolved_path" \
-    '.tree[] |
-     select(.path == $p and .type == "blob" and .mode != "120000") |
-     [.sha, (.mode // "100644")] |
-     @tsv' 2>/dev/null | head -1
-}
-
-resolve_adapter_entries() {
-  local resolved='[]'
-  local file_path file_sha file_mode
-  local blob_content adapter_target resolved_path real_blob real_sha real_mode
+normalize_adapter_entries() {
+  local normalized='[]'
+  local file_path file_sha file_mode spec adapter_mode adapter_target adapter_sha
 
   while IFS=$'\t' read -r file_path file_sha file_mode; do
     [ -z "$file_path" ] && continue
 
-    if [ "$file_mode" = "120000" ] || is_path_reference_adapter "$file_path"; then
-      blob_content=$(gh_api_with_retry "repos/${source_repo}/git/blobs/${file_sha}" \
-        --jq '.content' 2>/dev/null || true)
-      adapter_target=$(printf '%s' "$blob_content" | base64 -d 2>/dev/null || true)
-
-      if looks_like_adapter_target "$adapter_target"; then
-        adapter_target=$(printf '%s' "$adapter_target" | tr -d '\r\n')
-        resolved_path=$(normalize_source_path "$(dirname "$file_path")" "$adapter_target")
-        real_blob=$(find_real_blob_for_path "$resolved_path")
-
-        if [ -n "$real_blob" ]; then
-          IFS=$'\t' read -r real_sha real_mode <<< "$real_blob"
-          echo "Resolved adapter ${file_path} -> ${resolved_path}" >&2
-          resolved=$(echo "$resolved" | jq -c \
-            --arg p "$file_path" \
-            --arg s "$real_sha" \
-            --arg m "${real_mode:-100644}" \
-            '. + [{path: $p, sha: $s, mode: $m}]')
-          continue
-        fi
-      fi
+    spec=$(adapter_spec_for_path "$file_path" || true)
+    if [ -n "$spec" ]; then
+      IFS=$'\t' read -r adapter_mode adapter_target <<< "$spec"
+      adapter_sha=$(write_synthetic_blob "$adapter_target")
+      echo "Normalized adapter ${file_path} -> ${adapter_target}" >&2
+      normalized=$(echo "$normalized" | jq -c \
+        --arg p "$file_path" \
+        --arg s "$adapter_sha" \
+        --arg m "$adapter_mode" \
+        '. + [{path: $p, sha: $s, mode: $m}]')
+      continue
     fi
 
-    resolved=$(echo "$resolved" | jq -c \
+    normalized=$(echo "$normalized" | jq -c \
       --arg p "$file_path" \
       --arg s "$file_sha" \
       --arg m "${file_mode:-100644}" \
       '. + [{path: $p, sha: $s, mode: $m}]')
   done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
 
-  echo "$resolved"
+  echo "$normalized"
 }
+
+mkdir -p "$blobs_dir"
 
 echo "Fetching Copilot instruction files from ${source_repo}..."
 source_tree_raw=$(gh_api_with_retry "repos/${source_repo}/git/trees/HEAD?recursive=1")
@@ -140,7 +168,7 @@ if [ "$copilot_files" != "[]" ]; then
 fi
 
 if [ "$copilot_files" != "[]" ]; then
-  copilot_files=$(resolve_adapter_entries)
+  copilot_files=$(normalize_adapter_entries)
 fi
 
 printf '%s' "$copilot_files" > "${output_dir}/copilot-files.json"
