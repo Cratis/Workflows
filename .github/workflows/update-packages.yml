@@ -101,7 +101,7 @@ jobs:
       - name: Update NPM packages
         if: steps.detect.outputs.update_npm == 'true'
         run: |
-          npx npm-check-updates -u
+          npx npm-check-updates -u -w
           yarn install
 
       - name: Build NPM
