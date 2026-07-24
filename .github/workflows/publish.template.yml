@@ -20,14 +20,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release'
-        required: true
-        default: '0.0.0'
+        # Leave empty to work the version out from the merged pull request. Set a real version only to force
+        # a manual release - the action never releases from an empty or '0.0.0' value.
+        description: 'Version to release (leave empty to derive it from the pull request)'
+        required: false
+        default: ''
         type: string
       release-notes:
-        description: 'Release notes'
-        required: true
-        default: 'No release notes'
+        description: 'Release notes (leave empty for GitHub-generated notes)'
+        required: false
+        default: ''
         type: string
       logLevel:
         description: 'Log level'
