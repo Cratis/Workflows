@@ -146,34 +146,62 @@ fi
 rm -f "$subtree_error"
 
 # ----------------------------------------------------------------
-# 3. Check whether all copilot files are already up to date
+# 3. Work out which copilot files actually differ, and which paths the
+#    target holds as a directory where the source has a symlink.
 #    (git blob SHAs are content-addressed across repositories)
+#
+#    Only the differing files go on to have blobs created. Uploading a blob
+#    for every propagated file to every target on every run is thousands of
+#    writes for what is usually a one-file change, and it is what exhausts
+#    the secondary rate limit.
 # ----------------------------------------------------------------
-files_up_to_date=true
+changed_files=""
+conflicting_dirs=""
+
 while IFS=$'\t' read -r chk_path chk_sha chk_mode; do
   [ -z "$chk_path" ] && continue
-  existing_sha=$(echo "$subtree" | jq -r \
+  existing=$(echo "$subtree" | jq -c \
     --arg p "$chk_path" \
-    '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
-  existing_mode=$(echo "$subtree" | jq -r \
-    --arg p "$chk_path" \
-    '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
-  if [ "$existing_sha" != "$chk_sha" ] || [ "$existing_mode" != "$chk_mode" ]; then
-    files_up_to_date=false
-    break
+    '.tree[] | select(.path == $p) | {sha, mode, type}' 2>/dev/null || true)
+  existing_sha=$(echo "$existing" | jq -r '.sha // empty' 2>/dev/null || true)
+  existing_mode=$(echo "$existing" | jq -r '.mode // empty' 2>/dev/null || true)
+  existing_type=$(echo "$existing" | jq -r '.type // empty' 2>/dev/null || true)
+
+  if [ "$existing_sha" = "$chk_sha" ] && [ "$existing_mode" = "$chk_mode" ]; then
+    continue
+  fi
+
+  changed_files="${changed_files}${chk_path}\t${chk_sha}\t${chk_mode}\n"
+
+  # A path the target holds as a directory cannot simply gain a blob: the tree
+  # API answers GitRPC::BadObjectState. Converting a directory to a symlink has
+  # to be expressed as a delete plus an add, so record it for the delete.
+  if [ "$existing_type" = "tree" ]; then
+    conflicting_dirs="${conflicting_dirs}${chk_path}\n"
+    echo "  ${chk_path} is a directory here and a symlink in the source - replacing it"
   fi
 done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
 
-if [ "$files_up_to_date" = "true" ]; then
+if [ -z "$changed_files" ]; then
   echo "ℹ No changes needed for ${repo} (files already up to date)"
   exit 0
 fi
+
+echo "ℹ $(printf "%b" "$changed_files" | grep -c . || true) file(s) differ in ${repo}"
 
 # ----------------------------------------------------------------
 # 4. Create blobs in the target repository for each source file
 # ----------------------------------------------------------------
 new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
   '{"base_tree": $base_tree, "tree": []}')
+
+# Deleting the directory first, in the same tree, is what makes the conversion legal.
+while IFS= read -r dir_path; do
+  [ -z "$dir_path" ] && continue
+  new_tree_json=$(echo "$new_tree_json" | jq \
+    --arg p "$dir_path" \
+    '.tree += [{path: $p, mode: "040000", type: "tree", sha: null}]')
+done <<< "$(printf "%b" "$conflicting_dirs")"
 
 while IFS=$'\t' read -r src_path src_sha src_mode; do
   [ -z "$src_path" ] && continue
@@ -231,7 +259,7 @@ while IFS=$'\t' read -r src_path src_sha src_mode; do
     --arg s "$target_blob_sha" \
     --arg m "$src_mode" \
     '.tree += [{path: $p, mode: $m, type: "blob", sha: $s}]')
-done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
+done <<< "$(printf "%b" "$changed_files")"
 
 # ----------------------------------------------------------------
 # 5. Create new tree and commit
