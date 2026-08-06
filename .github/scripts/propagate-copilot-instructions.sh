@@ -146,31 +146,92 @@ fi
 rm -f "$subtree_error"
 
 # ----------------------------------------------------------------
-# 3. Check whether all copilot files are already up to date
-#    (git blob SHAs are content-addressed across repositories)
+# 3. Work out which files actually differ in the target
+#    (git blob SHAs are content-addressed across repositories, so an
+#     identical SHA on both sides means identical content)
+#
+# Only the differing files are uploaded.  Uploading the whole corpus to every
+# repository on every run costs one write call per file per repository, which
+# exhausts the API write allowance long before the matrix finishes — the rest
+# of the repositories then fail with a rate limit that no amount of retrying
+# can clear.
 # ----------------------------------------------------------------
-files_up_to_date=true
-while IFS=$'\t' read -r chk_path chk_sha chk_mode; do
-  [ -z "$chk_path" ] && continue
-  existing_sha=$(echo "$subtree" | jq -r \
-    --arg p "$chk_path" \
-    '.tree[] | select(.path == $p) | .sha // empty' 2>/dev/null || true)
-  existing_mode=$(echo "$subtree" | jq -r \
-    --arg p "$chk_path" \
-    '.tree[] | select(.path == $p) | .mode // empty' 2>/dev/null || true)
-  if [ "$existing_sha" != "$chk_sha" ] || [ "$existing_mode" != "$chk_mode" ]; then
-    files_up_to_date=false
-    break
-  fi
-done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
+# The file list and the target tree are passed to jq as files, never as
+# command-line arguments: a recursive tree of a large repository is far past
+# the per-argument length limit and would fail with "Argument list too long".
+copilot_files_file_json=$(mktemp)
+subtree_file_json=$(mktemp)
+printf '%s' "$copilot_files" > "$copilot_files_file_json"
+printf '%s' "$subtree" > "$subtree_file_json"
 
-if [ "$files_up_to_date" = "true" ]; then
+changed_files=$(jq -n \
+  --slurpfile src "$copilot_files_file_json" \
+  --slurpfile tgt "$subtree_file_json" \
+  '(($tgt[0].tree // []) | map({key: .path, value: .}) | from_entries) as $existing
+   | $src[0]
+   | map(
+       (.mode // "100644") as $m
+       | select(($existing[.path].sha // "") != .sha
+                or ($existing[.path].mode // "") != $m)
+       | {path: .path, sha: .sha, mode: $m}
+     )' 2>/dev/null || true)
+
+if [ -z "$changed_files" ]; then
+  rm -f "$copilot_files_file_json" "$subtree_file_json"
+  echo "::error::Could not determine which files differ in ${repo}"
+  exit 1
+fi
+
+if [ "$changed_files" = "[]" ]; then
+  rm -f "$copilot_files_file_json" "$subtree_file_json"
   echo "ℹ No changes needed for ${repo} (files already up to date)"
   exit 0
 fi
 
+echo "→ $(echo "$changed_files" | jq 'length') file(s) differ in ${repo}"
+
 # ----------------------------------------------------------------
-# 4. Create blobs in the target repository for each source file
+# 3b. Find target entries whose type collides with the source shape
+#
+# The corpus mixes files, directories and symlinks at the same paths across
+# repositories: `.github/instructions` is a folder symlink in one repository
+# and a real directory in another, `.github/agents` is a directory of per-file
+# adapters here and a folder symlink there.  A tree entry cannot replace an
+# entry of the opposite kind — the Git Data API rejects the whole tree with
+# `GitRPC::BadObjectState (HTTP 422)` — so the colliding entries are removed
+# in a preparatory commit before the sync commit adds the new shape.
+# ----------------------------------------------------------------
+changed_files_file_json=$(mktemp)
+printf '%s' "$changed_files" > "$changed_files_file_json"
+
+conflict_deletions=$(jq -n \
+  --slurpfile changed "$changed_files_file_json" \
+  --slurpfile tgt "$subtree_file_json" \
+  '($changed[0] | map(.path)) as $paths
+   | [ ($tgt[0].tree // [])[]
+       | select(.type == "blob")
+       | . as $entry
+       | select(
+           ($paths | any(. as $p | $entry.path | startswith($p + "/")))
+           or ($paths | any(. as $p | $p | startswith($entry.path + "/")))
+         )
+       | {path: $entry.path, mode: $entry.mode}
+     ]
+   | unique_by(.path)' 2>/dev/null || true)
+
+rm -f "$copilot_files_file_json" "$subtree_file_json" "$changed_files_file_json"
+
+if [ -z "$conflict_deletions" ]; then
+  conflict_deletions='[]'
+fi
+
+if [ "$conflict_deletions" != "[]" ]; then
+  echo "→ $(echo "$conflict_deletions" | jq 'length') colliding path(s) in ${repo} will be removed first:"
+  echo "$conflict_deletions" | jq -r '.[] | "    " + .path'
+fi
+
+# ----------------------------------------------------------------
+# 4. Create blobs in the target repository for the differing files
 # ----------------------------------------------------------------
 new_tree_json=$(jq -n --arg base_tree "$tree_sha" \
   '{"base_tree": $base_tree, "tree": []}')
@@ -231,44 +292,82 @@ while IFS=$'\t' read -r src_path src_sha src_mode; do
     --arg s "$target_blob_sha" \
     --arg m "$src_mode" \
     '.tree += [{path: $p, mode: $m, type: "blob", sha: $s}]')
-done <<< "$(echo "$copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
+done <<< "$(echo "$changed_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)"
 
 # ----------------------------------------------------------------
-# 5. Create new tree and commit
+# 5. Create new tree(s) and commit(s)
+#
+# These helpers write their diagnostics to stderr: they run inside command
+# substitution, so anything on stdout would be captured as the returned SHA
+# instead of being reported.
 # ----------------------------------------------------------------
-new_tree_error=$(mktemp)
-_new_tree_resp=$(echo "$new_tree_json" | \
-  gh_api_with_retry -X POST "repos/Cratis/${repo}/git/trees" \
-  --input - 2>"$new_tree_error" || true)
-new_tree_sha=$(extract_sha "$_new_tree_resp")
+create_tree_or_fail() {
+  local payload="$1" label="$2"
+  local error_file resp sha api_error
+  error_file=$(mktemp)
+  resp=$(printf '%s' "$payload" | \
+    gh_api_with_retry -X POST "repos/Cratis/${repo}/git/trees" \
+    --input - 2>"$error_file" || true)
+  sha=$(extract_sha "$resp")
+  if [ -z "$sha" ]; then
+    api_error=$(cat "$error_file" 2>/dev/null || true)
+    echo "::error::Could not create tree for ${repo} (${label})" >&2
+    [ -n "$api_error" ] && echo "  API error: $api_error" >&2
+    rm -f "$error_file"
+    exit 1
+  fi
+  rm -f "$error_file"
+  printf '%s' "$sha"
+}
 
-if [ -z "$new_tree_sha" ]; then
-  new_tree_api_error=$(cat "$new_tree_error" 2>/dev/null || true)
-  echo "::error::Could not create tree for ${repo}"
-  [ -n "$new_tree_api_error" ] && echo "  API error: $new_tree_api_error"
-  rm -f "$new_tree_error"
-  exit 1
+create_commit_or_fail() {
+  local tree="$1" parent="$2" message="$3"
+  local error_file resp sha api_error
+  error_file=$(mktemp)
+  resp=$(jq -n \
+    --arg msg "$message" \
+    --arg tree "$tree" \
+    --arg parent "$parent" \
+    '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
+    gh_api_with_retry -X POST "repos/Cratis/${repo}/git/commits" \
+    --input - 2>"$error_file" || true)
+  sha=$(extract_sha "$resp")
+  if [ -z "$sha" ]; then
+    api_error=$(cat "$error_file" 2>/dev/null || true)
+    echo "::error::Could not create commit for ${repo} (${message})" >&2
+    [ -n "$api_error" ] && echo "  API error: $api_error" >&2
+    rm -f "$error_file"
+    exit 1
+  fi
+  rm -f "$error_file"
+  printf '%s' "$sha"
+}
+
+parent_sha="$head_sha"
+base_tree_sha="$tree_sha"
+
+if [ "$conflict_deletions" != "[]" ]; then
+  deletion_tree_json=$(jq -n \
+    --arg base_tree "$base_tree_sha" \
+    --argjson deletions "$conflict_deletions" \
+    '{base_tree: $base_tree,
+      tree: ($deletions | map({path: .path, mode: .mode, type: "blob", sha: null}))}')
+
+  deletion_tree_sha=$(create_tree_or_fail "$deletion_tree_json" "removing colliding paths")
+  parent_sha=$(create_commit_or_fail "$deletion_tree_sha" "$parent_sha" \
+    "Remove adapter paths that collide with the Copilot instruction shape")
+  base_tree_sha="$deletion_tree_sha"
+
+  echo "✓ Created commit ${parent_sha} in ${repo} removing colliding paths"
+
+  new_tree_json=$(echo "$new_tree_json" | jq \
+    --arg base_tree "$base_tree_sha" \
+    '.base_tree = $base_tree')
 fi
-rm -f "$new_tree_error"
 
-commit_error=$(mktemp)
-_commit_resp=$(jq -n \
-  --arg msg  "Sync Copilot instructions from ${source_repo}" \
-  --arg tree "$new_tree_sha" \
-  --arg parent "$head_sha" \
-  '{"message": $msg, "tree": $tree, "parents": [$parent]}' | \
-  gh_api_with_retry -X POST "repos/Cratis/${repo}/git/commits" \
-  --input - 2>"$commit_error" || true)
-new_commit_sha=$(extract_sha "$_commit_resp")
-
-if [ -z "$new_commit_sha" ]; then
-  commit_api_error=$(cat "$commit_error" 2>/dev/null || true)
-  echo "::error::Could not create commit for ${repo}"
-  [ -n "$commit_api_error" ] && echo "  API error: $commit_api_error"
-  rm -f "$commit_error"
-  exit 1
-fi
-rm -f "$commit_error"
+new_tree_sha=$(create_tree_or_fail "$new_tree_json" "syncing Copilot instructions")
+new_commit_sha=$(create_commit_or_fail "$new_tree_sha" "$parent_sha" \
+  "Sync Copilot instructions from ${source_repo}")
 
 echo "✓ Created commit ${new_commit_sha} in ${repo}"
 
