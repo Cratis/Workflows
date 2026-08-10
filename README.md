@@ -164,8 +164,18 @@ The artifacts that are synchronized are:
 | `.github/hooks/` | Folder of hook files |
 | `.ai/` | AI setup folder (including prompts, skills, agents, hooks, and rules) |
 | `.claude/` | Claude setup folder (including symlinks such as `.claude/* -> .ai/*`) |
-| `.agents/` | Codex adapter folder |
+| `.agents/` | Codex adapter folder (except `.agents/PROJECT.md` — see below) |
 | `AGENTS.md` | Root Codex instructions file |
+
+**`.agents/PROJECT.md` is never synchronized.** It is each repository's *project-local* instruction
+file — the one place a repo records what is true only of itself: its endpoints, credentials,
+deployment recipes, issue tracker, and any convention that overrides the shared corpus for that repo
+alone. Propagating it means whichever repository pushes last overwrites every other repository's
+context, which is exactly what happened repeatedly before it was excluded here. The exclusion is
+unconditional and lives in the propagation scripts rather than in each repository's
+`.copilot-sync-ignore`, because that file only protects the repository it lives in — one repo
+without one is enough to clobber all the others. It is also excluded from cleanup, so bootstrap
+never deletes it.
 
 Adapters are normalized and propagated as adapters. When a matching canonical `.ai` file exists in the source tree, known adapter paths are written as symlinks or path-reference files, even if the source repository currently contains copied content at that adapter path. This keeps `.ai/` as the synchronized source of truth instead of duplicating `.ai` content into tool-specific files.
 
