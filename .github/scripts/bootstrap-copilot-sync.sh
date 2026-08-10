@@ -295,10 +295,13 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   # List all blob paths under .github/ that belong to Copilot instruction
   # artefacts we want to remove: the root instructions file, plus the
   # instructions/, agents/, skills/, prompts/, and hooks/ sub-directories.
+  # .agents/PROJECT.md is deliberately never listed — it is the repository's
+  # own project-local context, not a synced artifact, so it must survive both
+  # propagation and cleanup.
   files_to_delete=$(echo "$subtree" | jq -r \
     '.tree[] | select(.type == "blob") |
      select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/)")) |
-     select(.path != ".claude/settings.local.json") |
+     select(.path != ".claude/settings.local.json" and .path != ".agents/PROJECT.md") |
      .path' 2>/dev/null || true)
 
   # Check whether Copilot files from Cratis/AI are already present in
@@ -332,7 +335,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   repo_copilot_shas=$(echo "$subtree" | jq -r \
     '[.tree[] | select(.type == "blob") |
       select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/)")) |
-      select(.path != ".claude/settings.local.json")] |
+      select(.path != ".claude/settings.local.json" and .path != ".agents/PROJECT.md")] |
       .[] | .path + "\t" + .sha + "\t" + .mode' 2>/dev/null || true)
   ai_path_sha_set=$(echo "$ai_copilot_files" | jq -r '.[] | .path + "\t" + .sha + "\t" + (.mode // "100644")' 2>/dev/null || true)
 

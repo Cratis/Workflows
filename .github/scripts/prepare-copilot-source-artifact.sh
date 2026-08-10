@@ -144,10 +144,17 @@ fi
 
 printf '%s' "$source_tree_raw" > "${output_dir}/source-tree.json"
 
+# .agents/PROJECT.md is never synced.  It is by definition the project-local
+# instruction file — the one place a repository records what is true only of
+# itself (its endpoints, credentials, deployment recipes, issue tracker) — so
+# propagating it overwrites every repository's context with whichever repo
+# happened to push last.  Excluded here rather than left to each repository's
+# .copilot-sync-ignore, because that file only protects the repo it lives in:
+# a single repo without one is enough to clobber all the others.
 copilot_files=$(echo "$source_tree_raw" | jq -c \
   '[.tree[] | select(.type == "blob") |
    select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/)")) |
-   select(.path != ".claude/settings.local.json") |
+   select(.path != ".claude/settings.local.json" and .path != ".agents/PROJECT.md") |
    {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 
 if [ -z "$copilot_files" ] || [ "$copilot_files" = "[]" ]; then
