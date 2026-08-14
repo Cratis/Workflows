@@ -80,11 +80,46 @@ jobs:
             echo "update_mix=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # All toolchain setup and dependency-update steps run first, across every detected
+      # ecosystem, before any build step runs. A build in one ecosystem can depend on tooling
+      # from another (e.g. a .csproj with an MSBuild target that shells out to `yarn build`), so
+      # builds must not start until every ecosystem's dependencies are actually in place.
       - name: Setup .NET
         if: steps.detect.outputs.update_nuget == 'true'
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Node.js
+        if: steps.detect.outputs.update_npm == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install NPM dependencies
+        if: steps.detect.outputs.update_npm == 'true'
+        run: yarn install
+
+      - name: Setup Java
+        if: steps.detect.outputs.update_gradle == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Elixir
+        if: steps.detect.outputs.update_mix == 'true'
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Install Mix dependencies
+        if: steps.detect.outputs.update_mix == 'true'
+        working-directory: ${{ steps.detect.outputs.mix_dir }}
+        run: |
+          mix local.hex --force
+          mix deps.get
 
       - name: Update NuGet packages
         if: steps.detect.outputs.update_nuget == 'true'
@@ -121,20 +156,6 @@ jobs:
 
           exit $exit_code
 
-      - name: Build .NET
-        if: steps.detect.outputs.update_nuget == 'true'
-        run: dotnet build
-
-      - name: Setup Node.js
-        if: steps.detect.outputs.update_npm == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install dependencies
-        if: steps.detect.outputs.update_npm == 'true'
-        run: yarn install
-
       - name: Update NPM packages
         if: steps.detect.outputs.update_npm == 'true'
         run: |
@@ -148,39 +169,26 @@ jobs:
           # refuse to write the lockfile changes this step exists to produce.
           YARN_ENABLE_IMMUTABLE_INSTALLS: false
 
-      - name: Build NPM
-        if: steps.detect.outputs.update_npm == 'true'
-        run: yarn ci
-
-      - name: Setup Java
-        if: steps.detect.outputs.update_gradle == 'true'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-
       - name: Update Gradle packages
         if: steps.detect.outputs.update_gradle == 'true'
         run: ./gradlew useLatestVersions --no-daemon
 
-      - name: Build Gradle
-        if: steps.detect.outputs.update_gradle == 'true'
-        run: ./gradlew build --no-daemon
-
-      - name: Setup Elixir
-        if: steps.detect.outputs.update_mix == 'true'
-        uses: erlef/setup-beam@v1
-        with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
-
       - name: Update Mix packages
         if: steps.detect.outputs.update_mix == 'true'
         working-directory: ${{ steps.detect.outputs.mix_dir }}
-        run: |
-          mix local.hex --force
-          mix deps.get
-          mix deps.update --all
+        run: mix deps.update --all
+
+      - name: Build .NET
+        if: steps.detect.outputs.update_nuget == 'true'
+        run: dotnet build
+
+      - name: Build NPM
+        if: steps.detect.outputs.update_npm == 'true'
+        run: yarn ci
+
+      - name: Build Gradle
+        if: steps.detect.outputs.update_gradle == 'true'
+        run: ./gradlew build --no-daemon
 
       - name: Build Mix
         if: steps.detect.outputs.update_mix == 'true'
