@@ -1,7 +1,7 @@
 name: Update Packages
-# Reusable workflow that updates NuGet and/or NPM packages in the calling
-# repository, builds to verify nothing is broken, and pushes the result
-# directly to the default branch.
+# Reusable workflow that updates NuGet, NPM, Gradle (Kotlin/JVM), and/or Mix
+# (Elixir) packages in the calling repository, builds to verify nothing is
+# broken, and pushes the result directly to the default branch.
 #
 # This workflow requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo scope
@@ -13,6 +13,9 @@ name: Update Packages
 
 env:
   DOTNET_VERSION: "10.0.x"
+  JAVA_VERSION: "21"
+  ELIXIR_VERSION: "1.18"
+  OTP_VERSION: "27"
 
 on:
   workflow_call:
@@ -57,6 +60,26 @@ jobs:
             echo "update_npm=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # Gradle is enabled only when root contains a Gradle wrapper plus a settings/build script.
+          if [ -f "gradlew" ] && find . -maxdepth 1 -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' -o -name 'build.gradle.kts' -o -name 'build.gradle' \) | grep -q .; then
+            echo "update_gradle=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No root gradlew + settings/build.gradle(.kts) found; skipping Java setup and Gradle update"
+            echo "update_gradle=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Mix (Elixir) is enabled when a mix.exs is found a bounded few directories down (Elixir
+          # repos in this org keep the actual package nested, e.g. Source/<name>/mix.exs, rather
+          # than at the repo root), ignoring dependency/build output directories.
+          mix_path=$(find . -maxdepth 3 -type f -name 'mix.exs' -not -path '*/deps/*' -not -path '*/_build/*' | head -1)
+          if [ -n "$mix_path" ]; then
+            echo "update_mix=true" >> "$GITHUB_OUTPUT"
+            echo "mix_dir=$(dirname "$mix_path")" >> "$GITHUB_OUTPUT"
+          else
+            echo "No mix.exs found; skipping Elixir setup and Mix update"
+            echo "update_mix=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup .NET
         if: steps.detect.outputs.update_nuget == 'true'
         uses: actions/setup-dotnet@v4
@@ -82,6 +105,11 @@ jobs:
             exit 0
           fi
 
+          if echo "$output" | grep -q "is not supported by this command"; then
+            echo "One or more packages have different centrally-managed versions per target framework (a deliberate multi-TFM override this command can't reconcile); skipping NuGet update for this run."
+            exit 0
+          fi
+
           exit $exit_code
 
       - name: Build .NET
@@ -101,12 +129,54 @@ jobs:
       - name: Update NPM packages
         if: steps.detect.outputs.update_npm == 'true'
         run: |
-          npx npm-check-updates -u -w
+          # typescript is temporarily excluded: 7.x restructured the published package's internal
+          # layout and Yarn Berry's builtin compat/typescript patch hasn't been updated for it yet,
+          # so `yarn install` crashes applying the patch. Remove this exclusion once Yarn ships a fix.
+          npx npm-check-updates -u -w -x typescript
           yarn install
+        env:
+          # GitHub Actions sets CI=true, which makes Yarn Berry default to immutable installs and
+          # refuse to write the lockfile changes this step exists to produce.
+          YARN_ENABLE_IMMUTABLE_INSTALLS: false
 
       - name: Build NPM
         if: steps.detect.outputs.update_npm == 'true'
         run: yarn ci
+
+      - name: Setup Java
+        if: steps.detect.outputs.update_gradle == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Update Gradle packages
+        if: steps.detect.outputs.update_gradle == 'true'
+        run: ./gradlew useLatestVersions --no-daemon
+
+      - name: Build Gradle
+        if: steps.detect.outputs.update_gradle == 'true'
+        run: ./gradlew build --no-daemon
+
+      - name: Setup Elixir
+        if: steps.detect.outputs.update_mix == 'true'
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Update Mix packages
+        if: steps.detect.outputs.update_mix == 'true'
+        working-directory: ${{ steps.detect.outputs.mix_dir }}
+        run: |
+          mix local.hex --force
+          mix deps.get
+          mix deps.update --all
+
+      - name: Build Mix
+        if: steps.detect.outputs.update_mix == 'true'
+        working-directory: ${{ steps.detect.outputs.mix_dir }}
+        run: mix compile
 
       - name: Commit and push changes
         env:
@@ -132,6 +202,20 @@ jobs:
               updated_types="$updated_types and NPM"
             else
               updated_types="NPM"
+            fi
+          fi
+          if [ "${{ steps.detect.outputs.update_gradle }}" == "true" ]; then
+            if [ -n "$updated_types" ]; then
+              updated_types="$updated_types and Gradle"
+            else
+              updated_types="Gradle"
+            fi
+          fi
+          if [ "${{ steps.detect.outputs.update_mix }}" == "true" ]; then
+            if [ -n "$updated_types" ]; then
+              updated_types="$updated_types and Mix"
+            else
+              updated_types="Mix"
             fi
           fi
 
