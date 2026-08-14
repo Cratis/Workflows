@@ -105,8 +105,17 @@ jobs:
             exit 0
           fi
 
-          if echo "$output" | grep -q "is not supported by this command"; then
-            echo "One or more packages have different centrally-managed versions per target framework (a deliberate multi-TFM override this command can't reconcile); skipping NuGet update for this run."
+          if [ $exit_code -eq 3 ]; then
+            # Exit code 3 has been observed for two distinct cases where the command can't produce
+            # an internally consistent result and applies no changes at all: (1) a package with
+            # different centrally-managed versions per target framework - e.g. a deliberate
+            # multi-TFM override via conditional Directory.Packages.*.props imports - which the
+            # command explicitly refuses ("... is not supported by this command"); and (2) a plain
+            # NU1109 downgrade conflict, seemingly from the command updating one centrally-pinned
+            # package without correctly co-updating another package that's transitively pinned to
+            # it (e.g. CentralPackageTransitivePinningEnabled). Neither is actionable here, and
+            # since no changes are written to disk in either case, skipping is safe.
+            echo "dotnet package update could not produce a consistent result (exit 3); skipping NuGet update for this run."
             exit 0
           fi
 
