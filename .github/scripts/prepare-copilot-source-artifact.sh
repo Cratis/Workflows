@@ -90,6 +90,22 @@ adapter_spec_for_path() {
       target=".ai/prompts/${name}.prompt.md"
       source_tree_has_path "$target" && printf '120000\t../../.ai/prompts/%s.prompt.md\n' "$name"
       ;;
+    .pi/prompts/*.md)
+      # Pi slash-command adapter: .pi/prompts/<name>.md -> ../../.ai/prompts/<name>.prompt.md
+      file="${path##*/}"
+      name="${file%.md}"
+      target=".ai/prompts/${name}.prompt.md"
+      source_tree_has_path "$target" && printf '120000\t../../.ai/prompts/%s.prompt.md\n' "$name"
+      ;;
+    .pi/agents/*.md)
+      # Pi subagent adapter: .pi/agents/<name>.md -> ../../.ai/agents/<name>.md
+      file="${path##*/}"
+      name="${file%.md}"
+      target=".ai/agents/${name}.md"
+      source_tree_has_path "$target" && printf '120000\t../../.ai/agents/%s.md\n' "$name"
+      ;;
+      # .pi/extensions/** are REAL adapter machinery (the Pi peer of .claude/settings.json),
+      # not symlink adapters: with no case here they fall through and propagate as content.
   esac
 }
 
@@ -153,7 +169,7 @@ printf '%s' "$source_tree_raw" > "${output_dir}/source-tree.json"
 # a single repo without one is enough to clobber all the others.
 copilot_files=$(echo "$source_tree_raw" | jq -c \
   '[.tree[] | select(.type == "blob") |
-   select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/)")) |
+   select(.path | test("^(AGENTS\\.md$|\\.agents(/|$)|\\.github/(copilot-instructions\\.md$|instructions(/|$)|agents(/|$)|skills(/|$)|prompts(/|$)|hooks(/|$))|\\.ai/|\\.claude/|\\.pi/)")) |
    select(.path != ".claude/settings.local.json" and .path != ".agents/PROJECT.md") |
    {path: .path, sha: .sha, mode: .mode}]' 2>/dev/null || true)
 
