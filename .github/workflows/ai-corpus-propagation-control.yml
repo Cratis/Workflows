@@ -1,0 +1,158 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+name: AI Corpus Propagation Control
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to perform
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - verify-frozen
+          - freeze
+          - restore
+          - canary
+          - enable-single-source
+          - enable-legacy-all-to-all
+      canary_repository:
+        description: Repository name for a canary sync (required for canary)
+        required: false
+        type: string
+      snapshot_run_id:
+        description: Freeze workflow run ID containing the snapshot artifact (required for restore)
+        required: false
+        type: string
+      apply:
+        description: Apply GitHub mutations (false performs a dry run)
+        required: true
+        default: false
+        type: boolean
+      confirm_organization:
+        description: Type Cratis to confirm an applied operation
+        required: false
+        type: string
+      confirm_legacy_all_to_all:
+        description: Explicitly confirm the dangerous legacy all-to-all topology
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-corpus-propagation-control
+  cancel-in-progress: false
+
+jobs:
+  control:
+    name: ${{ inputs.operation }}
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ai-corpus-propagation-control
+
+    steps:
+      - name: Checkout protected control script
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+
+      - name: Validate operation inputs
+        env:
+          OPERATION: ${{ inputs.operation }}
+          CANARY_REPOSITORY: ${{ inputs.canary_repository }}
+          SNAPSHOT_RUN_ID: ${{ inputs.snapshot_run_id }}
+          APPLY: ${{ inputs.apply }}
+          CONFIRM_ORGANIZATION: ${{ inputs.confirm_organization }}
+          CONFIRM_LEGACY: ${{ inputs.confirm_legacy_all_to_all }}
+        run: |
+          set -euo pipefail
+
+          if [ "$APPLY" = "true" ] && [ "$CONFIRM_ORGANIZATION" != "Cratis" ]; then
+            echo "::error::Applied operations require confirm_organization to exactly equal Cratis."
+            exit 2
+          fi
+          if [ "$OPERATION" = "canary" ] && [ -z "$CANARY_REPOSITORY" ]; then
+            echo "::error::The canary operation requires canary_repository."
+            exit 2
+          fi
+          if [ "$OPERATION" = "restore" ] && [[ ! "$SNAPSHOT_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::The restore operation requires a numeric snapshot_run_id."
+            exit 2
+          fi
+          if [ "$OPERATION" = "enable-legacy-all-to-all" ] && [ "$CONFIRM_LEGACY" != "true" ]; then
+            echo "::error::The legacy topology requires confirm_legacy_all_to_all."
+            exit 2
+          fi
+
+      - name: Download restore snapshot
+        if: inputs.operation == 'restore'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          SNAPSHOT_RUN_ID: ${{ inputs.snapshot_run_id }}
+          SNAPSHOT_DIRECTORY: ${{ runner.temp }}/ai-corpus-restore
+        run: |
+          set -euo pipefail
+          run_metadata=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SNAPSHOT_RUN_ID")
+          if ! jq -e '
+            .path == ".github/workflows/ai-corpus-propagation-control.yml" and
+            .head_branch == "main" and
+            .event == "workflow_dispatch"
+          ' <<< "$run_metadata" >/dev/null; then
+            echo "::error::Snapshot run must be a main-branch AI Corpus Propagation Control dispatch."
+            exit 2
+          fi
+
+          mkdir -p "$SNAPSHOT_DIRECTORY"
+          gh run download "$SNAPSHOT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name ai-corpus-propagation-snapshot \
+            --dir "$SNAPSHOT_DIRECTORY"
+          test -f "$SNAPSHOT_DIRECTORY/ai-corpus-propagation-snapshot.json"
+
+      - name: Control AI corpus propagation
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          OPERATION: ${{ inputs.operation }}
+          CANARY_REPOSITORY: ${{ inputs.canary_repository }}
+          APPLY: ${{ inputs.apply }}
+          CONFIRM_ORGANIZATION: ${{ inputs.confirm_organization }}
+          CONFIRM_LEGACY: ${{ inputs.confirm_legacy_all_to_all }}
+          FREEZE_SNAPSHOT: ${{ runner.temp }}/ai-corpus-propagation-snapshot.json
+          RESTORE_SNAPSHOT: ${{ runner.temp }}/ai-corpus-restore/ai-corpus-propagation-snapshot.json
+        run: |
+          set -euo pipefail
+
+          args=("$OPERATION")
+          if [ "$OPERATION" = "freeze" ]; then
+            args+=(--snapshot "$FREEZE_SNAPSHOT")
+          elif [ "$OPERATION" = "restore" ]; then
+            args+=(--snapshot "$RESTORE_SNAPSHOT")
+          fi
+          if [ -n "$CANARY_REPOSITORY" ]; then
+            args+=(--repo "$CANARY_REPOSITORY")
+          fi
+          if [ "$APPLY" = "true" ]; then
+            args+=(--apply --confirm-organization "$CONFIRM_ORGANIZATION")
+          fi
+          if [ "$CONFIRM_LEGACY" = "true" ]; then
+            args+=(--confirm-legacy-all-to-all)
+          fi
+
+          .github/scripts/ai-corpus-propagation-control.sh "${args[@]}"
+
+      - name: Upload pre-freeze state snapshot
+        if: always() && inputs.operation == 'freeze' && inputs.apply
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ai-corpus-propagation-snapshot
+          path: ${{ runner.temp }}/ai-corpus-propagation-snapshot.json
+          if-no-files-found: error
+          retention-days: 90
