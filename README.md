@@ -7,7 +7,7 @@ Common reusable GitHub Actions workflows for Cratis repositories.
 
 ## Getting started with your Cratis repository
 
-To connect a Cratis repository to the shared Copilot synchronization system, add two thin wrapper workflows to your repository. The easiest way is to trigger the [Bootstrap Copilot Sync](#bootstrap-copilot-sync-one-time-setup) workflow once — it will open a PR in every Cratis repository automatically.
+To connect a Cratis repository to the shared Copilot synchronization system, add two thin wrapper workflows to your repository. The easiest way is to trigger [Bootstrap Copilot Sync](#bootstrap-copilot-syncyml), which installs or refreshes the wrappers and corpus files directly on each repository's default branch.
 
 If you prefer to add the workflows manually, create the following two files:
 
@@ -252,9 +252,136 @@ flowchart TD
     J --> K([Done])
 ```
 
+### Temporarily freezing and restoring propagation
+
+Use [`.github/scripts/ai-corpus-propagation-control.sh`](.github/scripts/ai-corpus-propagation-control.sh)
+to pause the AI corpus distribution system without editing workflow files or
+pushing commits. The script requires Bash, `gh`, and `jq`. It reads every active
+organization repository and paginates workflow and run results before planning any
+mutation.
+
+All mutating operations dry-run unless both `--apply` and an exact organization
+confirmation are supplied. An applied freeze also requires a new snapshot path:
+
+```bash
+# Read-only inspection and a strict frozen-state check.
+.github/scripts/ai-corpus-propagation-control.sh status
+.github/scripts/ai-corpus-propagation-control.sh verify-frozen
+
+# Preview a freeze. This does not write the snapshot or call a mutating API.
+.github/scripts/ai-corpus-propagation-control.sh freeze \
+  --snapshot /secure/path/ai-corpus-snapshot.json
+
+# Apply a freeze. The snapshot is written before the first API mutation.
+.github/scripts/ai-corpus-propagation-control.sh freeze \
+  --snapshot /secure/path/ai-corpus-snapshot.json \
+  --apply --confirm-organization Cratis
+
+# Restore exactly the workflows recorded active before that freeze.
+.github/scripts/ai-corpus-propagation-control.sh restore \
+  --snapshot /secure/path/ai-corpus-snapshot.json
+.github/scripts/ai-corpus-propagation-control.sh restore \
+  --snapshot /secure/path/ai-corpus-snapshot.json \
+  --apply --confirm-organization Cratis
+```
+
+Snapshots are versioned JSON inventories containing repository coverage, workflow
+paths and IDs, and original states. Restore refuses malformed snapshots, a different
+organization, repository/workflow topology drift, incompatible state drift, or
+any queued/running controlled run. It enables only entries recorded as `active`;
+workflows already inactive before the freeze remain untouched. Keep snapshots
+access-controlled even though they contain no token.
+
+Freeze disables central bootstrap first, then disables only currently active
+controlled workflows, cancels queued/running bootstrap, propagation, and sync runs,
+and polls until no controlled run remains. Cancellation is irreversible: restore
+does not restart canceled runs, revert corpus files, or roll back a partially
+completed propagation.
+
+For a deliberate topology change, first preview and then apply a canary or the
+single-source model:
+
+```bash
+# Enable only central sync plus one target sync wrapper, then dispatch one PR sync.
+.github/scripts/ai-corpus-propagation-control.sh canary --repo Arc
+.github/scripts/ai-corpus-propagation-control.sh canary --repo Arc \
+  --apply --confirm-organization Cratis
+
+# Enable manual sync wrappers and automatic propagation only from Cratis/AI.
+.github/scripts/ai-corpus-propagation-control.sh enable-single-source
+.github/scripts/ai-corpus-propagation-control.sh enable-single-source \
+  --apply --confirm-organization Cratis
+```
+
+Both operations first disable and quiesce the complete controlled topology. The
+legacy all-to-all topology is available only with two explicit confirmations:
+
+```bash
+.github/scripts/ai-corpus-propagation-control.sh enable-legacy-all-to-all \
+  --confirm-legacy-all-to-all \
+  --apply --confirm-organization Cratis
+```
+
+Prefer `canary` followed by `enable-single-source`; all-to-all allows a corpus
+change in any repository to initiate organization-wide fan-out.
+
+The same operations are available from the **AI Corpus Propagation Control**
+manual workflow. `apply` defaults to `false`. Applied freezes upload a 90-day
+`ai-corpus-propagation-snapshot` artifact; restore requires the freeze workflow run
+ID and downloads that exact artifact. The current organization freeze predates this
+snapshot mechanism, so it cannot be exactly reversed with `restore`; resume it only
+through a reviewed canary/single-source plan or a separately verified snapshot.
+
+The workflow executes only from `main`, checks out the protected `main` script, and
+uses the `ai-corpus-propagation-control` GitHub Environment. Configure that
+environment with required reviewers and a deployment-branch rule allowing only
+`main` before adding `PAT_WORKFLOWS`. This environment protection is the security
+boundary that prevents a branch-selected workflow from exposing the organization
+PAT.
+
+The token needs organization repository visibility and **Actions: read** for
+`status`, `verify-frozen`, and dry-runs. Applied state changes and run cancellation
+need **Actions: read/write** for every controlled repository. Canary and propagation
+also need the Contents/Pull requests/Workflows permissions documented for their
+respective reusable workflows.
+
+Disabling a workflow through the Actions API persists across pushes until it is
+explicitly enabled again. Existing corpus files remain in each repository; a
+freeze neither reverts nor deletes already-synchronized content.
+
+Run the offline validation suite without a GitHub token:
+
+```bash
+bash -n .github/scripts/*.sh .github/scripts/tests/*.sh
+shellcheck -x .github/scripts/ai-corpus-propagation-control.sh \
+  .github/scripts/github-api-retry.sh .github/scripts/tests/*.sh
+actionlint .github/workflows/ai-corpus-propagation-control.yml
+bash .github/scripts/tests/github-api-retry.test.sh
+bash .github/scripts/tests/ai-corpus-propagation-control.test.sh
+```
+
 ---
 
 ## Workflows in this repository
+
+### `ai-corpus-propagation-control.yml`
+
+**Trigger:** `workflow_dispatch`
+
+Runs the status/verify/freeze/snapshot-restore/canary/topology script through a
+guarded manual interface. Mutations require `apply` plus an exact `Cratis`
+confirmation. Restoring a snapshot requires the freeze workflow run ID. Restoring
+the legacy all-to-all topology additionally requires
+`confirm_legacy_all_to_all`.
+
+**Environment required:** protected `ai-corpus-propagation-control`, restricted to
+`main` and configured with required reviewers.
+
+**Secrets required:** `PAT_WORKFLOWS` with Actions read/write access in every
+controlled repository and the extra permissions required by the selected
+synchronization mode.
+
+---
 
 ### `sync-copilot-instructions.yml`
 
@@ -288,19 +415,18 @@ Lists all repositories in the Cratis organization and pushes the Copilot instruc
 
 ### `bootstrap-copilot-sync.yml`
 
-**Trigger:** `workflow_dispatch` (run once, manually)
+**Trigger:** `workflow_dispatch` (manual bootstrap and refresh)
 
-This workflow is intentionally manual because it performs organization-wide writes and can consume a large GitHub REST API budget. Use it for planned bootstrap or wrapper rollout work, not as a merge-triggered check.
+This workflow is intentionally manual because it performs organization-wide writes and can consume a large GitHub REST API budget. Use it for planned bootstrap, wrapper rollout, or managed corpus refresh work, not as a merge-triggered check.
 
-One-time setup workflow. For every non-archived repository in the Cratis organization (except `Workflows` itself), it:
+For every non-archived repository in the Cratis organization except `Workflows`, it:
 
-1. Creates a branch `add-copilot-sync-workflows`
-2. Commits the two thin wrapper workflows shown in [Getting started](#getting-started-with-your-cratis-repository)
-3. Opens a pull request targeting the repository's default branch
+1. Creates or updates the two thin wrapper workflows shown in [Getting started](#getting-started-with-your-cratis-repository).
+2. Refreshes the managed Copilot corpus files from `Cratis/AI` and removes obsolete managed files.
+3. Creates a non-force, fast-forward commit directly on the repository's default branch when content changed.
+4. Skips repositories that are already up to date.
 
-Re-running the workflow is safe — it skips repositories where the PR branch already exists.
-
-**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Pull requests** + **Workflows** read/write
+**Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` + `workflow` scopes, or fine-grained PAT with **Contents** + **Workflows** read/write. The PAT owner must be a bypass actor for each target's default-branch protection.
 
 ---
 
