@@ -1,0 +1,229 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+name: Update Cratis AI Profile Subscription
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repository:
+        description: Exact Cratis owner/repository to inspect or update
+        required: true
+        type: string
+      release_manifest_url:
+        description: Immutable raw AI.Distribution release-manifest.json URL
+        required: true
+        type: string
+      release_manifest_sha256:
+        description: Expected SHA-256 of release-manifest.json
+        required: true
+        type: string
+      apply:
+        description: Open an update PR; false performs a dry run
+        required: true
+        default: false
+        type: boolean
+      rollback:
+        description: Require the release version to be lower than the current pin
+        required: true
+        default: false
+        type: boolean
+      confirm_repository:
+        description: Required with apply; must exactly match target_repository
+        required: false
+        type: string
+  repository_dispatch:
+    types: [cratis-ai-profile-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-profile-update-${{ inputs.target_repository || github.event.client_payload.target_repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ai-subscriber-updates
+    steps:
+      - name: Resolve and validate immutable inputs
+        id: inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TARGET_REPOSITORY: ${{ inputs.target_repository || github.event.client_payload.target_repository }}
+          RELEASE_MANIFEST_URL: ${{ inputs.release_manifest_url || github.event.client_payload.release_manifest_url }}
+          RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 || github.event.client_payload.release_manifest_sha256 }}
+          APPLY: ${{ inputs.apply || github.event.client_payload.apply || false }}
+          ROLLBACK: ${{ inputs.rollback || github.event.client_payload.rollback || false }}
+          CONFIRM_REPOSITORY: ${{ inputs.confirm_repository || github.event.client_payload.confirm_repository }}
+          SOURCE_REPOSITORY: ${{ github.event.client_payload.source_repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_REPOSITORY" =~ ^Cratis/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::target_repository must be an exact Cratis owner/repository."
+            exit 2
+          fi
+          repository=${TARGET_REPOSITORY#Cratis/}
+          if [[ ! "$RELEASE_MANIFEST_URL" =~ ^https://raw\.githubusercontent\.com/Cratis/AI\.Distribution/[0-9a-f]{40}/releases/[0-9A-Za-z.+-]+/profiles/(public|engineering)-[a-z0-9-]+/release-manifest\.json$ ]]; then
+            echo "::error::release_manifest_url must use an immutable AI.Distribution commit and profile release path."
+            exit 2
+          fi
+          if [[ ! "$RELEASE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::release_manifest_sha256 must be lowercase SHA-256."
+            exit 2
+          fi
+          if [ "$APPLY" = "true" ] && [ "$CONFIRM_REPOSITORY" != "$TARGET_REPOSITORY" ]; then
+            echo "::error::Applied updates require confirm_repository to exactly match target_repository."
+            exit 2
+          fi
+          if [ "$EVENT_NAME" = "repository_dispatch" ] && [ "$SOURCE_REPOSITORY" != "Cratis/AI" ]; then
+            echo "::error::Repository dispatch must identify Cratis/AI as its source repository."
+            exit 2
+          fi
+          {
+            echo "target=$TARGET_REPOSITORY"
+            echo "repository=$repository"
+            echo "manifest_url=$RELEASE_MANIFEST_URL"
+            echo "manifest_sha256=$RELEASE_MANIFEST_SHA256"
+            echo "apply=$APPLY"
+            echo "rollback=$ROLLBACK"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out protected controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: refs/heads/main
+          path: controller
+          persist-credentials: false
+
+      - name: Create repository-scoped subscriber token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AI_SUBSCRIBER_APP_ID }}
+          private-key: ${{ secrets.AI_SUBSCRIBER_APP_PRIVATE_KEY }}
+          owner: Cratis
+          repositories: ${{ steps.inputs.outputs.repository }}
+          permission-contents: ${{ steps.inputs.outputs.apply == 'true' && 'write' || 'read' }}
+          permission-pull-requests: ${{ steps.inputs.outputs.apply == 'true' && 'write' || 'read' }}
+
+      - name: Resolve exact subscriber default branch
+        id: branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET: ${{ steps.inputs.outputs.target }}
+        run: |
+          set -euo pipefail
+          default_branch=$(gh api "repos/$TARGET" --jq .default_branch)
+          if [[ ! "$default_branch" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::Subscriber default branch is invalid."
+            exit 2
+          fi
+          echo "default_branch=$default_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Check out subscriber
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.inputs.outputs.target }}
+          ref: ${{ steps.branch.outputs.default_branch }}
+          path: subscriber
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Download and verify exact release manifest
+        env:
+          RELEASE_MANIFEST_URL: ${{ steps.inputs.outputs.manifest_url }}
+          RELEASE_MANIFEST_SHA256: ${{ steps.inputs.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            "$RELEASE_MANIFEST_URL" --output "$RUNNER_TEMP/release-manifest.json"
+          echo "$RELEASE_MANIFEST_SHA256  $RUNNER_TEMP/release-manifest.json" \
+            | sha256sum --check --strict
+
+      - name: Plan or apply exact subscription update
+        env:
+          APPLY: ${{ steps.inputs.outputs.apply }}
+          ROLLBACK: ${{ steps.inputs.outputs.rollback }}
+        run: |
+          set -euo pipefail
+          args=(
+            --repository "$GITHUB_WORKSPACE/subscriber"
+            --release-manifest "$RUNNER_TEMP/release-manifest.json"
+            --output "$RUNNER_TEMP/subscription-update-receipt.json"
+          )
+          if [ "$APPLY" = "true" ]; then args+=(--apply); fi
+          if [ "$ROLLBACK" = "true" ]; then args+=(--rollback); fi
+          node controller/.github/scripts/update-ai-profile-subscription.mjs \
+            "${args[@]}"
+
+      - name: Open reviewed update pull request
+        if: steps.inputs.outputs.apply == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET: ${{ steps.inputs.outputs.target }}
+          DEFAULT_BRANCH: ${{ steps.branch.outputs.default_branch }}
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git -C subscriber diff --name-only)
+          test "${#changed[@]}" -gt 0
+          for path in "${changed[@]}"; do
+            case "$path" in
+              .cratis/ai.json|.pi/settings.json) ;;
+              *)
+                echo "::error::Controller changed forbidden path: $path"
+                exit 1
+                ;;
+            esac
+          done
+          profile=$(jq -r .profileId "$RUNNER_TEMP/subscription-update-receipt.json")
+          from_version=$(jq -r .fromVersion "$RUNNER_TEMP/subscription-update-receipt.json")
+          to_version=$(jq -r .toVersion "$RUNNER_TEMP/subscription-update-receipt.json")
+          mode=$(jq -r .mode "$RUNNER_TEMP/subscription-update-receipt.json")
+          if [[ ! "$profile" =~ ^(public|engineering)-[a-z0-9-]+$ ]] ||
+             [[ ! "$from_version" =~ ^[0-9A-Za-z.+-]+$ ]] ||
+             [[ ! "$to_version" =~ ^[0-9A-Za-z.+-]+$ ]]; then
+            echo "::error::Receipt contains unsafe branch metadata."
+            exit 2
+          fi
+          branch="generated/ai-$mode-$profile-$to_version-$GITHUB_RUN_ID"
+          gh auth setup-git
+          git -C subscriber checkout -b "$branch"
+          git -C subscriber config user.name "cratis-ai-subscriber-bot"
+          git -C subscriber config user.email "ai-subscriber-bot@invalid.example"
+          git -C subscriber add -- "${changed[@]}"
+          git -C subscriber commit \
+            --message "Update $profile from $from_version to $to_version"
+          git -C subscriber push origin "$branch"
+          body="$RUNNER_TEMP/subscription-update-pr.md"
+          {
+            echo "This reviewed $mode changes the exact Cratis AI profile pin from $from_version to $to_version."
+            echo
+            echo "It does not auto-merge or change project context. Repository checks must pass before merge."
+            echo
+            echo '<details><summary>Machine receipt</summary>'
+            echo
+            echo '```json'
+            cat "$RUNNER_TEMP/subscription-update-receipt.json"
+            echo '```'
+            echo '</details>'
+          } > "$body"
+          gh pr create \
+            --repo "$TARGET" \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --title "Update $profile to $to_version" \
+            --body-file "$body"
+
+      - name: Upload update receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v7.0.1
+        with:
+          name: ai-profile-update-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/subscription-update-receipt.json
+          if-no-files-found: error
+          retention-days: 90

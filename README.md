@@ -5,6 +5,40 @@
 
 Common reusable GitHub Actions workflows for Cratis repositories.
 
+## Reviewed Cratis AI profile updates
+
+`Update Cratis AI Profile Subscription` prepares normal pull requests for
+repositories that explicitly subscribe through `.cratis/ai.json`. It replaces
+fleet corpus copying with exact package-version updates; it never auto-merges or
+changes project context.
+
+The controller:
+
+- accepts only an immutable `Cratis/AI.Distribution` release manifest URL and
+  matching SHA-256;
+- verifies profile, public/engineering channel, package name, and exact SemVer;
+- performs a dry run unless `apply` and an exact repository confirmation are
+  both supplied;
+- changes only `.cratis/ai.json` and the matching exact Pi package source in
+  `.pi/settings.json`;
+- preserves Pi skill filters and unrelated settings;
+- rejects partial APM-managed updates until their lockfile can be refreshed;
+- supports explicit rollback to a lower exact release;
+- scopes the GitHub App token to one authorized repository; and
+- opens a normal PR whose repository checks must pass before a human merges it.
+
+Run the controller locally without GitHub writes:
+
+```bash
+node .github/scripts/update-ai-profile-subscription.mjs \
+  --repository /path/to/subscriber \
+  --release-manifest /path/to/release-manifest.json
+```
+
+Add `--apply` only in a disposable/local checkout. The hosted workflow owns
+branch and PR creation. Its one-time GitHub App installation scope and first
+canary repositories remain tracked in Cratis/Workflows#72 and #73.
+
 ## Getting started with your Cratis repository
 
 To connect a Cratis repository to the shared Copilot synchronization system, add two thin wrapper workflows to your repository. The easiest way is to trigger [Bootstrap Copilot Sync](#bootstrap-copilot-syncyml), which installs or refreshes the wrappers and corpus files directly on each repository's default branch.
