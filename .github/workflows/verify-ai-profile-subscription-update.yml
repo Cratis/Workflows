@@ -1,0 +1,43 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+name: Verify AI Profile Subscription Updates
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/update-ai-profile-subscription*.mjs"
+      - ".github/workflows/update-ai-profile-subscription.yml"
+      - ".github/workflows/verify-ai-profile-subscription-update.yml"
+      - "README.md"
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/scripts/update-ai-profile-subscription*.mjs"
+      - ".github/workflows/update-ai-profile-subscription.yml"
+      - ".github/workflows/verify-ai-profile-subscription-update.yml"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out subscriber controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Verify controller syntax and behavior
+        run: |
+          set -euo pipefail
+          node --check .github/scripts/update-ai-profile-subscription.mjs
+          node --test .github/scripts/update-ai-profile-subscription*.spec.mjs
