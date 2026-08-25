@@ -97,6 +97,12 @@ jobs:
       - name: Setup .NET
         if: steps.detect.outputs.update_nuget == 'true'
         uses: actions/setup-dotnet@v4
+        env:
+          # Self-hosted scale-set containers cannot write /usr/share/dotnet, the action's
+          # default install location, so callers that pass a self-hosted runs-on label
+          # need the runner-scoped location instead (setup-dotnet adds it to PATH).
+          # Hosted runners keep their preinstalled SDK path untouched.
+          DOTNET_INSTALL_DIR: ${{ runner.environment == 'self-hosted' && format('{0}/dotnet', runner.temp) || '' }}
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
