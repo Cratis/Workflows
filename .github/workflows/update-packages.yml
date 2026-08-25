@@ -190,7 +190,7 @@ jobs:
 
       - name: Build .NET
         if: steps.detect.outputs.update_nuget == 'true'
-        run: dotnet build
+        run: dotnet build --configuration Release
 
       - name: Build NPM
         if: steps.detect.outputs.update_npm == 'true'
