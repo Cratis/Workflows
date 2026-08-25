@@ -1,0 +1,88 @@
+name: Actions Usage Report
+
+# Weekly guardrail against runaway Actions consumption. The 2026-08-25 runner
+# starvation was preceded by weeks of silent queue saturation (a single private
+# repository was burning ~20,000 billable minutes a month and a comment-triggered
+# assistant workflow ran ~150 times a week doing nothing). This report makes that
+# kind of regression visible within a week instead of after an outage.
+
+on:
+  schedule:
+    - cron: "31 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: actions-usage-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Build and publish the report
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          since=$(date -u -d '7 days ago' +%Y-%m-%d)
+          tmp=$(mktemp)
+
+          gh api "orgs/${GITHUB_REPOSITORY_OWNER}/repos?per_page=100" --paginate \
+            --jq '.[] | select(.archived | not) | .full_name + " " + .visibility' > /tmp/repos.txt
+
+          while read -r full vis; do
+            gh api "repos/${full}/actions/runs?created=>=${since}&per_page=100" --paginate \
+              --jq ".workflow_runs[] | \"${full}|${vis}|\(.name)|\(.conclusion)|\(.run_started_at)|\(.updated_at)\"" \
+              >> "$tmp" 2>/dev/null || true
+          done < /tmp/repos.txt
+
+          python3 - "$tmp" > /tmp/report.md <<'PY'
+          import sys, datetime
+          from collections import defaultdict
+          rows = defaultdict(lambda: [0, 0.0, 0])
+          priv = defaultdict(float)
+          total = cancelled = 0
+          for line in open(sys.argv[1]):
+              p = line.strip().split('|')
+              if len(p) < 6 or p[4] == 'null':
+                  continue
+              try:
+                  s = datetime.datetime.fromisoformat(p[4].replace('Z', '+00:00'))
+                  e = datetime.datetime.fromisoformat(p[5].replace('Z', '+00:00'))
+              except ValueError:
+                  continue
+              mins = max((e - s).total_seconds() / 60, 0)
+              key = f"{p[0]} / {p[2]}"
+              rows[key][0] += 1
+              rows[key][1] += mins
+              total += 1
+              if p[3] == 'cancelled':
+                  rows[key][2] += 1
+                  cancelled += 1
+              if p[1] == 'private':
+                  priv[p[0]] += mins
+          print(f"Total runs: **{total}**, cancelled: **{cancelled}** "
+                f"({cancelled * 100 // max(total, 1)}%)\n")
+          print("### Private repositories (billed wall-clock minutes)\n")
+          print("| Repository | minutes |\n|---|---|")
+          for k, v in sorted(priv.items(), key=lambda x: -x[1]):
+              print(f"| {k} | {v:,.0f} |")
+          print("\n### Top 20 workflows by wall-clock minutes\n")
+          print("| Workflow | runs | minutes | cancelled |\n|---|---|---|---|")
+          for k, (n, m, c) in sorted(rows.items(), key=lambda x: -x[1][1])[:20]:
+              print(f"| {k} | {n} | {m:,.0f} | {c} |")
+          PY
+
+          title="Actions usage report ($(date -u +%Y-%m-%d))"
+          {
+            echo "Automated weekly report over the last 7 days (wall-clock run minutes; job-level billable minutes are higher where matrices fan out)."
+            echo
+            cat /tmp/report.md
+          } > /tmp/body.md
+          gh issue create --repo "${GITHUB_REPOSITORY}" --title "$title" --body-file /tmp/body.md
