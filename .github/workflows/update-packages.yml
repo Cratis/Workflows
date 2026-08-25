@@ -19,6 +19,15 @@ env:
 
 on:
   workflow_call:
+    inputs:
+      runs-on:
+        description: >-
+          Runner label the update job runs on. Callers in private repositories
+          should pass their self-hosted scale-set label (for example cratis-arc)
+          so the daily update does not consume billed GitHub-hosted minutes.
+        type: string
+        required: false
+        default: ubuntu-latest
     secrets:
       PAT_WORKFLOWS:
         required: true
@@ -28,7 +37,8 @@ permissions:
 
 jobs:
   update-packages:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -180,7 +190,7 @@ jobs:
 
       - name: Build .NET
         if: steps.detect.outputs.update_nuget == 'true'
-        run: dotnet build
+        run: dotnet build --configuration Release
 
       - name: Build NPM
         if: steps.detect.outputs.update_npm == 'true'
@@ -238,4 +248,19 @@ jobs:
 
           git add -A
           git commit -m "chore: update ${updated_types} packages"
+
+          # The default branch can move between checkout and push - especially while
+          # many repositories run this workflow around the same time. A plain push then
+          # fails with a non-fast-forward rejection, losing the whole update run. Rebase
+          # the update commit onto the current tip and retry a bounded number of times;
+          # the CI that runs on the pushed commit remains the safety net for the merged
+          # result.
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          for attempt in 1 2 3; do
+            if git push origin HEAD; then
+              exit 0
+            fi
+            echo "Push rejected (attempt ${attempt}/3); rebasing onto latest ${branch} and retrying."
+            git pull --rebase origin "${branch}"
+          done
           git push origin HEAD
