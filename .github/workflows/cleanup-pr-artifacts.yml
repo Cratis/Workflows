@@ -4,7 +4,7 @@ name: Cleanup PR Artifacts
 #
 # Assumes packages are tagged/versioned with the PR number:
 #   Container image tag:    pr{number}       (e.g. pr42)
-#   NuGet package version:  *pr{number}*     (e.g. 1.0.0-pr42.1)
+#   NuGet package version:  prerelease segment pr{number} (e.g. 1.0.0-pr42.1)
 #
 # Only packages linked to the calling repository are considered.
 #
@@ -102,7 +102,7 @@ jobs:
           ORG="${CALLER_REPO%%/*}"
           REPO="${CALLER_REPO##*/}"
           TAG="pr${PR_NUMBER}"
-          echo "Looking for NuGet package versions matching '*${TAG}*' linked to ${ORG}/${REPO}..."
+          echo "Looking for NuGet package versions with prerelease segment '${TAG}' linked to ${ORG}/${REPO}..."
 
           deleted=0
           errors=0
@@ -127,7 +127,7 @@ jobs:
             done < <(gh api \
               "orgs/${ORG}/packages/nuget/${pkg_encoded}/versions?per_page=100" \
               --paginate \
-              --jq ".[] | select(.name | contains(\"${TAG}\")) | [.id | tostring, .name] | @tsv" \
+              --jq ".[] | select(.name | test(\"(^|[.-])${TAG}([.-]|$)\")) | [.id | tostring, .name] | @tsv" \
               2>/dev/null || true)
           done < <(gh api "orgs/${ORG}/packages?package_type=nuget&per_page=100" \
             --paginate \
@@ -136,7 +136,7 @@ jobs:
 
           echo ""
           if [ "$deleted" -eq 0 ] && [ "$errors" -eq 0 ]; then
-            echo "No NuGet package versions matching '*${TAG}*' found."
+            echo "No NuGet package versions with prerelease segment '${TAG}' found."
           else
             echo "NuGet packages: ${deleted} version(s) deleted, ${errors} error(s)."
           fi
