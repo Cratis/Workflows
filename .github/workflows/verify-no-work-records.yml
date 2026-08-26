@@ -1,10 +1,71 @@
 name: Verify No Work Records
 
+# Reusable guard that fails when AI session work records (plans, handovers,
+# session notes, continuation prompts, status boards) are tracked in git.
+# Per the shared corpus rule (.ai/rules/local-work-artifacts.md), such files
+# are local-only and live in the gitignored .ai-work/ folder; durable
+# follow-ups become GitHub issues instead of planning files.
+
 on:
-  pull_request:
-  push:
-    branches: ["main"]
+  workflow_call:
+    inputs:
+      extra-allowed:
+        description: Comma-separated additional allowed root-level markdown file names (with or without .md)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
 
 jobs:
   verify:
-    uses: Cratis/Workflows/.github/workflows/verify-no-work-records.yml@main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Verify no AI work records are tracked
+        env:
+          EXTRA_ALLOWED: ${{ inputs.extra-allowed }}
+        run: |
+          set -euo pipefail
+          violations=()
+
+          # 1. Nothing under .ai-work/ may ever be tracked.
+          while IFS= read -r f; do
+            violations+=(".ai-work/ content must never be tracked: $f")
+          done < <(git ls-files -- '.ai-work/')
+
+          # 2. Root-level SCREAMING-CASE markdown outside the allowlist is a
+          #    work record (HANDOVER.md, PLAN.md, IMPLEMENTATION_STATUS.md, ...).
+          allow='README|LICENSE|AGENTS|CLAUDE|GEMINI|CODE_OF_CONDUCT|CONTRIBUTING|SECURITY|CHANGELOG|CREDITS|RESOURCES|BRAND|MESSAGING|PAGES|SITE|PRIVACY_POLICY|ROADMAP|START-HERE|CHRONICLE|COMPATIBILITY|NOTICE|SUPPORT|GOVERNANCE|VERSION'
+          IFS=',' read -ra extra <<< "${EXTRA_ALLOWED:-}"
+          for e in "${extra[@]}"; do
+            e="$(echo "$e" | xargs)"
+            [ -n "$e" ] && allow="$allow|${e%.md}"
+          done
+          while IFS= read -r f; do
+            echo "$f" | grep -qE "^($allow)\.md$" && continue
+            violations+=("work-record-style root document: $f")
+          done < <(git ls-files -- '*.md' | grep -E '^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$' || true)
+
+          # 3. Session/handover/prompt naming anywhere outside the AI corpus
+          #    adapter folders (uppercase convention only, to spare real docs).
+          while IFS= read -r f; do
+            case "$f" in
+              .ai/*|.claude/*|.github/*|.pi/*|.agents/*|.ai-work/*) continue ;;
+            esac
+            violations+=("session work record: $f")
+          done < <(git ls-files -- '*.md' | grep -E '(^|/)[^/]*HANDOVER[^/]*\.md$|(^|/)PROMPT-[^/]+\.md$|(^|/)[^/]*NEXT-SESSION[^/]*\.md$|(^|/)SESSION-PROMPT[^/]*\.md$|(^|/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$' || true)
+
+          if [ ${#violations[@]} -gt 0 ]; then
+            printf '::error::%s\n' "${violations[@]}"
+            echo ""
+            echo "AI session work artifacts are local-only: keep them in the untracked"
+            echo ".ai-work/ folder (see .ai/rules/local-work-artifacts.md). A follow-up"
+            echo "that must survive the session becomes a GitHub issue, not a file."
+            exit 1
+          fi
+          echo "No AI work records tracked."
