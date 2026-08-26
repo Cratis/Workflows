@@ -1,0 +1,55 @@
+name: Verify Release Intent
+
+# The organization-wide release-intent gate, called from every repository's thin
+# verify workflow. A merged pull request with no major/minor/patch label produces a
+# Publish run that reports success while skipping every publish step; requiring the
+# label turns a silent non-release into a visible failure before the merge.
+#
+# `no-release` is the fourth accepted answer, and it is a decision rather than an
+# omission: the pull request changes nothing a consumer compiles against or runs, so
+# there is nothing to version. See .ai/rules/pull-requests.md in Cratis/AI.
+#
+# This lives here because 30+ per-repository copies of this logic drifted apart, and
+# on 2026-08-25 the repositories whose copies predated `no-release` forced
+# configuration-only pull requests to carry `patch` - cutting four unintended
+# releases. Policy changes to the gate are now one pull request, here.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Require exactly one release-intent label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          version=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "major" or . == "minor" or . == "patch")] | length')
+          none=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "no-release")] | length')
+          count=$((version + none))
+
+          if [ "$count" -eq 1 ]; then
+            if [ "$none" -eq 1 ]; then
+              echo "Labelled no-release: merging this pull request publishes nothing, by decision."
+            else
+              echo "Found one semantic version label."
+            fi
+            exit 0
+          fi
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error::This pull request states no release intent. Add exactly one of major, minor or patch to publish a release, or no-release if it changes nothing a consumer compiles against or runs - documentation, CI, tooling and spec-only changes. Without any of them, merging produces a Publish run that skips every publish step, so nothing is released and nothing says that was intended."
+          elif [ "$version" -ge 1 ] && [ "$none" -eq 1 ]; then
+            echo "::error::This pull request is labelled no-release as well as a semantic version. It either ships something or it does not - remove whichever is wrong."
+          else
+            echo "::error::This pull request carries $version semantic version labels. Exactly one of major, minor or patch is required, since the release version cannot be derived from more than one."
+          fi
+
+          exit 1
