@@ -589,3 +589,7 @@ Sync Copilot instructions from <owner>/<repo>
 ```
 
 The `propagate-copilot-instructions.yml` workflow in each target repository detects this prefix on the next `push` event and exits without triggering another round of propagation, preventing recursive loops.
+
+## Part of the Cratis ecosystem
+
+These workflows power CI/CD across the [Cratis](https://github.com/Cratis) open-source ecosystem — [Chronicle](https://github.com/Cratis/Chronicle) (event sourcing database and runtime), [Arc](https://github.com/Cratis/Arc) (CQRS for ASP.NET Core), [Components](https://github.com/Cratis/Components) (React), the [CLI](https://github.com/Cratis/cli), and more. Documentation lives at [cratis.io](https://www.cratis.io).
