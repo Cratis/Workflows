@@ -28,6 +28,13 @@ on:
         type: string
         required: false
         default: ubuntu-latest
+      npm-package-exclusions:
+        description: >-
+          Comma-delimited packages that npm-check-updates must leave unchanged.
+          TypeScript remains excluded by default until Yarn supports its 7.x layout.
+        type: string
+        required: false
+        default: typescript
     secrets:
       PAT_WORKFLOWS:
         required: true
@@ -175,10 +182,11 @@ jobs:
       - name: Update NPM packages
         if: steps.detect.outputs.update_npm == 'true'
         run: |
-          # typescript is temporarily excluded: 7.x restructured the published package's internal
+          # typescript is excluded by default: 7.x restructured the published package's internal
           # layout and Yarn Berry's builtin compat/typescript patch hasn't been updated for it yet,
-          # so `yarn install` crashes applying the patch. Remove this exclusion once Yarn ships a fix.
-          npx npm-check-updates -u -w -x typescript
+          # so `yarn install` crashes applying the patch. Callers can add repository-specific
+          # exclusions while preserving TypeScript in the comma-delimited input.
+          npx npm-check-updates -u -w -x "${{ inputs.npm-package-exclusions }}"
           yarn install
         env:
           # GitHub Actions sets CI=true, which makes Yarn Berry default to immutable installs and
