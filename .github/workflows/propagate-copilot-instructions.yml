@@ -1,174 +1,35 @@
 name: Propagate Copilot Instructions
-# Reusable workflow that propagates Copilot instruction changes from the calling
-# repository to all other repositories in the Cratis organization by pushing
-# a commit directly to each target repository's default branch (no PR).
-#
-# This workflow requires PAT_WORKFLOWS secret with permissions:
-#   Classic PAT:       repo scope
-#   Fine-grained PAT:  Contents (read/write) + Metadata (read)
-#
-# The PAT owner must also be configured as a bypass actor on each target
-# repository's branch protection ruleset so that direct pushes to the
-# default branch are permitted.  See the README for setup instructions.
-#
-# NOTE: This workflow uses the GitHub Git Data API (blobs/trees/commits/refs)
-# directly — no per-repository workflow dispatch is needed.
-#
-# Repositories are processed with a bounded dynamic matrix built from the list
-# of non-archived Cratis repositories (excluding the source repo and a small
-# ignore list).  The source Copilot files are fetched once, uploaded as an
-# artifact, and then reused by each target repository job.
 
+# Compatibility endpoint for existing callers. Legacy cross-repository broadcast
+# is retired: a source-repository push must not overwrite another checkout's
+# instructions, private overlays, or generated host adapters.
+# Keep the call interface while consuming repositories migrate to reviewed,
+# immutable AI distribution. Normal verification workflows remain unchanged.
 on:
   workflow_call:
     inputs:
       event_name:
-        description: 'Fallback event name if the Actions API run lookup fails (e.g. push, workflow_dispatch). The workflow primarily determines the trigger event via the API.'
+        description: 'Legacy caller event; retained for compatibility only.'
         required: false
         type: string
         default: 'push'
     secrets:
       PAT_WORKFLOWS:
-        required: true
-
-env:
-  # Repositories to skip when propagating Copilot instructions.
-  # Add any repo name here that should never receive propagated changes.
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio"]'
+        description: 'Legacy credential; no longer required or used.'
+        required: false
 
 permissions:
   contents: read
 
 jobs:
-  get-repos:
+  retired:
+    name: Legacy propagation is disabled
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'Cratis' }}
-    outputs:
-      repos: ${{ steps.list-repos.outputs.repos }}
-      source_artifact_name: ${{ steps.source_artifact.outputs.name }}
-      source_file_count: ${{ steps.source_artifact.outputs.file_count }}
-
+    timeout-minutes: 1
     steps:
-      - name: Checkout Workflows repository
-        uses: actions/checkout@v4
-        with:
-          repository: Cratis/Workflows
-          ref: main
-          token: ${{ secrets.PAT_WORKFLOWS }}
-
-      - name: Get all Cratis repositories
-        id: list-repos
-        env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
-          SOURCE_REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.sha }}
-          EVENT_NAME: ${{ inputs.event_name }}
+      - name: Explain retired behavior
         run: |
-          source .github/scripts/github-api-retry.sh
-
-          source_name="${SOURCE_REPO##*/}"
-
-          # Skip propagation when the triggering commit is itself a Copilot sync
-          # commit (squash or rebase merge of a sync PR).  This prevents a repo
-          # from immediately re-propagating content it just received.
-          #
-          # This guard is bypassed for manual triggers (workflow_dispatch) so that
-          # a user can always force a propagation regardless of the last commit message.
-          #
-          # We determine the trigger event by querying the GitHub Actions API for
-          # this workflow run.  In a reusable workflow, GITHUB_RUN_ID refers to the
-          # caller's run, so the API returns the event that actually triggered the
-          # calling workflow (e.g. 'workflow_dispatch' for manual triggers, 'push'
-          # for push events).  This is more reliable than the event_name input
-          # because it works even when callers do not explicitly forward
-          # github.event_name.  The event_name input is kept as a fallback in case
-          # the API call fails.
-          #
-          # We match only the exact commit message written by the sync scripts
-          # ("Sync Copilot instructions from …").  We intentionally do NOT match
-          # on the branch name "copilot-sync/update-instructions" because that
-          # pattern also matches regular merge commits ("Merge pull request #N
-          # from …/copilot-sync/update-instructions"), which would incorrectly
-          # suppress propagation in repos that regularly receive — and merge —
-          # sync PRs from other sources.  For regular merges the propagation
-          # proceeds; the per-repo "up to date" content check in the
-          # propagation script naturally prevents creating redundant PRs.
-          actual_event=$(gh_api_with_retry "repos/${SOURCE_REPO}/actions/runs/${GITHUB_RUN_ID}" \
-            --jq '.event' 2>/dev/null || true)
-          if [ -z "$actual_event" ]; then
-            actual_event="${EVENT_NAME:-push}"
-          fi
-
-          if [ "$actual_event" != "workflow_dispatch" ]; then
-            commit_msg=$(gh_api_with_retry "repos/${SOURCE_REPO}/git/commits/${HEAD_SHA}" \
-              --jq '.message' 2>/dev/null || true)
-            if echo "$commit_msg" | grep -qiE '^Sync Copilot instructions from'; then
-              echo "ℹ Skipping propagation: the triggering commit is a Copilot sync commit — no further propagation needed."
-              echo "repos=[]" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          # List all non-archived repos, excluding the source repo and the
-          # repos in REPOS_TO_IGNORE.  The result is a compact JSON array
-          # used as the matrix.
-          repos=$(gh_api_with_retry --paginate "orgs/Cratis/repos?type=all&per_page=100" \
-            | jq -s -c --arg src "$source_name" --argjson ignore "$REPOS_TO_IGNORE" \
-            '[.[][] | select(.archived == false) | .name
-              | select(. != $src)
-              | select(. as $n | ($ignore | index($n)) == null)]')
-          echo "repos=$repos" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Copilot source artifact
-        id: source_artifact
-        if: ${{ steps.list-repos.outputs.repos != '[]' }}
-        env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
-          SOURCE_REPO: ${{ github.repository }}
-          OUTPUT_DIR: ${{ runner.temp }}/copilot-source
-        run: |
-          bash .github/scripts/prepare-copilot-source-artifact.sh
-          echo "name=copilot-source-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "file_count=$(jq -r '.file_count' "${OUTPUT_DIR}/metadata.json")" >> "$GITHUB_OUTPUT"
-
-      - name: Upload Copilot source artifact
-        if: ${{ steps.list-repos.outputs.repos != '[]' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.source_artifact.outputs.name }}
-          path: ${{ runner.temp }}/copilot-source
-          retention-days: 1
-          if-no-files-found: error
-
-  propagate:
-    needs: get-repos
-    if: ${{ needs.get-repos.outputs.repos != '[]' && needs.get-repos.outputs.source_file_count != '0' }}
-    runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 3
-      matrix:
-        repo: ${{ fromJson(needs.get-repos.outputs.repos) }}
-      fail-fast: false
-
-    steps:
-      - name: Checkout Workflows repository
-        uses: actions/checkout@v4
-        with:
-          repository: Cratis/Workflows
-          ref: main
-          token: ${{ secrets.PAT_WORKFLOWS }}
-
-      - name: Download Copilot source artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.get-repos.outputs.source_artifact_name }}
-          path: ${{ runner.temp }}/copilot-source
-
-      - name: Propagate Copilot instructions to ${{ matrix.repo }}
-        env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
-          SOURCE_REPO: ${{ github.repository }}
-          TARGET_REPO: ${{ matrix.repo }}
-          COPILOT_SOURCE_FILES_PATH: ${{ runner.temp }}/copilot-source
-        run: |
-          bash .github/scripts/propagate-copilot-instructions.sh
+          printf '%s\n' \
+            'Legacy cross-repository AI propagation is disabled.' \
+            'No repositories, files, branches, or issues were changed.' \
+            'Use reviewed immutable distribution updates instead.'
