@@ -1,27 +1,37 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
 name: Cleanup PR Artifacts
-# Reusable workflow that deletes GitHub Packages (container images and NuGet
-# packages) published during a pull request.
-#
-# Assumes packages are tagged/versioned with the PR number:
-#   Container image tag:    pr{number}       (e.g. pr42)
-#   NuGet package version:  prerelease segment pr{number} (e.g. 1.0.0-pr42.1)
-#
-# Only packages linked to the calling repository are considered.
-#
-# Requires PAT_WORKFLOWS secret with permissions:
-#   Classic PAT:       read:packages + delete:packages
-#   Fine-grained PAT:  Packages (read/write)
 
 on:
   workflow_call:
     inputs:
       pull_request:
-        description: 'Pull request number to clean up artifacts for'
+        description: Pull request number to clean up artifacts for
         required: true
         type: number
     secrets:
       PAT_WORKFLOWS:
         required: true
+  workflow_dispatch:
+    inputs:
+      target_repository:
+        description: Explicit Cratis/repository to inspect or clean
+        required: true
+        type: string
+      pull_request:
+        description: Positive pull request number (must be closed to apply)
+        required: true
+        type: number
+      dry_run:
+        description: Inventory only, without deleting versions
+        type: boolean
+        default: true
+      confirmation:
+        description: 'Apply requires: DELETE Cratis/repository PR number'
+        type: string
+      expected_targets:
+        description: Entire approved cleanup-plan.json from a dry run (required for apply)
+        type: string
 
 permissions:
   contents: read
@@ -29,114 +39,308 @@ permissions:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
+    # Configure this environment in Workflows with required reviewers/main only.
+    # Reusable callers retain their existing contract, with no environment required.
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'pr-package-cleanup' || '' }}
     steps:
-      - name: Validate inputs
-        run: |
-          owner="${{ github.repository_owner }}"
-          if [ "$owner" != "Cratis" ]; then
-            echo "::error::This workflow is for use by the Cratis organization only (got '$owner')"
-            exit 1
-          fi
-
-          pr="${{ inputs.pull_request }}"
-          if ! [[ "$pr" =~ ^[0-9]+$ ]] || [ "$pr" -le 0 ]; then
-            echo "::error::pull_request input must be a positive integer (got: $pr)"
-            exit 1
-          fi
-
-      - name: Delete container image versions tagged for this PR
+      # Deliberately inline: checkout would fetch the CALLER's code, not the
+      # immutable implementation selected by the reusable workflow reference.
+      - name: Inventory, approve, delete, and verify PR versions
+        id: cleanup
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           CALLER_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
           PR_NUMBER: ${{ inputs.pull_request }}
+          TARGET_REPO: ${{ inputs.target_repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_TARGETS: ${{ inputs.expected_targets }}
+          PLAN_PATH: ${{ runner.temp }}/cleanup-plan.json
         run: |
-          ORG="${CALLER_REPO%%/*}"
-          REPO="${CALLER_REPO##*/}"
-          TAG="pr${PR_NUMBER}"
-          echo "Looking for container images tagged '${TAG}' linked to ${ORG}/${REPO}..."
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
 
-          deleted=0
-          errors=0
+          class CleanupError(Exception):
+              pass
 
-          while IFS= read -r pkg; do
-            [ -z "$pkg" ] && continue
-            echo "Scanning container package: ${pkg}"
-            pkg_encoded="${pkg//\//%2F}"
+          def require(condition, message):
+              if not condition:
+                  raise CleanupError(message)
 
-            while IFS=$'\t' read -r ver_id ver_tags; do
-              [ -z "$ver_id" ] && continue
-              echo "  Deleting version ${ver_id} (tags: ${ver_tags})..."
-              if gh api -X DELETE \
-                   "orgs/${ORG}/packages/container/${pkg_encoded}/versions/${ver_id}" \
-                   2>/dev/null; then
-                echo "  ✓ Deleted"
-                deleted=$((deleted + 1))
-              else
-                echo "  ✗ Failed (may already be deleted)"
-                errors=$((errors + 1))
-              fi
-            done < <(gh api \
-              "orgs/${ORG}/packages/container/${pkg_encoded}/versions?per_page=100" \
-              --paginate \
-              --jq ".[] | select(.metadata.container.tags // [] | map(test(\"^${TAG}($|-)\")) | any) | [.id | tostring, (.metadata.container.tags | join(\",\"))] | @tsv" \
-              2>/dev/null || true)
-          done < <(gh api "orgs/${ORG}/packages?package_type=container&per_page=100" \
-            --paginate \
-            --jq ".[] | select(.repository.name == \"${REPO}\") | .name" \
-            2>/dev/null || true)
+          def parse_json(value):
+              def unique_keys(pairs):
+                  result = {}
+                  for key, item in pairs:
+                      require(key not in result, "Duplicate JSON key")
+                      result[key] = item
+                  return result
+              try:
+                  return json.loads(value, object_pairs_hook=unique_keys,
+                                    parse_constant=lambda _: require(False, "Invalid JSON constant"))
+              except (ValueError, UnicodeError):
+                  raise CleanupError("Invalid JSON response or manifest") from None
 
-          echo ""
-          if [ "$deleted" -eq 0 ] && [ "$errors" -eq 0 ]; then
-            echo "No container image versions tagged '${TAG}' found."
-          else
-            echo "Container images: ${deleted} version(s) deleted, ${errors} error(s)."
-          fi
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
 
-      - name: Delete NuGet package versions for this PR
-        env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
-          CALLER_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ inputs.pull_request }}
-        run: |
-          ORG="${CALLER_REPO%%/*}"
-          REPO="${CALLER_REPO##*/}"
-          TAG="pr${PR_NUMBER}"
-          echo "Looking for NuGet package versions with prerelease segment '${TAG}' linked to ${ORG}/${REPO}..."
+          class API:
+              def __init__(self, token):
+                  self.token = token
+                  self.opener = urllib.request.build_opener(NoRedirect())
 
-          deleted=0
-          errors=0
+              def request(self, method, endpoint, allowed=(200,)):
+                  require(endpoint.startswith(("orgs/Cratis/", "repos/Cratis/")), "Unsafe API endpoint")
+                  request = urllib.request.Request(
+                      "https://api.github.com/" + endpoint, method=method,
+                      headers={"Authorization": "Bearer " + self.token,
+                               "Accept": "application/vnd.github+json",
+                               "X-GitHub-Api-Version": "2022-11-28"})
+                  try:
+                      response = self.opener.open(request, timeout=60)
+                  except urllib.error.HTTPError as error:
+                      response = error
+                  except Exception:
+                      raise CleanupError("API transport failed; no automatic retry") from None
+                  with response:
+                      status = response.code
+                      require(status in allowed, f"API {method} failed (HTTP {status})")
+                      # Never log API bodies, headers, URLs from errors, or exception text.
+                      data = parse_json(response.read()) if status == 200 else None
+                      return status, data, response.headers.get("Link", "")
 
-          while IFS= read -r pkg; do
-            [ -z "$pkg" ] && continue
-            echo "Scanning NuGet package: ${pkg}"
-            pkg_encoded="${pkg//\//%2F}"
+              def get(self, endpoint):
+                  return self.request("GET", endpoint)[1]
 
-            while IFS=$'\t' read -r ver_id ver_name; do
-              [ -z "$ver_id" ] && continue
-              echo "  Deleting version '${ver_name}' (id: ${ver_id})..."
-              if gh api -X DELETE \
-                   "orgs/${ORG}/packages/nuget/${pkg_encoded}/versions/${ver_id}" \
-                   2>/dev/null; then
-                echo "  ✓ Deleted"
-                deleted=$((deleted + 1))
-              else
-                echo "  ✗ Failed (may already be deleted)"
-                errors=$((errors + 1))
-              fi
-            done < <(gh api \
-              "orgs/${ORG}/packages/nuget/${pkg_encoded}/versions?per_page=100" \
-              --paginate \
-              --jq ".[] | select(.name | test(\"(^|[.-])${TAG}([.-]|$)\")) | [.id | tostring, .name] | @tsv" \
-              2>/dev/null || true)
-          done < <(gh api "orgs/${ORG}/packages?package_type=nuget&per_page=100" \
-            --paginate \
-            --jq ".[] | select(.repository.name == \"${REPO}\") | .name" \
-            2>/dev/null || true)
+              def listing(self, endpoint):
+                  result, seen = [], set()
+                  separator = "&" if "?" in endpoint else "?"
+                  for page in range(1, 1001):
+                      url = f"{endpoint}{separator}per_page=100&page={page}"
+                      _, items, links = self.request("GET", url)
+                      require(isinstance(items, list) and len(items) <= 100, "Malformed listing page")
+                      for item in items:
+                          require(isinstance(item, dict), "Malformed listing entry")
+                          identity = item.get("id")
+                          require(type(identity) is int and identity > 0 and identity not in seen,
+                                  "Missing, invalid, or repeated inventory ID")
+                          seen.add(identity)
+                          result.append(item)
+                      relations = {}
+                      for link in links.split(",") if links else []:
+                          match = re.fullmatch(r'\s*<([^<>]+)>; rel="(next|prev|first|last)"\s*', link)
+                          require(match is not None, "Malformed pagination link")
+                          target, relation = match.groups()
+                          require(relation not in relations, "Duplicate pagination relation")
+                          parsed = urllib.parse.urlsplit(target)
+                          expected = urllib.parse.urlsplit("https://api.github.com/" + url)
+                          query = urllib.parse.parse_qs(parsed.query, strict_parsing=True)
+                          expected_query = urllib.parse.parse_qs(expected.query)
+                          target_page = query.pop("page", [])
+                          expected_query.pop("page")
+                          require(parsed.scheme == expected.scheme and parsed.netloc == expected.netloc
+                                  and parsed.path == expected.path and not parsed.fragment
+                                  and query == expected_query and len(target_page) == 1
+                                  and re.fullmatch(r"[1-9][0-9]*", target_page[0]) is not None,
+                                  "Unsafe pagination target")
+                          number = int(target_page[0])
+                          relations[relation] = number
+                          require(number <= 1000, "Pagination exceeds inventory limit")
+                          if relation == "next":
+                              require(number == page + 1 and len(items) == 100,
+                                      "Incomplete or nonsequential pagination")
+                          elif relation == "prev":
+                              require(number == page - 1, "Invalid previous page")
+                          elif relation == "first":
+                              require(number == 1, "Invalid first page")
+                          else:
+                              require(number >= page, "Invalid last page")
+                      require(relations.get("last", page) == page or "next" in relations,
+                              "Pagination omitted the next page")
+                      if "next" not in relations:
+                          return result
+                  raise CleanupError("Inventory exceeded pagination limit")
 
-          echo ""
-          if [ "$deleted" -eq 0 ] && [ "$errors" -eq 0 ]; then
-            echo "No NuGet package versions with prerelease segment '${TAG}' found."
-          else
-            echo "NuGet packages: ${deleted} version(s) deleted, ${errors} error(s)."
-          fi
+          def text(value):
+              require(isinstance(value, str) and value and not any(ord(c) < 32 for c in value),
+                      "Missing or invalid inventory name")
+              require(value not in (".", ".."), "Unsafe inventory name")
+              return value
+
+          def association(package):
+              require(isinstance(package, dict) and "repository" in package,
+                      "Missing package repository association")
+              repository = package.get("repository")
+              if repository is None:
+                  return None
+              require(isinstance(repository, dict), "Malformed package repository")
+              full_name = text(repository.get("full_name"))
+              require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name) is not None,
+                      "Invalid repository association")
+              return full_name
+
+          def package_endpoint(kind, name):
+              return f"orgs/Cratis/packages/{kind}/{urllib.parse.quote(name, safe='')}"
+
+          def target_for(version, kind, name, pr):
+              require(isinstance(version, dict) and type(version.get("id")) is int
+                      and version["id"] > 0, "Invalid version identity")
+              version_name = text(version.get("name"))
+              tags = []
+              if kind == "container":
+                  metadata = version.get("metadata")
+                  require(isinstance(metadata, dict) and isinstance(metadata.get("container"), dict),
+                          "Missing container metadata")
+                  tags = metadata["container"].get("tags")
+                  require(isinstance(tags, list) and all(isinstance(tag, str) and tag for tag in tags),
+                          "Malformed container tags")
+                  matches = [re.search(rf"^pr{pr}($|-)", tag) is not None for tag in tags]
+                  if not any(matches):
+                      return None
+                  require(all(matches), "Refusing container version with mixed PR/nonmatching tags")
+                  tags = sorted(tags)
+              elif re.search(rf"(^|[.-])pr{pr}([.-]|$)", version_name) is None:
+                  return None
+              endpoint = f"{package_endpoint(kind, name)}/versions/{version['id']}"
+              return {"package_type": kind, "package_name": name, "version_id": version["id"],
+                      "version_name": version_name, "tags": tags,
+                      "delete_endpoint": endpoint, "restore_endpoint": endpoint + "/restore"}
+
+          def inventory(api, repository, pr):
+              targets = []
+              for kind in ("container", "nuget"):
+                  print(f"Inventorying {kind} packages")
+                  packages = api.listing(f"orgs/Cratis/packages?package_type={kind}")
+                  names = set()
+                  for package in packages:
+                      name = text(package.get("name"))
+                      require(name not in names and package.get("package_type") == kind,
+                              "Duplicate package name or wrong package type")
+                      names.add(name)
+                      if association(package) != repository:
+                          continue
+                      for version in api.listing(package_endpoint(kind, name) + "/versions?state=active"):
+                          target = target_for(version, kind, name, pr)
+                          if target:
+                              targets.append(target)
+              return {"schema": 1, "repository": repository, "pull_request": int(pr),
+                      "targets": sorted(targets, key=lambda t: (t["package_type"], t["package_name"], t["version_id"]))}
+
+          def verify_package(api, target, repository):
+              package = api.get(package_endpoint(target["package_type"], target["package_name"]))
+              require(association(package) == repository and package.get("name") == target["package_name"]
+                      and package.get("package_type") == target["package_type"],
+                      "Package identity or repository association changed")
+
+          def verify_target(api, target, repository, pr):
+              verify_package(api, target, repository)
+              version = api.get(target["delete_endpoint"])
+              require(target_for(version, target["package_type"], target["package_name"], pr) == target,
+                      "Version identity or tags changed")
+
+          def verify_closed(api, repository, pr):
+              pull = api.get(f"repos/{repository}/pulls/{pr}")
+              require(isinstance(pull, dict) and pull.get("number") == int(pr)
+                      and pull.get("state") == "closed" and isinstance(pull.get("base"), dict)
+                      and association({"repository": pull["base"].get("repo")}) == repository,
+                      "Manual apply requires the exact pull request to be closed")
+
+          def main():
+              token = os.environ.get("GH_TOKEN", "")
+              require(bool(token.strip()), "PAT_WORKFLOWS is required")
+              caller = os.environ.get("CALLER_REPO", "")
+              manual = os.environ.get("EVENT_NAME") == "workflow_dispatch"
+              repository = os.environ.get("TARGET_REPO", "") if manual else caller
+              require(re.fullmatch(r"Cratis/[A-Za-z0-9_][A-Za-z0-9_.-]*", repository) is not None,
+                      "An explicit Cratis/repository is required")
+              pr = os.environ.get("PR_NUMBER", "")
+              require(re.fullmatch(r"[1-9][0-9]*", pr) is not None, "pull_request must be a positive integer")
+              dry_run = False
+              expected = None
+              if manual:
+                  require(caller == "Cratis/Workflows" and os.environ.get("WORKFLOW_REF") == "refs/heads/main",
+                          "Manual cleanup runs only from Cratis/Workflows main")
+                  dry = os.environ.get("DRY_RUN", "true")
+                  require(dry in ("true", "false"), "dry_run must be true or false")
+                  dry_run = dry == "true"
+                  if not dry_run:
+                      require(os.environ.get("CONFIRMATION") == f"DELETE {repository} PR {pr}",
+                              "Exact deletion confirmation is required")
+                      expected = parse_json(os.environ.get("EXPECTED_TARGETS", ""))
+                      require(isinstance(expected, dict) and isinstance(expected.get("targets"), list)
+                              and expected["targets"], "An approved nonempty dry-run manifest is required")
+              api = API(token)
+              if manual and not dry_run:
+                  verify_closed(api, repository, pr)
+              plan = inventory(api, repository, pr)
+              if expected is not None:
+                  # Comparing canonical JSON also distinguishes booleans from numeric IDs.
+                  require(json.dumps(expected, sort_keys=True) == json.dumps(plan, sort_keys=True),
+                          "Approved manifest differs from current inventory; obtain a new dry-run approval")
+              rendered = json.dumps(plan, indent=2, sort_keys=True)
+              require(token not in rendered, "Refusing to publish a plan containing credential material")
+              Path(os.environ["PLAN_PATH"]).write_text(rendered + "\n")
+              print(rendered)
+              if os.environ.get("GITHUB_STEP_SUMMARY"):
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                      summary.write(f"### PR package cleanup\n\nMode: {'dry run' if dry_run else 'apply'}; "
+                                    f"planned versions: {len(plan['targets'])}. "
+                                    "Exact names, IDs, and restore endpoints: `cleanup-plan.json` artifact.\n")
+              if dry_run:
+                  print("Dry run complete; no versions deleted.")
+                  return
+              # Finish ALL inventory and identity preflight before the first DELETE.
+              for target in plan["targets"]:
+                  verify_target(api, target, repository, pr)
+              deleted = 0
+              for target in plan["targets"]:
+                  if manual:
+                      verify_closed(api, repository, pr)
+                  verify_target(api, target, repository, pr)
+                  # A DELETE 404 is ambiguous: reconcile it exactly as a 204.
+                  # Other failures stop immediately; no blind DELETE retry.
+                  api.request("DELETE", target["delete_endpoint"], allowed=(204, 404))
+                  verify_package(api, target, repository)
+                  status, _, _ = api.request("GET", target["delete_endpoint"], allowed=(200, 404))
+                  require(status == 404, "Deletion readback still returns the version")
+                  remaining = api.listing(package_endpoint(target["package_type"], target["package_name"])
+                                          + "/versions?state=active")
+                  require(all(version["id"] != target["version_id"] for version in remaining),
+                          "Deletion readback still lists the version")
+                  deleted += 1
+                  print(f"Verified absent: {target['package_type']} version ID {target['version_id']}")
+              print(f"Cleanup verified: {deleted} version(s) absent.")
+              if os.environ.get("GITHUB_STEP_SUMMARY"):
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                      summary.write(f"\nVerified absent after apply: {deleted} version(s).\n")
+
+          if __name__ == "__main__":
+              try:
+                  main()
+              except CleanupError as error:
+                  print(f"::error::{error}", file=sys.stderr)
+                  sys.exit(1)
+              except Exception:
+                  # Do not leak credentials through library exceptions or untrusted responses.
+                  print("::error::Cleanup failed on an unexpected response or local error", file=sys.stderr)
+                  sys.exit(1)
+          PY
+      - name: Preserve inventory and restore endpoints
+        if: ${{ always() && steps.cleanup.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cleanup-plan.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,34 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify PR Artifact Cleanup
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/cleanup-pr-artifacts.yml
+      - .github/workflows/verify-pr-artifact-cleanup.yml
+      - .github/scripts/tests/cleanup-pr-artifacts.test.py
+      - README.md
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cleanup-pr-artifacts.yml
+      - .github/workflows/verify-pr-artifact-cleanup.yml
+      - .github/scripts/tests/cleanup-pr-artifacts.test.py
+      - README.md
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out workflow and offline tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise the actual inline program with an in-memory API
+        # No package token, live cleanup invocation, or dependency installation.
+        run: python3 .github/scripts/tests/cleanup-pr-artifacts.test.py
