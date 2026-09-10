@@ -197,8 +197,16 @@ jobs:
           # typescript is excluded by default: 7.x restructured the published package's internal
           # layout and Yarn Berry's builtin compat/typescript patch hasn't been updated for it yet,
           # so `yarn install` crashes applying the patch. Callers can add repository-specific
-          # exclusions while preserving TypeScript in the comma-delimited input.
-          npx npm-check-updates -u -w -x "${{ inputs.npm-package-exclusions }}"
+          # exclusions while preserving TypeScript in the comma-delimited input, or - preferably,
+          # since the bootstrap bot overwrites the caller workflow with the canonical template -
+          # list them one-per-line in .github/update-packages-npm-exclusions in the target repo.
+          exclusions="${{ inputs.npm-package-exclusions }}"
+          exclusions_file=".github/update-packages-npm-exclusions"
+          if [ -f "$exclusions_file" ]; then
+            file_exclusions=$(paste -sd, "$exclusions_file")
+            exclusions="${exclusions:+${exclusions},}${file_exclusions}"
+          fi
+          npx npm-check-updates -u -w -x "$exclusions"
           yarn install
         env:
           # GitHub Actions sets CI=true, which makes Yarn Berry default to immutable installs and
