@@ -29,7 +29,7 @@ on:
 
 env:
   # Repositories to skip when propagating templates.
-  # Must match the exceptions used in propagate-copilot-instructions.yml.
+  # Historically matched the retired Copilot-sync exceptions; kept as the template-propagation exceptions.
   REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio"]'
 
 permissions:

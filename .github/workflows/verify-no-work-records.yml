@@ -2,9 +2,8 @@ name: Verify No Work Records
 
 # Reusable guard that fails when AI session work records (plans, handovers,
 # session notes, continuation prompts, status boards) are tracked in git.
-# Per the shared corpus rule (.ai/rules/local-work-artifacts.md), such files
-# are local-only and live in the gitignored .ai-work/ folder; durable
-# follow-ups become GitHub issues instead of planning files.
+# Such files are local-only and live in the gitignored .ai-work/ folder;
+# durable follow-ups become GitHub issues instead of planning files.
 
 on:
   workflow_call:
@@ -55,7 +54,7 @@ jobs:
           #    adapter folders (uppercase convention only, to spare real docs).
           while IFS= read -r f; do
             case "$f" in
-              .ai/*|.claude/*|.github/*|.pi/*|.agents/*|.ai-work/*) continue ;;
+              .claude/*|.github/*|.pi/*|.agents/*|.cratis/*|.ai-work/*) continue ;;
             esac
             violations+=("session work record: $f")
           done < <(git ls-files -- '*.md' | grep -E '(^|/)[^/]*HANDOVER[^/]*\.md$|(^|/)PROMPT-[^/]+\.md$|(^|/)[^/]*NEXT-SESSION[^/]*\.md$|(^|/)SESSION-PROMPT[^/]*\.md$|(^|/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$' || true)
@@ -64,7 +63,7 @@ jobs:
             printf '::error::%s\n' "${violations[@]}"
             echo ""
             echo "AI session work artifacts are local-only: keep them in the untracked"
-            echo ".ai-work/ folder (see .ai/rules/local-work-artifacts.md). A follow-up"
+            echo ".ai-work/ folder. A follow-up"
             echo "that must survive the session becomes a GitHub issue, not a file."
             exit 1
           fi
