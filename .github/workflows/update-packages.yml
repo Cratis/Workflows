@@ -56,7 +56,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Callers pass PAT_WORKFLOWS where the organization secret is
           # available. Private repositories on plans without organization-level
@@ -115,7 +115,7 @@ jobs:
       # builds must not start until every ecosystem's dependencies are actually in place.
       - name: Setup .NET
         if: steps.detect.outputs.update_nuget == 'true'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         env:
           # Self-hosted scale-set containers cannot write /usr/share/dotnet, the action's
           # default install location, so callers that pass a self-hosted runs-on label
@@ -127,7 +127,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.detect.outputs.update_npm == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
@@ -137,14 +137,14 @@ jobs:
 
       - name: Setup Java
         if: steps.detect.outputs.update_gradle == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: Setup Elixir
         if: steps.detect.outputs.update_mix == 'true'
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
