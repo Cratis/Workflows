@@ -15,10 +15,12 @@ name: Update Packages
 #   PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS || github.token }}
 # so that repositories where the organization secret is not available
 # (private repositories on plans without organization-level secret
-# support) fall back to the workflow's own GITHUB_TOKEN. That token can
-# only push when this workflow grants itself contents: write, and only
-# where no branch protection rules block it (branch protection is also
-# unavailable on those plans).
+# support) fall back to the workflow's own GITHUB_TOKEN. This workflow
+# deliberately declares no permissions block: a declared permissions block
+# is capped by the repository's configured workflow permissions (read-only
+# on some repositories, which would fail the run at startup), while
+# omitting it inherits the repository default. PAT-based pushes are not
+# affected by token permissions at all.
 
 env:
   DOTNET_VERSION: "10.0.x"
@@ -47,11 +49,6 @@ on:
     secrets:
       PAT_WORKFLOWS:
         required: false
-
-permissions:
-  # Callers that fall back to their GITHUB_TOKEN need contents: write for the
-  # final push step. PAT-based callers are unaffected by this declaration.
-  contents: write
 
 jobs:
   update-packages:
