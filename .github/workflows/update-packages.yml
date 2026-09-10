@@ -46,7 +46,7 @@ on:
         default: typescript
     secrets:
       PAT_WORKFLOWS:
-        required: true
+        required: false
 
 permissions:
   # Callers that fall back to their GITHUB_TOKEN need contents: write for the
@@ -61,7 +61,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_WORKFLOWS }}
+          # Callers pass PAT_WORKFLOWS where the organization secret is
+          # available. Private repositories on plans without organization-level
+          # secret support cannot resolve it (it evaluates to an empty string),
+          # so fall back to the workflow's own GITHUB_TOKEN there.
+          token: ${{ secrets.PAT_WORKFLOWS || github.token }}
           fetch-depth: 0
 
       - name: Detect package ecosystems in repo root
@@ -232,7 +236,7 @@ jobs:
 
       - name: Commit and push changes
         env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
         run: |
           # Check if there are any changes
           if git diff --quiet && git diff --cached --quiet; then
