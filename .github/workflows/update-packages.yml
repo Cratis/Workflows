@@ -3,13 +3,22 @@ name: Update Packages
 # (Elixir) packages in the calling repository, builds to verify nothing is
 # broken, and pushes the result directly to the default branch.
 #
-# This workflow requires PAT_WORKFLOWS secret with permissions:
+# This workflow expects a PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo scope
 #   Fine-grained PAT:  Contents (read/write) + Metadata (read)
 #
 # The PAT owner must also be configured as a bypass actor on each target
 # repository's branch protection ruleset so that direct pushes to the
 # default branch are permitted.
+#
+# Callers should declare the secret as
+#   PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS || github.token }}
+# so that repositories where the organization secret is not available
+# (private repositories on plans without organization-level secret
+# support) fall back to the workflow's own GITHUB_TOKEN. That token can
+# only push when this workflow grants itself contents: write, and only
+# where no branch protection rules block it (branch protection is also
+# unavailable on those plans).
 
 env:
   DOTNET_VERSION: "10.0.x"
@@ -40,7 +49,9 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # Callers that fall back to their GITHUB_TOKEN need contents: write for the
+  # final push step. PAT-based callers are unaffected by this declaration.
+  contents: write
 
 jobs:
   update-packages:
