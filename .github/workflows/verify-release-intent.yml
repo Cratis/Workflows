@@ -7,7 +7,8 @@ name: Verify Release Intent
 #
 # `no-release` is the fourth accepted answer, and it is a decision rather than an
 # omission: the pull request changes nothing a consumer compiles against or runs, so
-# there is nothing to version. See .ai/rules/pull-requests.md in Cratis/AI.
+# there is nothing to version. The policy is maintained with the Cratis AI
+# engineering guidance (github.com/Cratis/AI).
 #
 # This lives here because 30+ per-repository copies of this logic drifted apart, and
 # on 2026-08-25 the repositories whose copies predated `no-release` forced
