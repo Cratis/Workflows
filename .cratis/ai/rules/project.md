@@ -9,7 +9,7 @@ rejects calls from outside the Cratis organization.
 
 Read every concern below before working in this repository. Together they are the project-owned instructions and override conflicting shared guidance.
 
-- [What lives here](project/what-lives-here.md)
-- [Conventions](project/conventions.md)
-- [Local AI work artifacts — `.ai-work/` only](project/local-ai-work-artifacts-ai-work-only.md)
-- [AI-assisted development](project/ai-assisted-development.md)
+- [What lives here](.cratis/ai/rules/project/what-lives-here.md)
+- [Conventions](.cratis/ai/rules/project/conventions.md)
+- [Local AI work artifacts — `.ai-work/` only](.cratis/ai/rules/project/local-ai-work-artifacts-ai-work-only.md)
+- [AI-assisted development](.cratis/ai/rules/project/ai-assisted-development.md)
