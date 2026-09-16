@@ -8,6 +8,14 @@ name: Verify No Work Records
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: >-
+          Runner label the guard job runs on. Callers in private repositories
+          should pass their self-hosted scale-set label (for example cratis-arc)
+          so the guard does not consume billed GitHub-hosted minutes.
+        type: string
+        required: false
+        default: ubuntu-latest
       extra-allowed:
         description: Comma-separated additional allowed root-level markdown file names (with or without .md)
         required: false
@@ -19,7 +27,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
