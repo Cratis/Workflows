@@ -1,26 +1,28 @@
 name: Update Packages
 # Reusable workflow that updates NuGet, NPM, Gradle (Kotlin/JVM), and/or Mix
 # (Elixir) packages in the calling repository, builds to verify nothing is
-# broken, and pushes the result directly to the default branch.
+# broken, and by default pushes directly to the default branch. Opt-in
+# pull-request publication validates one candidate without rebasing; see README.
 #
-# This workflow expects a PAT_WORKFLOWS secret with permissions:
+# PAT_WORKFLOWS permissions:
 #   Classic PAT:       repo scope
 #   Fine-grained PAT:  Contents (read/write) + Metadata (read)
+#   Pull-request mode additionally needs Pull requests (read/write).
 #
-# The PAT owner must also be configured as a bypass actor on each target
-# repository's branch protection ruleset so that direct pushes to the
-# default branch are permitted.
+# Direct mode requires a bypass actor where default-branch protection prevents
+# direct pushes. Pull-request mode needs permission to create its run-owned
+# branch and PR, not default-branch bypass; it never merges.
 #
 # Callers should declare the secret as
 #   PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS || github.token }}
 # so that repositories where the organization secret is not available
 # (private repositories on plans without organization-level secret
 # support) fall back to the workflow's own GITHUB_TOKEN. This workflow
-# deliberately declares no permissions block: a declared permissions block
-# is capped by the repository's configured workflow permissions (read-only
-# on some repositories, which would fail the run at startup), while
-# omitting it inherits the repository default. PAT-based pushes are not
-# affected by token permissions at all.
+# deliberately declares no permissions block, preserving caller inheritance.
+# GITHUB_TOKEN callers need contents: write, and pull-requests: write for PR
+# mode; the reusable workflow cannot elevate its caller's token permissions.
+# PAT-based pushes are not affected by GITHUB_TOKEN permissions. See README
+# for PR-creation policy and downstream event/CI differences between tokens.
 
 env:
   DOTNET_VERSION: "10.0.x"
@@ -46,6 +48,27 @@ on:
         type: string
         required: false
         default: typescript
+      post-update-command:
+        description: >-
+          Optional trusted Bash command in the caller repository root, after all
+          updates and before all builds. Failure stops publication in either mode.
+        type: string
+        required: false
+        default: ''
+      publication-mode:
+        description: >-
+          direct preserves legacy publication; pull-request publishes only the
+          exact validated candidate on a unique run-owned branch, without rebasing.
+        type: string
+        required: false
+        default: direct
+      pull-request-label:
+        description: >-
+          Optional single existing label for pull-request mode. No release intent
+          is inferred. Use letters, digits, dot, underscore, colon, slash or hyphen.
+        type: string
+        required: false
+        default: ''
     secrets:
       PAT_WORKFLOWS:
         required: false
@@ -64,6 +87,38 @@ jobs:
           # so fall back to the workflow's own GITHUB_TOKEN there.
           token: ${{ secrets.PAT_WORKFLOWS || github.token }}
           fetch-depth: 0
+
+      - name: Check publication options and default-branch base
+        id: publication
+        shell: bash
+        env:
+          PUBLICATION_MODE: ${{ inputs.publication-mode }}
+          PR_LABEL: ${{ inputs.pull-request-label }}
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$PUBLICATION_MODE" in
+            direct)
+              test -z "$PR_LABEL" || { echo "Labels require pull-request mode" >&2; exit 1; }
+              exit 0 ;;
+            pull-request) ;;
+            *) echo "Invalid publication-mode" >&2; exit 1 ;;
+          esac
+          export LC_ALL=C
+          if [[ -n "$PR_LABEL" && ! "$PR_LABEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*$ ]]; then
+            echo "Invalid pull-request-label" >&2; exit 1
+          fi
+          [[ "$CALLER_REPOSITORY" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]
+          base_branch=$(gh api "repos/$CALLER_REPOSITORY" --jq .default_branch)
+          git check-ref-format "refs/heads/$base_branch"
+          base=$(git rev-parse HEAD)
+          remote_base=$(git ls-remote --exit-code origin "refs/heads/$base_branch")
+          test "$remote_base" = "$base"$'\t'"refs/heads/$base_branch"
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
       - name: Detect package ecosystems in repo root
         id: detect
@@ -200,7 +255,7 @@ jobs:
           # exclusions while preserving TypeScript in the comma-delimited input, or - preferably,
           # since the bootstrap bot overwrites the caller workflow with the canonical template -
           # list them one-per-line in .github/update-packages-npm-exclusions in the target repo.
-          exclusions="${{ inputs.npm-package-exclusions }}"
+          exclusions="$NPM_PACKAGE_EXCLUSIONS"
           exclusions_file=".github/update-packages-npm-exclusions"
           if [ -f "$exclusions_file" ]; then
             file_exclusions=$(paste -sd, "$exclusions_file")
@@ -212,6 +267,7 @@ jobs:
           # GitHub Actions sets CI=true, which makes Yarn Berry default to immutable installs and
           # refuse to write the lockfile changes this step exists to produce.
           YARN_ENABLE_IMMUTABLE_INSTALLS: false
+          NPM_PACKAGE_EXCLUSIONS: ${{ inputs.npm-package-exclusions }}
 
       - name: Update Gradle packages
         if: steps.detect.outputs.update_gradle == 'true'
@@ -221,6 +277,50 @@ jobs:
         if: steps.detect.outputs.update_mix == 'true'
         working-directory: ${{ steps.detect.outputs.mix_dir }}
         run: mix deps.update --all
+
+      - name: Run post-update command
+        if: inputs.post-update-command != ''
+        shell: bash
+        env:
+          POST_UPDATE_COMMAND: ${{ inputs.post-update-command }}
+        run: |
+          set -euo pipefail
+          bash --noprofile --norc -euo pipefail -c "$POST_UPDATE_COMMAND"
+
+      - name: Freeze pull request candidate before builds
+        id: candidate
+        if: inputs.publication-mode == 'pull-request'
+        shell: bash
+        env:
+          EXPECTED_BASE: ${{ steps.publication.outputs.base }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          test "$head" = "$EXPECTED_BASE"
+          # Only already-tracked updater/hook changes are eligible. New files need
+          # a separately reviewed commit first; even explicitly staged additions fail.
+          additions=$(git diff --cached --name-only --diff-filter=A --no-renames)
+          test -z "$additions"
+          git add --update
+          if git diff --cached --quiet; then
+            echo "No package updates found. Nothing to publish."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: update packages"
+          parent=$(git rev-parse HEAD^)
+          test "$parent" = "$EXPECTED_BASE"
+          git diff --exit-code
+          git diff --cached --exit-code
+          commit=$(git rev-parse HEAD)
+          tree=$(git rev-parse 'HEAD^{tree}')
+          {
+            echo "commit=$commit"
+            echo "tree=$tree"
+            echo "changed=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build .NET
         if: steps.detect.outputs.update_nuget == 'true'
@@ -239,7 +339,91 @@ jobs:
         working-directory: ${{ steps.detect.outputs.mix_dir }}
         run: mix compile
 
+      - name: Publish validated pull request
+        if: success() && inputs.publication-mode == 'pull-request' && steps.candidate.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          BASE_BRANCH: ${{ steps.publication.outputs.base_branch }}
+          EXPECTED_BASE: ${{ steps.publication.outputs.base }}
+          CANDIDATE_COMMIT: ${{ steps.candidate.outputs.commit }}
+          CANDIDATE_TREE: ${{ steps.candidate.outputs.tree }}
+          PR_LABEL: ${{ inputs.pull-request-label }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          [[ "$CALLER_REPOSITORY" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]
+          [[ -z "$PR_LABEL" || "$PR_LABEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*$ ]]
+          branch="automation/package-update-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          git check-ref-format "refs/heads/$branch"
+          git check-ref-format "refs/heads/$BASE_BRANCH"
+          test "$branch" != "$BASE_BRANCH"
+
+          check_candidate_and_base() {
+            head=$(git rev-parse HEAD)
+            tree=$(git rev-parse 'HEAD^{tree}')
+            parent=$(git rev-parse HEAD^)
+            test "$head" = "$CANDIDATE_COMMIT"
+            test "$tree" = "$CANDIDATE_TREE"
+            test "$parent" = "$EXPECTED_BASE"
+            # A build changing tracked files/index invalidates validation. Untracked
+            # and ignored build output is never staged or included in the commit.
+            git diff --exit-code
+            git diff --cached --exit-code
+            remote_default=$(gh api "repos/$CALLER_REPOSITORY" --jq .default_branch)
+            test "$remote_default" = "$BASE_BRANCH"
+            remote_base=$(git ls-remote --exit-code origin "refs/heads/$BASE_BRANCH")
+            test "$remote_base" = "$EXPECTED_BASE"$'\t'"refs/heads/$BASE_BRANCH"
+          }
+          check_remote_candidate() {
+            remote_candidate=$(git ls-remote --exit-code origin "refs/heads/$branch")
+            test "$remote_candidate" = "$CANDIDATE_COMMIT"$'\t'"refs/heads/$branch"
+          }
+          check_candidate_and_base
+          # Never reuse a branch, including on reruns (which have a new attempt).
+          existing_branch=$(git ls-remote origin "refs/heads/$branch")
+          test -z "$existing_branch"
+          # POST is expected-ABSENT creation, not an update: GitHub rejects an
+          # existing ref (422), including one created after the advisory lookup.
+          # Never PATCH, force, or retry. A failed response may still have created
+          # the ref, and later failures can leave our reservation at the base.
+          trap 'status=$?; if [ "$status" -ne 0 ]; then printf "::error::Reservation/publication failed for %s branch %s; a branch (possibly base-only) or PR may remain. Inspect ownership before manual recovery; no automatic cleanup or retry.\n" "$CALLER_REPOSITORY" "$branch" >&2; fi' EXIT
+          reserved_ref=$(gh api --method POST "repos/$CALLER_REPOSITORY/git/refs" \
+            -f "ref=refs/heads/$branch" -f "sha=$EXPECTED_BASE" \
+            --jq '[.ref, .object.sha, .object.type] | @tsv')
+          expected_ref="refs/heads/$branch"$'\t'"$EXPECTED_BASE"$'\tcommit'
+          test "$reserved_ref" = "$expected_ref"
+          # Successful exclusive creation plus API/Git readbacks establishes our
+          # reservation before a normal, nonforce push of the tested commit.
+          owned_ref=$(gh api "repos/$CALLER_REPOSITORY/git/ref/heads/$branch" \
+            --jq '[.ref, .object.sha, .object.type] | @tsv')
+          test "$owned_ref" = "$expected_ref"
+          remote_owned=$(git ls-remote --exit-code origin "refs/heads/$branch")
+          test "$remote_owned" = "$EXPECTED_BASE"$'\t'"refs/heads/$branch"
+          check_candidate_and_base
+          git push origin "$CANDIDATE_COMMIT:refs/heads/$branch"
+          check_remote_candidate
+          check_candidate_and_base
+
+          # Explicit head/base avoids gh's interactive branch push/fork behavior.
+          # No draft, auto-merge, implicit release label, or retry on API failure.
+          pr_args=(--repo "$CALLER_REPOSITORY" --base "$BASE_BRANCH"
+            --head "$branch" --title "chore: update packages"
+            --body $'## Changed\n\n- Update dependency versions and required runtime compatibility settings.')
+          if [ -n "$PR_LABEL" ]; then pr_args+=(--label "$PR_LABEL"); fi
+          pr_url=$(gh pr create "${pr_args[@]}")
+          check_remote_candidate
+          check_candidate_and_base
+          pr_refs=$(gh pr view "$pr_url" --repo "$CALLER_REPOSITORY" \
+            --json headRefOid,baseRefOid,headRefName,baseRefName \
+            --jq '[.headRefOid, .baseRefOid, .headRefName, .baseRefName] | @tsv')
+          test "$pr_refs" = "$CANDIDATE_COMMIT"$'\t'"$EXPECTED_BASE"$'\t'"$branch"$'\t'"$BASE_BRANCH"
+          echo "$pr_url"
+
       - name: Commit and push changes
+        if: inputs.publication-mode == 'direct'
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
         run: |

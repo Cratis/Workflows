@@ -12,8 +12,10 @@ name: Bootstrap Common Workflows
 #   • Already-bootstrapped: updates wrappers if content has changed
 #   • Already up-to-date:   skips processing
 #
-# Triggered automatically on push to main whenever the reusable workflows
-# or the bootstrap script changes.  Can also be run manually via workflow_dispatch.
+# Triggered automatically on push to main when the watched workflows, CodeQL
+# config or bootstrap script change. Package-update implementation changes do
+# not change the canonical wrapper and must not trigger organization-wide writes.
+# Can also be run manually via workflow_dispatch.
 #
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
@@ -28,7 +30,6 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/cleanup-pr-artifacts.yml"
-      - ".github/workflows/update-packages.yml"
       - ".github/workflows/auto-approve-publish-deployments.yml"
       - ".github/codeql/codeql-config.yml"
       - ".github/scripts/bootstrap-common-workflows.sh"
@@ -47,7 +48,9 @@ env:
   # Chronicle.Wolverine - its reviewed workflow composition (test_reviewed_workflow_composition.py)
   #   requires full-SHA pins, the declared secret only, extra-allowed VERSIONS, and the
   #   manual reviewed-update path; the bootstrap's @main rewrites violate it
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine"]'
+  # Stage - owns its reviewed package-update/kernel guard workflow and pin;
+  #   bootstrap must not overwrite it
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage"]'
 
 jobs:
   bootstrap:
