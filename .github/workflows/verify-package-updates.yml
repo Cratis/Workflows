@@ -1,0 +1,45 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Package Updates
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/update-packages.yml
+      - .github/workflows/bootstrap-common-workflows.yml
+      - .github/workflows/verify-package-updates.yml
+      - .github/scripts/tests/update-packages.test.py
+      - .github/scripts/tests/bootstrap-package-update-safety.test.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/update-packages.yml
+      - .github/workflows/bootstrap-common-workflows.yml
+      - .github/workflows/verify-package-updates.yml
+      - .github/scripts/tests/update-packages.test.py
+      - .github/scripts/tests/bootstrap-package-update-safety.test.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out workflow and offline tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify package-update rollout cannot trigger organization-wide writes
+        env:
+          PACKAGE_UPDATE_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 .github/scripts/tests/bootstrap-package-update-safety.test.py
+      - name: Exercise inline shell with local Git and stub toolchains
+        # No live package updates, GitHub token, gh calls, or dependency installation.
+        run: python3 .github/scripts/tests/update-packages.test.py
