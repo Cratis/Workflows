@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "parameters": "--outdated --include-prerelease",
+  "sources": [
+    "https://api.nuget.org/v3/index.json"
+  ],
+  "projects": [
+    {
+      "path": "Preview.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0",
+          "topLevelPackages": [
+            {
+              "id": "Microsoft.Extensions.Http",
+              "requestedVersion": "11.0.0-preview.1.26216.1",
+              "resolvedVersion": "11.0.0-preview.2.26159.112",
+              "latestVersion": "11.0.0-rc.1.26425.128"
+            },
+            {
+              "id": "Newtonsoft.Json",
+              "requestedVersion": "12.0.1",
+              "resolvedVersion": "12.0.1",
+              "latestVersion": "14.0.1-beta2"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

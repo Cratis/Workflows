@@ -48,6 +48,13 @@ on:
         type: string
         required: false
         default: typescript
+      nuget-package-exclusions:
+        description: >-
+          Comma-delimited NuGet package IDs that dotnet package update must leave
+          unchanged. Matching is exact and case-insensitive; defaults to none.
+        type: string
+        required: false
+        default: ''
       post-update-command:
         description: >-
           Optional trusted Bash command in the caller repository root, after all
@@ -213,9 +220,124 @@ jobs:
 
       - name: Update NuGet packages
         if: steps.detect.outputs.update_nuget == 'true'
+        shell: bash
+        env:
+          NUGET_PACKAGE_EXCLUSIONS: ${{ inputs.nuget-package-exclusions }}
         run: |
+          set -euo pipefail
+          packages=()
+          # A whitespace-only input means no exclusions: keep the default path.
+          if [[ -z "${NUGET_PACKAGE_EXCLUSIONS//[[:space:]]/}" ]]; then
+            NUGET_PACKAGE_EXCLUSIONS=''
+          fi
+          if [[ -n "$NUGET_PACKAGE_EXCLUSIONS" ]]; then
+            if [[ "$NUGET_PACKAGE_EXCLUSIONS" == *$'\n'* || "$NUGET_PACKAGE_EXCLUSIONS" == *$'\r'* ]]; then
+              printf 'Invalid NuGet exclusion list\n' >&2
+              exit 1
+            fi
+            # Use the SDK's resolved top-level references, not XML text: this includes
+            # project references whose versions live in Directory.Packages.props.
+            extract_ids() {
+              # Slurp requires exactly one document: jq -r alone accepts empty output.
+              jq -s -r --arg mode "$1" '
+                def valid:
+                  .version == 1 and (.projects | type == "array") and
+                  (.problems == null or ((.problems | type == "array") and
+                    all(.problems[]; .level != "error"))) and
+                  all(.projects[]; ((.frameworks // []) | type == "array") and
+                    all((.frameworks // [])[]; ((.topLevelPackages // []) | type == "array") and
+                      all((.topLevelPackages // [])[];
+                        (.id | type == "string") and
+                        (.id | test("^[A-Za-z0-9][A-Za-z0-9_.-]*$")) and
+                        (.requestedVersion | type == "string"))));
+                if length == 1 and (.[0] | valid) then
+                  [.[0].projects[] | (.frameworks // [])[] | (.topLevelPackages // [])[]
+                    | select($mode == "all" or (.requestedVersion | contains("-"))) | .id]
+                  | unique_by(ascii_downcase) | .[]
+                else error("Unexpected dotnet package list JSON or package listing error") end
+              '
+            }
+            inventory=$(dotnet package list --format json)
+            outdated=$(dotnet package list --outdated --format json)
+            referenced_ids=$(extract_ids all <<< "$inventory")
+            outdated_ids=$(extract_ids all <<< "$outdated")
+            # The SDK updater considers prereleases for references already on a
+            # prerelease; the default outdated listing does not. Do not select
+            # prerelease-only candidates for otherwise stable references.
+            prerelease_references=$(extract_ids prerelease <<< "$inventory")
+            if [[ -n "$prerelease_references" ]]; then
+              prerelease_outdated=$(dotnet package list --outdated --include-prerelease --format json)
+              prerelease_ids=$(extract_ids prerelease <<< "$prerelease_outdated")
+              outdated_ids="${outdated_ids}${outdated_ids:+$'\n'}${prerelease_ids}"
+            fi
+
+            export LC_ALL=C
+            shopt -s extglob
+            contains_id() { [[ $'\n'"$2"$'\n' == *$'\n'"$1"$'\n'* ]]; }
+            referenced_keys=''
+            excluded_keys=''
+            while IFS= read -r id; do
+              if [[ -n "$id" ]]; then
+                key=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
+                referenced_keys="${referenced_keys}${key}"$'\n'
+              fi
+            done <<< "$referenced_ids"
+            IFS=, read -ra requested <<< "$NUGET_PACKAGE_EXCLUSIONS"
+            for id in "${requested[@]}"; do
+              id="${id##+([[:space:]])}"
+              id="${id%%+([[:space:]])}"
+              if [[ -z "$id" ]]; then continue; fi
+              if [[ ! "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+                printf 'Invalid NuGet exclusion ID\n' >&2
+                exit 1
+              fi
+              key=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
+              excluded_keys="${excluded_keys}${key}"$'\n'
+              if ! contains_id "$key" "$referenced_keys"; then
+                printf "::warning::NuGet exclusion '%s' is not referenced\n" "$id"
+              fi
+            done
+            selected_keys=''
+            while IFS= read -r id; do
+              if [[ -z "$id" ]]; then continue; fi
+              key=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
+              if ! contains_id "$key" "$referenced_keys"; then
+                printf "Outdated NuGet package '%s' is absent from the reference inventory\n" "$id" >&2
+                exit 1
+              fi
+              if ! contains_id "$key" "$excluded_keys" && ! contains_id "$key" "$selected_keys"; then
+                packages+=("$id")
+                selected_keys="${selected_keys}${key}"$'\n'
+              fi
+            done <<< "$outdated_ids"
+            if [[ ${#packages[@]} -eq 0 ]]; then
+              echo "No eligible NuGet updates available; continuing."
+              exit 0
+            fi
+            # Explicit-ID updates silently skip a package when its requested
+            # versions differ between TFMs in one project, even if other IDs
+            # update successfully. Reject that case before writing any changes.
+            eligible_ids=$(printf '%s\n' "${packages[@]}")
+            if ! jq -e --arg ids "$eligible_ids" '
+              ($ids | split("\n") | map(ascii_downcase)) as $eligible
+              | [.projects[] | .path as $path | (.frameworks // [])[]
+                  | (.topLevelPackages // [])[]
+                  | select((.id | ascii_downcase) as $id | $eligible | index($id))
+                  | {path: $path, id: (.id | ascii_downcase), version: .requestedVersion}]
+              | group_by([.path, .id])
+              | all(.[]; ([.[].version] | unique | length) == 1)
+            ' <<< "$inventory" >/dev/null; then
+              echo 'Eligible NuGet package has different requested versions across target frameworks; refusing partial update.' >&2
+              exit 1
+            fi
+          fi
+
           set +e
-          output=$(dotnet package update 2>&1)
+          if [[ -n "$NUGET_PACKAGE_EXCLUSIONS" ]]; then
+            output=$(dotnet package update "${packages[@]}" 2>&1)
+          else
+            output=$(dotnet package update 2>&1)
+          fi
           exit_code=$?
           set -e
 
@@ -225,7 +347,7 @@ jobs:
             exit 0
           fi
 
-          if [ $exit_code -eq 2 ] && echo "$output" | grep -q "All packages are up to date"; then
+          if [ $exit_code -eq 2 ] && [[ -z "$NUGET_PACKAGE_EXCLUSIONS" ]] && [[ "$output" == *"All packages are up to date"* ]]; then
             echo "No NuGet updates available; continuing."
             exit 0
           fi
@@ -239,7 +361,9 @@ jobs:
             # NU1109 downgrade conflict, seemingly from the command updating one centrally-pinned
             # package without correctly co-updating another package that's transitively pinned to
             # it (e.g. CentralPackageTransitivePinningEnabled). Neither is actionable here, and
-            # since no changes are written to disk in either case, skipping is safe.
+            # since no changes are written to disk in either case, skipping is safe
+            # with or without exclusions. Divergent per-TFM versions of eligible
+            # references are rejected above before invoking the filtered updater.
             echo "dotnet package update could not produce a consistent result (exit 3); skipping NuGet update for this run."
             exit 0
           fi
