@@ -137,7 +137,10 @@ else:
     command = " ".join([name, *args])
     if command == os.environ.get("FAIL_NATIVE"):
         sys.exit(23)
-    update = command in ("dotnet package update", "npx npm-check-updates -u -w -x typescript",
+    if name == "dotnet" and args[:2] == ["package", "list"]:
+        print(os.environ["DOTNET_OUTDATED" if "--outdated" in args else "DOTNET_INVENTORY"])
+        sys.exit(0)
+    update = (name == "dotnet" and args[:2] == ["package", "update"]) or command in ("npx npm-check-updates -u -w -x typescript",
                          "gradle useLatestVersions --no-daemon", "mix deps.update --all")
     if update and os.environ.get("NO_UPDATES") != "1":
         with open("dependencies.txt", "a") as dependencies:
@@ -175,6 +178,7 @@ class UpdatePackagesTests(unittest.TestCase):
             "REMOTE": str(self.remote), "GH_TOKEN": "offline-placeholder",
             "CALLER_REPOSITORY": "Cratis/Fixture", "PUBLICATION_MODE": "pull-request", "PR_LABEL": "",
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "NPM_PACKAGE_EXCLUSIONS": "typescript",
+            "NUGET_PACKAGE_EXCLUSIONS": "",
         }
         for name in ["git", "gh", "dotnet", "yarn", "npx", "gradle", "mix"]:
             path = self.bin / name
@@ -272,7 +276,8 @@ class UpdatePackagesTests(unittest.TestCase):
         inputs = SOURCE.split("    inputs:\n", 1)[1].split("    secrets:", 1)[0]
         for name, default in [("publication-mode", "direct"), ("post-update-command", "''"),
                               ("pull-request-label", "''"), ("runs-on", "ubuntu-latest"),
-                              ("npm-package-exclusions", "typescript")]:
+                              ("npm-package-exclusions", "typescript"),
+                              ("nuget-package-exclusions", "''")]:
             # Input properties are more deeply indented; use the next top-level input.
             block = re.split(r"\n      [a-z]", inputs.split(f"      {name}:\n", 1)[1])[0]
             self.assertIn(f"default: {default}", block)
@@ -285,6 +290,79 @@ class UpdatePackagesTests(unittest.TestCase):
             with self.subTest(step=name):
                 result = subprocess.run(["/bin/bash", "-n"], input=shell(name), text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def nuget_fixture(self):
+        # Same central package in both projects; a second project-level package.
+        def listing(projects):
+            return json.dumps({"version": 1, "projects": [
+                {"path": name, "frameworks": [{"framework": "net10.0",
+                 "topLevelPackages": [{"id": package} for package in packages]}]}
+                for name, packages in projects]})
+        self.env["DOTNET_INVENTORY"] = listing([
+            ("Central.csproj", ["Cratis.Fundamentals", "Newtonsoft.Json", "Already.Current"]),
+            ("Project.csproj", ["cratis.fundamentals", "Serilog"]),
+        ])
+        self.env["DOTNET_OUTDATED"] = listing([
+            ("Central.csproj", ["Cratis.Fundamentals", "Newtonsoft.Json"]),
+            ("Project.csproj", ["cratis.fundamentals", "Serilog"]),
+        ])
+
+    def test_nuget_exclusion_uses_exact_case_insensitive_ids_in_cpm_and_projects(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "  cRaTiS.Fundamentals  ,  missing.package , ALREADY.current,"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual([call for call in self.calls("dotnet") if call[1:3] == ["package", "update"]],
+                         [["dotnet", "package", "update", "Newtonsoft.Json", "Serilog"]])
+        self.assertIn("::warning::NuGet exclusion 'missing.package' is not referenced", self.last_result.stdout)
+        self.assertNotIn("ALREADY.current' is not referenced", self.last_result.stdout)
+        self.assertNotIn("not referenced", self.last_result.stderr)
+
+    def test_nuget_default_retains_unfiltered_update_without_listing(self):
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "update"]])
+
+    def test_nuget_all_outdated_packages_excluded_is_a_noop(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Cratis.Fundamentals,Serilog,Newtonsoft.Json"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+
+    def test_nuget_broken_inventory_fails_before_updates(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        self.env["DOTNET_OUTDATED"] = '{"version":1,"projects":"invalid"}'
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+
+    def test_nuget_update_failure_does_not_publish_partial_updates(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Cratis.Fundamentals"
+        self.env["FAIL_NATIVE"] = "dotnet package update Newtonsoft.Json Serilog"
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertEqual([call for call in self.calls("dotnet") if call[1:3] == ["package", "update"]],
+                         [["dotnet", "package", "update", "Newtonsoft.Json", "Serilog"]])
+
+    def test_nuget_outdated_id_missing_from_reference_inventory_fails_closed(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Cratis.Fundamentals"
+        self.env["DOTNET_OUTDATED"] = json.dumps({"version": 1, "projects": [
+            {"path": "Project.csproj", "frameworks": [{"framework": "net10.0",
+             "topLevelPackages": [{"id": "Not.Referenced"}]}]}]})
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+
+    def test_nuget_invalid_exclusion_does_not_update_anything(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Cratis.Fundamentals, --help"
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+
+    def test_nuget_list_failure_does_not_publish_partial_updates(self):
+        self.nuget_fixture()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        self.env["FAIL_NATIVE"] = "dotnet package list --outdated --format json"
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
 
     def test_direct_default_preflight_has_no_git_or_api_effects(self):
         self.env["PUBLICATION_MODE"] = "direct"
