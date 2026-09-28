@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "parameters": "--outdated",
+  "sources": [
+    "https://api.nuget.org/v3/index.json"
+  ],
+  "projects": [
+    {
+      "path": "Current.csproj"
+    }
+  ]
+}

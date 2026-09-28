@@ -19,7 +19,7 @@ Nothing opts a repository into PRs or a release policy automatically.
 | `pull-request-label` | Empty (no label) | One existing, caller-chosen label, only in `pull-request` mode. Must match `[a-zA-Z0-9][a-zA-Z0-9_.:/-]*`. No comma lists, whitespace, or implicit release intent. |
 | `runs-on` | `ubuntu-latest` | Existing runner-label input; private callers should retain their approved self-hosted label. |
 | `npm-package-exclusions` | `typescript` | Existing comma-delimited exclusions, supplemented by the caller's `.github/update-packages-npm-exclusions`. |
-| `nuget-package-exclusions` | Empty (none) | Comma-delimited exact NuGet package IDs, matched case-insensitively after trimming whitespace. Applies to top-level project references, including centrally managed versions in `Directory.Packages.props`; an ID not referenced by the caller produces a warning, not a failure. |
+| `nuget-package-exclusions` | Empty (none) | Comma-delimited exact NuGet package IDs, matched case-insensitively after trimming whitespace. Applies to top-level project references, including centrally managed versions in `Directory.Packages.props`; transitive-only IDs warn as not directly referenced (updating a parent can still change transitive versions). Prerelease references retain the updater's prerelease eligibility; stable references do not gain prerelease-only candidates. Invalid/incomplete listings and divergent per-framework versions for eligible packages fail before updating. As with the default path, SDK exit 3 (no changes written) skips NuGet updates for that run. |
 
 An individually approved caller can use this wrapper (replace
 `REVIEWED_COMMIT_SHA` with the reviewed Workflows commit). The script path is an

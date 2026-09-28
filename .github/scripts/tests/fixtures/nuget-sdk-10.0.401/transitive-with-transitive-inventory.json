@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "parameters": "--include-transitive",
+  "projects": [
+    {
+      "path": "Transitive.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0",
+          "topLevelPackages": [
+            {
+              "id": "Serilog.AspNetCore",
+              "requestedVersion": "6.0.0",
+              "resolvedVersion": "6.0.0"
+            }
+          ],
+          "transitivePackages": [
+            {
+              "id": "Microsoft.Extensions.Configuration",
+              "resolvedVersion": "2.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.Configuration.Abstractions",
+              "resolvedVersion": "3.1.8"
+            },
+            {
+              "id": "Microsoft.Extensions.Configuration.Binder",
+              "resolvedVersion": "2.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.DependencyInjection",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.DependencyInjection.Abstractions",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.DependencyModel",
+              "resolvedVersion": "3.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.FileProviders.Abstractions",
+              "resolvedVersion": "3.1.8"
+            },
+            {
+              "id": "Microsoft.Extensions.Hosting.Abstractions",
+              "resolvedVersion": "3.1.8"
+            },
+            {
+              "id": "Microsoft.Extensions.Logging",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.Logging.Abstractions",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.Options",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.Options.ConfigurationExtensions",
+              "resolvedVersion": "2.0.0"
+            },
+            {
+              "id": "Microsoft.Extensions.Primitives",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Serilog",
+              "resolvedVersion": "2.10.0"
+            },
+            {
+              "id": "Serilog.Extensions.Hosting",
+              "resolvedVersion": "5.0.0"
+            },
+            {
+              "id": "Serilog.Extensions.Logging",
+              "resolvedVersion": "3.1.0"
+            },
+            {
+              "id": "Serilog.Formatting.Compact",
+              "resolvedVersion": "1.1.0"
+            },
+            {
+              "id": "Serilog.Settings.Configuration",
+              "resolvedVersion": "3.3.0"
+            },
+            {
+              "id": "Serilog.Sinks.Console",
+              "resolvedVersion": "4.0.1"
+            },
+            {
+              "id": "Serilog.Sinks.Debug",
+              "resolvedVersion": "2.0.0"
+            },
+            {
+              "id": "Serilog.Sinks.File",
+              "resolvedVersion": "5.0.0"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

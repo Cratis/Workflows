@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "parameters": "--outdated",
+  "sources": [
+    "https://api.nuget.org/v3/index.json"
+  ],
+  "projects": [
+    {
+      "path": "Multi.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0",
+          "topLevelPackages": [
+            {
+              "id": "Newtonsoft.Json",
+              "requestedVersion": "12.0.1",
+              "resolvedVersion": "12.0.1",
+              "latestVersion": "13.0.4"
+            }
+          ]
+        },
+        {
+          "framework": "net9.0",
+          "topLevelPackages": [
+            {
+              "id": "Newtonsoft.Json",
+              "requestedVersion": "11.0.2",
+              "resolvedVersion": "11.0.2",
+              "latestVersion": "13.0.4"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "parameters": "",
+  "projects": [
+    {
+      "path": "Current.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0"
+        }
+      ]
+    }
+  ]
+}

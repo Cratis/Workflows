@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "problems": [
+    {
+      "text": "Restore failed. Run `dotnet restore` for more details on the issue.",
+      "level": "error"
+    }
+  ]
+}
