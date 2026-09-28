@@ -226,6 +226,10 @@ jobs:
         run: |
           set -euo pipefail
           packages=()
+          # A whitespace-only input means no exclusions: keep the default path.
+          if [[ -z "${NUGET_PACKAGE_EXCLUSIONS//[[:space:]]/}" ]]; then
+            NUGET_PACKAGE_EXCLUSIONS=''
+          fi
           if [[ -n "$NUGET_PACKAGE_EXCLUSIONS" ]]; then
             if [[ "$NUGET_PACKAGE_EXCLUSIONS" == *$'\n'* || "$NUGET_PACKAGE_EXCLUSIONS" == *$'\r'* ]]; then
               printf 'Invalid NuGet exclusion list\n' >&2

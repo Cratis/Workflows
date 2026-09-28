@@ -323,6 +323,11 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assert_step_ok("Update NuGet packages")
         self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "update"]])
 
+    def test_nuget_whitespace_only_exclusions_keep_the_default_update(self):
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "   "
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "update"]])
+
     def test_nuget_all_outdated_packages_excluded_is_a_noop(self):
         self.nuget_fixture()
         self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog,Newtonsoft.Json"
