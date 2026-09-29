@@ -204,15 +204,20 @@ jobs:
           // only the topic path is narrowed for product wording.
           const NOTE_TAIL_CLAIM = new RegExp(`^(?:${NOTE_RESULT})?(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
           const NOTE_TAIL_LOOSE = new RegExp(`^(?:${NOTE_RESULT}|\\s*[:;,.!\u2014\u2013-]\\s*\\S|\\s*\\((?!#)|[\\s:;,.!]*$)`, "i");
-          const PROVENANCE_RESULT = new RegExp(NOTE_START + "(?:" + [
-              // "Reviewed with Anthropic models only (...)": a clause that opens by saying who or what reviewed it.
-              String.raw`review(?:ed)?\s+(?:with|by|using|via)\s+(?:(?:an?|the|two|three|both|only)\s+)?(?:[\w.-]+\s+){0,2}?(?:models?|agents?|providers?)\b`,
-              String.raw`review(?:ed)?\s+(?:with|by|using|via)\s+(?:an?\s+)?${AGENT}`,
+          // A model or agent name may run to a few words ("Claude Code", "GPT-5.5", "Opus 5.5").
+          const AGENT_NAME = String.raw`${AGENT}\b(?:[\s-]+(?:code|opus|sonnet|haiku|pro|max|mini|[\w.]*\d[\w.]*)\b)*`;
+          // "Reviewed with Anthropic models only (...)": a clause that opens by saying who or what reviewed it. In
+          // product wording only the past tense is a claim: "- Review with two models (#5)" names a feature.
+          const provenanceResult = verb => new RegExp(NOTE_START + "(?:" + [
+              String.raw`${verb}\s+(?:with|by|using|via)\s+(?:(?:an?|the|two|three|both|only)\s+)?(?:[\w.-]+\s+){0,2}?(?:models?|agents?|providers?)\b`,
+              String.raw`${verb}\s+(?:with|by|using|via)\s+(?:an?\s+)?${AGENT_NAME}`,
               String.raw`(?:the\s+)?review workflow\s+(?:has\s+|had\s+|also\s+)?(?:(?:passed|failed)${END}`
-                  + String.raw`|passed\s+(?:with|locally|again|twice|cleanly)\b|returned\s+(?:findings|no\s+\w+|nothing|clean|\d+)\b`
+                  + String.raw`|passed\s+with\s+(?:no\s+\w+|\w+\s+findings?)|passed\s+(?:with|locally|again|twice|cleanly)\b|returned\s+(?:findings|no\s+\w+|nothing|clean|\d+)\b`
                   + String.raw`|ran\s+(?:twice|once|again|clean|cleanly|green|locally|successfully|\d+)\b`
                   + String.raw`|found\s+(?:nothing|no\s+\w+|\d+|issues|findings|blockers)\b)`,
           ].join("|") + ")", "i");
+          const PROVENANCE_RESULT = provenanceResult(String.raw`review(?:ed)?`);
+          const PROVENANCE_RESULT_STRICT = provenanceResult("reviewed");
           const CO_AUTHORED = /^\s*(?:(?:[-*+>]|\d{1,9}[.)])\s+)*(?:\*\*|__|\*|_)?\s*co-authored-by:/i;
           const withoutIssues = text => text.replace(/(?:\s*\((?:part of )?#\d+\))+\s*$/, "");
           // A product bullet that ends in an issue reference names a change ("- Cross-provider review (#12)"); it is
@@ -226,7 +231,7 @@ jobs:
               if (CO_AUTHORED.test(line)) {
                   return true;
               }
-              const result = PROVENANCE_RESULT.exec(line);
+              const result = (strict ? PROVENANCE_RESULT_STRICT : PROVENANCE_RESULT).exec(line);
               if (result && (!strict || NOTE_TAIL_CLAIM.test(withoutIssues(line.slice(result.index + result[0].length))))) {
                   return true;
               }

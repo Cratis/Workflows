@@ -93,6 +93,14 @@ test("a product bullet naming a review feature with its delivered issue passes; 
     assert.equal(result.status, 1);
 });
 
+test("a bullet naming a review feature in the present tense passes; past-tense claims with multi-word model names fail", () => {
+    passes("## Added\n\n- Review with two models (#5)\n- Review using multiple providers (#6)\n- Review with Codex (#7)\n- `review` prompt: review with Claude (#8)\n");
+    for (const bullet of ["- Reviewed with Claude Code (#5)", "- Reviewed by GPT-5.5 (#5)", "- Reviewed by Opus 5.5 (#5)", "- The review workflow passed with no findings (#5)"]) {
+        const result = run(`## Changed\n\n- Real change (#2)\n${bullet}\n`);
+        assert.equal(result.status, 1, bullet);
+    }
+});
+
 test("an outright review result or provenance claim in a bullet fails even when it ends in an issue reference", () => {
     for (const bullet of ["- The review workflow passed (#5)", "- Reviewed by Claude (#5)", "- Reviewed with Anthropic models only (#5)"]) {
         const result = run(`## Changed\n\n- Real change (#2)\n${bullet}\n`);
