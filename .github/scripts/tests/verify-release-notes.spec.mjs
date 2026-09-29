@@ -87,6 +87,12 @@ test("node is set up with the pinned setup-node before the program runs", () => 
     assert(readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8").includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"), "same SHA as the program-test workflow");
 });
 
+test("a product bullet naming a review feature with its delivered issue passes; a result word before the issue fails", () => {
+    passes("## Added\n\n- Cross-provider review (#12)\n- Same-provider review (#13)\n- Opus-only review (#14)\n- Review workflow: cross-provider review (#15)\n");
+    const result = run("## Changed\n\n- Real change (#2)\n- Cross-provider review pending (#3)\n");
+    assert.equal(result.status, 1);
+});
+
 test("product bullets saying a review is required, requested or only applies pass", () => {
     passes("## Changed\n\n- Cross-provider review is required (#4)\n- A same-provider review is requested for drafts (#5)\n");
 });

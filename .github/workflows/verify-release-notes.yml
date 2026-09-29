@@ -212,20 +212,27 @@ jobs:
           ].join("|") + ")", "i");
           const CO_AUTHORED = /^\s*(?:(?:[-*+>]|\d{1,9}[.)])\s+)*(?:\*\*|__|\*|_)?\s*co-authored-by:/i;
           const withoutIssues = text => text.replace(/(?:\s*\((?:part of )?#\d+\))+\s*$/, "");
+          // A product bullet that ends in an issue reference names a change ("- Cross-provider review (#12)"); it is
+          // only a note when a result word precedes the reference ("- Cross-provider review pending (#3)").
+          const NOTE_TAIL_STRICT_RESULT = new RegExp(`^(?:${NOTE_RESULT_STRICT})(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
+          const strictTail = raw => {
+              const tail = withoutIssues(raw);
+              return (tail === raw ? NOTE_TAIL_STRICT : NOTE_TAIL_STRICT_RESULT).test(tail);
+          };
           const provenance = (line, strict) => {
               if (CO_AUTHORED.test(line)) {
                   return true;
               }
               const result = PROVENANCE_RESULT.exec(line);
-              if (result && (!strict || NOTE_TAIL_STRICT.test(withoutIssues(line.slice(result.index + result[0].length))))) {
+              if (result && (!strict || strictTail(line.slice(result.index + result[0].length)))) {
                   return true;
               }
               const topic = PROVENANCE_TOPIC.exec(line);
               if (!topic) {
                   return false;
               }
-              const tail = withoutIssues(line.slice(topic.index + topic[0].length));
-              return (strict ? NOTE_TAIL_STRICT : NOTE_TAIL_LOOSE).test(tail);
+              const raw = line.slice(topic.index + topic[0].length);
+              return strict ? strictTail(raw) : NOTE_TAIL_LOOSE.test(withoutIssues(raw));
           };
           const TRANSCRIPT = /<summary>\s*original prompt\s*<\/summary>|^\s*(?:#{1,6}\s+|\*\*|__)?original prompt(?:\*\*|__)?\s*:?\s*$|\blet copilot coding agent\b|\bcopilot coding agent\s+(?:tips|settings|set things up)|\bfirewall rules blocked me\b/i;
           const INLINE_LINK = /\]\(\s*<?([^)\s>]+)/g;
