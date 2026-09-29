@@ -407,6 +407,42 @@ The common workflow bootstrap also propagates **`.github/codeql/codeql-config.ym
 
 ---
 
+## Verifying release intent and release notes
+
+Two pull-request gates run in releasing repositories through thin callers that hold no logic:
+
+- **`verify-release-intent.yml`** (called by each repository's `verify-semver-label.yml`) requires exactly one of `major`, `minor`, `patch` or `no-release`.
+- **`verify-release-notes.yml`** checks the pull request description, because [release-action](https://github.com/Cratis/release-action) publishes it verbatim as the GitHub release and closes every issue written as `(#n)` outside code.
+
+The release-notes gate checks release-bound pull requests only: those into the default branch that carry exactly one of `major`, `minor` or `patch`. A pull request with no release label yet, `no-release`, more than one release label, a Dependabot pull request, or one into another base passes with a notice, and the check re-runs when a release label is added or the description is edited. For a release-bound pull request it enforces the release-note contract:
+
+- An optional summary, first: either a short `## Summary` section of prose or one lead paragraph without a heading, not both. Then only `## Added`, `## Changed`, `## Fixed`, `## Removed`, `## Security` and `## Deprecated`, in that order, each once and only when it has bullets: prose or a code example alone under a section, such as a `None.` filler, fails, and so does a bullet that only says `None`, `N/A` or `Nothing` (also in bold or italics, with closing punctuation), which is a filler and not a change, so a section holding only such bullets is a section without bullets. `###` sub-headings may group bullets inside a section (there even `### Added` is only a sub-heading; before or between sections a `###` named like a section fails as a wrong-level section).
+- A delivered issue is `(#n)` at the end of its bullet (only more issue references, including `(part of #n)`, `(see #n)` and `(Cratis/Repo#n)`, closing emphasis, `<br>` and sentence punctuation may follow; a `:` may introduce nested bullets). Write one `(#n)` per issue: `(#56) (#57)`, never `(#56, #57)`, which closes nothing. `(part of #n)` or `see #n` keeps an issue open, and `Cratis/Repo#n` names another repository. `Closes`, `Fixes`, `Refs` and the other closing or linking keywords never appear, with `#n` or an issue URL, also when wrapped in bold, italics or a link (`**Closes** #n`, `Closes [#n](url)`, `[Closes #n](url)`, and `[Closes](url)` where the link starts a clause). A `(#n)` in the summary, in a heading, in the middle of a bullet or inside an HTML comment fails because release-action would still close it. For a `(#n)` in the middle of a bullet the error quotes the text that follows it (`(#12)` is followed by `, see #11 ...`) and asks for that text to move before the `(#n)`.
+- No Overview, Test plan, Verification, Notes or other headings (also written as `<h2>`, `<b>`, `<i>`, `*italic*` or `<summary>`, which may span lines), no review, verification, test-result or provenance notes (which agent or model wrote it, a stand-alone `Reviewed by` line, CI results), no relative links, no template placeholders, no unclosed `<!--` and no Copilot "Original prompt" transcripts. Headings are checked like any other line for keywords, `(#n)`, relative links, placeholders and provenance. Provenance is recognised at the start of a clause (`Reviewed with a cross-provider review.`, `Review: Opus-only review`, `The review workflow passed.`, `Co-Authored-By:`); inside a bullet, a `## Summary` or the lead paragraph the note must also end the clause (`- Cross-provider review pending (#3)`), and `Reviewed by ...` is not read there at all (`- Reviewed by status is now shown on the dashboard (#4)` passes), so a bullet that merely mentions review or validation as a product change, such as `- Validation: rules now apply to commands (#3)` or `- Adds same-provider review routing to the review workflow (#3)`, passes. Reviewer-facing information goes in a pull request comment.
+
+Fenced code and inline code are exempt. Closed HTML comments are not shown on the release page, so the heading, keyword, link and placeholder rules ignore them, but a `(#n)` inside a comment still closes the issue and fails, so never put issue references in comments. Each violation is reported as its own error, naming the rule, the offending line and the fix. Whether a summary states a cohesive theme, whether a bullet is user-facing and whether an issue number exists cannot be decided from text; reviewers keep those.
+
+A repository calls the gate with a job named `release-notes`, so the check reads `release-notes / verify` and does not collide with other `verify / verify` gates. The caller runs on `opened`, `edited`, `reopened`, `synchronize`, `labeled`, `unlabeled` and `ready_for_review`:
+
+```yaml
+jobs:
+  release-notes:
+    uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main
+```
+
+The optional `runs-on` input (default `ubuntu-latest`) names the runner label, as in `verify-no-work-records.yml`; a caller in a private repository passes its self-hosted scale-set label so the gate does not use billed GitHub-hosted minutes:
+
+```yaml
+  release-notes:
+    uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main
+    with:
+      runs-on: cratis-arc
+```
+
+The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including real release bodies.
+
+---
+
 ## Workflows in this repository
 
 ### `cleanup-pr-artifacts.yml`

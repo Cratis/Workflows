@@ -1,0 +1,38 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Release Notes Program
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/verify-release-notes.yml
+      - .github/workflows/verify-release-notes-program.yml
+      - .github/scripts/tests/verify-release-notes.spec.mjs
+      - .github/scripts/tests/fixtures/release-notes/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/verify-release-notes.yml
+      - .github/workflows/verify-release-notes-program.yml
+      - .github/scripts/tests/verify-release-notes.spec.mjs
+      - .github/scripts/tests/fixtures/release-notes/**
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out workflow and offline tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Exercise the actual inline program against real release bodies
+        # No token, no GitHub API calls, no dependency installation.
+        run: node --test .github/scripts/tests/verify-release-notes.spec.mjs
