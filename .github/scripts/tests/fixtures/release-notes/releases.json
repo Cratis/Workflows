@@ -1,0 +1,167 @@
+[
+ {
+  "repo": "AuthProxy",
+  "tag": "v2.6.3",
+  "body": "# Summary\n\nThe Vite build still pointed at `../Ingress/wwwroot` — a project that no longer exists after the rename to AuthProxy — so `npm run build` never populated `Source/AuthProxy/wwwroot`. The frontend was absent from the published container image, and the publish pipeline's frontend artifact was silently empty (`upload-artifact` defaults to `if-no-files-found: warn`), which then broke the `dotnet-publish` step that downloads it.\n\n## Fixed\n\n- The React frontend is now built into the AuthProxy web root and bundled into the published image, instead of being written to a stale `Ingress` path and dropped.\n\n## Changed\n\n- The publish pipeline now fails loudly if the frontend build output is empty, instead of silently shipping an image without the frontend.\n",
+  "passes": false,
+  "rules": [
+   "Section heading level",
+   "Section order"
+  ]
+ },
+ {
+  "repo": "AI",
+  "tag": "v2.0.9",
+  "body": "## Summary\n- merge a project-owned `.cratis/ai/quality-gates.project.json` over the managed gates by gate id\n- fix the hook repository-root fallback, which resolved to `.cratis` instead of the repository\n- document where project facts belong, and why editing the managed gate file loses them\n\n## Why\nCratis/Direct had to patch two managed hook files to make its gates run in the right directories, which mixes project facts into Cratis-owned content: the next managed update either reports drift or discards the repository configuration. With this change a repository states only what differs, in a file the manifest does not own.\n\n## Verification\n- `npm run check` for Harness.Setup, Pi.Plugin and Verification; `npm run verify` and `npm test` for Verification (all pass)\n- `shellcheck --external-sources --severity=style` over every runtime hook script, and `git diff --check`\n- scratch repositories: the root fallback now resolves the repository rather than `.cratis`; an override moves `frontend-lint` from the discovered `Apps/First` to `Apps/Second`; an override naming an unknown gate is reported; an unreadable override leaves the managed gates unchanged",
+  "passes": false,
+  "rules": [
+   "Heading not allowed",
+   "No release notes",
+   "Summary is prose"
+  ]
+ },
+ {
+  "repo": "Direct",
+  "tag": "v1.4.1",
+  "body": "## Summary\n\nFound via live production verification (a port-forwarded session with an injected identity, per the new `.agents/PROJECT.md` debugging section): Settings → LinkedIn returned an HTTP 500 instead of the expected \"not configured\" state.\n\n## Root cause\n\n`LinkedInOptionsProvider.GetCurrent()` calls `IReadModels.GetInstanceById<LinkedInAppCredentials>(...)` for a `[Passive]` read model and correctly checks `is null` for \"nothing recorded\" - matching this project's own documented Chronicle contract. Instead, Chronicle threw `ProjectionDefinitionNotSet`, because `LinkedInAppConfigured` (the event the passive projection is built from) has never been appended anywhere in the store yet - the exact state of this brand-new feature in production right now. Filed upstream as Cratis/Chronicle#3846; existing AI-provider code hits the same passive-read-model pattern but never surfaced this because at least one provider is already configured in production.\n\n## Fixed\n\n- Settings → LinkedIn no longer 500s before the app has ever been configured.\n\n## Test plan\n\n- [x] `dotnet build -c Debug` - zero errors, zero warnings\n- [x] `dotnet test --filter LinkedInOptionsProvider` - 6 passed\n- [ ] Re-verify live against production (same port-forward + injected-identity technique that found the bug) once this deploys",
+  "passes": false,
+  "rules": [
+   "Heading not allowed"
+  ]
+ },
+ {
+  "repo": "Studio",
+  "tag": "v0.95.0",
+  "body": "## Added\n\n- Rule notes on the event model canvas — a fourth sticky-note type capturing a business invariant as a plain sentence, with a Never/Eventually kind switch and the ability to attach it to a read model or a slice (#178)\n- A first deterministic static analysis check over the Screenplay document: flags an event a projection or reaction consumes that nothing in the document produces (#184)\n- A microphone button on the event model canvas toolbar, reusing the existing dictation control (mic toggle, device selection, live volume waveform) from the AI generate dialog (#175)\n- A seed data grid on the event model canvas — add, edit, and remove seed events (event source id, event type, property values) for an event model (#19)\n\n## Notes for reviewers\n\n- Rule notes and seed events are not yet round-tripped through Screenplay export/import — sticky notes (the existing precedent) aren't either, and Screenplay's own language has no concept of a canvas annotation or a per-model seed grid to carry either one. That mapping is separate follow-up work.\n- The microphone button ships the UI affordance only; continuous listening that feeds the modeling agent and triggers creation from speech depends on the MCP server work (#137) and is out of scope here.\n- The seeding editor ships the deterministic grid only; the AI wizard half of #19 (pick event types + a count, generate from a prompt) is out of scope here.\n- The Screenplay analyzer ships one check as a first cut; further checks (unreachable states, projections referencing missing artifacts, contradicting declarations) are follow-up work on the same `ScreenplayStaticAnalyzer` entry point. A canvas-facing \"problems panel\" is a separate, larger effort this change does not attempt — the new `EventModel.AnalysisDiagnostics` query is not yet wired into any UI.",
+  "passes": false,
+  "rules": [
+   "Heading not allowed",
+   "Issue reference position"
+  ]
+ },
+ {
+  "repo": "Chronicle",
+  "tag": "v15.25.5",
+  "body": "Implements the read model hookup for testing scenarios as described in #3101.\r\n\r\n## Changes\r\n\r\n- Add `ReadModelsForTesting` implementing `IReadModels` with registry-based `GetInstanceById` interception\r\n- Add `ReadModelNotRegistered` exception for unregistered read model lookups\r\n- Add `ReadModel()` method on `ReadModelSourceGivenBuilder` for pre-seeding read model instances\r\n- Add `ForEventSourceId()` method on `ReadModelScenarioGivenBuilder`\r\n- Add `ReadModels` property on `ReadModelScenario` exposing `IReadModels`\r\n- Update `EventStoreForTesting.ReadModels` to return `ReadModelsForTesting`\r\n- Change `NotImplementedException` to `NotSupportedException` with informative messages in `EventStoreForTesting`\r\n\r\nCloses #3101\r\n\r\nGenerated with [Claude Code](https://claude.ai/code)",
+  "passes": false,
+  "rules": [
+   "Closing or linking keyword",
+   "Heading not allowed",
+   "No release notes",
+   "Review, verification or provenance note"
+  ]
+ },
+ {
+  "repo": "Ante",
+  "tag": "v0.11.2",
+  "body": "## What\n\nWhen an acceptance and its `LegalTermsAccepted` were forwarded to the outbox together, the first append failed with a concurrency violation (expected 0, actual 1) and only a partition retry delivered it (Closes #73). Two independent forwarding reactors append to the same outbox event source, and each append carried an optimistic concurrency scope.\n\nThe outbox is a forwarding log, not a decision point, so `OutboxForwarder.PublishToOutbox` now appends with `ConcurrencyScope.None`. Every other append failure still fails the partition (#52). The local receipt append that guards invitation reuse keeps its concurrency scope.\n\nHosts see no ordering change: order across reactors was never deterministic, and host-side deduplication is already documented.\n\n## Verification\n\n- A spec asserts the outbox append is made with `ConcurrencyScope.None` (the regression guard). A scenario spec shows both facts land on the same outbox source.\n- Local mirror of CI: Debug build and 861 specs, Release build with warnings as errors, frontend lint, compile and 168 specs.\n- Quick cross-provider review (Opus 5.5 on GPT-written code), checked against Chronicle v19.4.7: `ConcurrencyScope.None` bypasses the configured optimistic strategy. Final round passed.\n",
+  "passes": false,
+  "rules": [
+   "Closing or linking keyword",
+   "Heading not allowed",
+   "Issue reference position",
+   "No release notes",
+   "Review, verification or provenance note"
+  ]
+ },
+ {
+  "repo": "Chronicle",
+  "tag": "v15.18.1",
+  "body": "# Summary\n\nChronicle Kernel Server can now run in production without local TLS when explicitly configured. Documentation now reflects that TLS is default-on but optional for upstream TLS termination scenarios.\n\n## Added\n\n- Support for explicitly disabling top-level Kernel TLS with `tls.enabled=false`, allowing non-HTTPS gRPC listener startup in production behind upstream TLS termination (#3104)\n- Clear startup logging for intentionally disabled TLS mode (#3104)\n\n## Changed\n\n- Server startup validation now enforces certificate presence only when `tls.enabled=true` (#3104)\n- Server TLS docs now describe `tls.enabled` as the gRPC TLS switch in both development and production (#3104)\n- Connection string and Workbench TLS docs now align with optional server TLS behavior (#3104)\n\n```json\n{\n  \"tls\": {\n    \"enabled\": false\n  }\n}\n```\n\n## Fixed\n\n- Incorrect production behavior that blocked Kernel startup without a local TLS certificate even when non-TLS operation was intended (#3104)\n- Documentation mismatch that stated gRPC TLS was mandatory in production in all cases (#3104)\n\n## Removed\n\n- Hard requirement language implying top-level gRPC TLS could never be disabled in production (#3104)\n\n## Security\n\n- TLS remains enabled by default; disabling TLS is now an explicit configuration choice for trusted upstream termination topologies (#3104)\n\n## Deprecated\n\n- None\n\n> [!WARNING]\n>\n> <details>\n> <summary>Firewall rules blocked me from connecting to one or more addresses (expand for details)</summary>\n>\n> #### I tried to connect to the following addresses, but was blocked by firewall rules:\n>\n> - `172.20.0.1`\n>   - Triggering command: `REDACTED, pid is -1` (packet block)\n>\n> If you need me to access, download, or install something from one of these locations, you can either:\n>\n> - Configure [Actions setup steps](https://gh.io/copilot/actions-setup-steps) to set up my environment, which run before the firewall is enabled\n> - Add the appropriate URLs or hosts to the custom allowlist in this repository's [Copilot coding agent settings](https://github.com/Cratis/Chronicle/settings/copilot/coding_agent) (admins only)\n>\n> </details>",
+  "passes": false,
+  "rules": [
+   "Agent transcript",
+   "Section heading level"
+  ]
+ },
+ {
+  "repo": "Arc.TypeScript",
+  "tag": "v0.43.0",
+  "body": "Arc for TypeScript 0.43.0 lets the in-memory Chronicle command and query scenarios build projection-backed read models from given events. npm publication remains disabled.\n\n## Added\n\n- `ChronicleCommandScenario` and `ChronicleQueryScenario` evaluate supported flat projections in-process through `ReadModelScenario` from `@cratis/chronicle` 6.19.0, so `given.forEventSource(...).events(...)` now populates projection-backed read models as well as reducer-backed ones. See [Test Chronicle commands and queries](Documentation/testing/chronicle.md) for the boundary.\n- A pinned instance wins over history, and a reducer wins over a projection. Projection seeds replay in the order they were given across event sources.\n- A projection outside the supported boundary throws the SDK's `UnsupportedProjectionOperation` unchanged; test it with `ChronicleKernelScenario`.\n\n## Changed\n\n- The development dependency on `@cratis/chronicle` is 6.19.0, and the samples use the same version. The peer range stays `^6.7.0`.\n- With an older SDK, a projection-backed lookup fails with an error naming `@cratis/chronicle >= 6.19.0`. When a declarative projection without an explicit read-model type is registered, seeded lookups of read models that have no reducer or explicit projection now fail the same way instead of returning `null`, because Arc cannot tell which read model that projection targets. Give the projection an explicit read-model type (`@projection('', ReadModel)`) or upgrade the SDK.\n\nCloses #95\n",
+  "passes": false,
+  "rules": [
+   "Closing or linking keyword",
+   "Relative link"
+  ]
+ },
+ {
+  "repo": "AI",
+  "tag": "v1.2.0",
+  "body": "## What\n\nCompanion decision to #299: the published package now carries the whole public skill set, so the `@cratis/ai-fundamentals` name no longer describes it. This renames it to **`@cratis/pi`** — the Pi delivery vehicle for the public Cratis AI bundle — publishing as `1.2.0` (version lineage continues from `1.1.0`).\n\n## Changes\n\n- Package name, tarball filename (`cratis-pi-<version>.tgz`), and a fuller description: *\"The whole public Cratis AI skill set for building event-sourced and CQRS applications, delivered as a passive Pi package\"*\n- Generated README notes the rename; `@cratis/ai-fundamentals` is deprecated with a pointer (manual `npm deprecate` after this publishes)\n- Package-name convention gains a documented `@cratis/pi` carve-out beside the `@cratis/ai-*` profile family (`profile-subscription-validation`)\n- Preview request history **appends** the rename record (`0.1.0-preview.2`) instead of mutating the append-only ledger; schema accepts both names\n- Workflows, npm-stage contract, readiness/lanes/schemas, specs, generated catalogs, and all documentation follow\n\n## Verification\n\n- Full suite: 556 tests, 0 failures; all generator `--check`s pass\n- Local release staging of `1.2.0`: correct name/description/README, 49 skills, checksums verify\n\n## Prerequisite\n\nnpm trusted-publisher registration for `@cratis/pi` (repo `Cratis/AI`, workflow `release-passive-previews.yml`, environment `npm-stage`) must exist before the publish job can release `1.2.0`.\n\nRelease intent: **minor**.",
+  "passes": false,
+  "rules": [
+   "Heading not allowed",
+   "No release notes"
+  ]
+ },
+ {
+  "repo": "Stage",
+  "tag": "v4.4.0",
+  "body": "## Why\n\nThe frontend rendered a `$strings.<key>` reference literally - nothing served the dictionary a `.strings` file actually holds. Resolution has to happen at runtime (not compile time) so a locale switch or an edited translation takes effect without recompiling the model.\n\n## What changed\n\n- `StageStrings` discovers every `.strings` file under the mounted model root via `Cratis.Screenplay.Strings`' existing `IStringsFiles`/`StringsFile.Parse`, merging every file declaring a given locale into one flat dictionary.\n- Two new endpoints, `/stage/locales` and `/stage/strings/{locale}`, served alongside `/stage/scene` and `/stage/routes` rather than folded into either - a locale switch is a question about what a running Stage offers, not something the scene itself carries.\n- `useStrings` fetches both, defaulting to the first reported locale. `resolveStringsInElement` (Cratis/Scene#47) resolves every reference in a screen's element tree before it reaches the registry - the same seam `SceneContent` already had for handing an element to `SceneElementView`.\n- A locale switcher only appears once more than one locale exists.\n- Authored `.strings` files for every `$strings.` reference the Billing sample already declared, next to whichever `.play` file names each key - the established `<base>.<locale>.strings` convention.\n\n## Verification\n\n- `npx tsc -b`, `npx vite build`, `npx vitest run`: 10/10 passing (2 new specs).\n- `dotnet test` (Debug) on Host: 130/130. On Contracts: 399/399.\n- `dotnet build -c Release`: clean.\n- Rebuilt the real Docker image and ran it against the Billing sample: `/stage/locales` returns `[\"en\"]`, `/stage/strings/en` returns the full merged dictionary, and InvoiceList's title renders as \"Invoices\" rather than the literal `$strings.invoice.listTitle` token.\n",
+  "passes": false,
+  "rules": [
+   "Heading not allowed",
+   "No release notes"
+  ]
+ },
+ {
+  "repo": "Arc.TypeScript",
+  "tag": "v0.33.0",
+  "body": "Arc for TypeScript 0.33.0 lets the in-memory Chronicle command scenario seed event history, the counterpart of `Given.ForEventSource(...).Events(...)` in the Arc .NET Chronicle testing package. npm publication remains disabled.\n\n## Added\n\n- `scenario.given.forEventSource(sourceId, tenant?).events(...events)` seeds ordered history for an event source.\n  - When a command reads a reducer-backed read model for that source (through `commandReadModel`, `readModelForValidation` or `provide()`), the scenario builds it from the seeded events. It uses the Chronicle SDK's in-process `ReadModelScenario`, so the kernel isn't needed.\n  - Seeded events never count as events the command appended.\n  - Seeding history needs `@cratis/chronicle` 6.14 or later. It is loaded only when history is seeded, so the package's peer range stays `^6.7.0`.\n- `scenario.given.forEventSource(sourceId, tenant?).readModel(instance)` pins a read model for a source. A pinned instance wins over seeded history.\n\n## Changed\n\n- `givenReadModel(Type, sourceId, instance)` without a tenant now pins the model for the scenario's current `context.tenantId`, not always `Default`. It still falls back to `Default` when the context sets no tenant.\n- A read model with no seeded history and no pin resolves as missing. A required model reports the usual not-found validation result, and an optional one receives `null`.\n- A projection-backed read model with seeded history, and aggregates, point to `ChronicleKernelScenario`. Projections need the kernel.\n\n",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Arc.TypeScript",
+  "tag": "v0.31.0",
+  "body": "Arc for TypeScript 0.31.0 adds global command and query filters, the counterparts of `IAuthorizationCommandFilter`, `ICommandFilter`, `IAuthorizationQueryFilter` and `IQueryFilter` in Arc on .NET. It also makes cancellation stop pipeline stages that have not started. npm publication remains disabled.\n\n## Added\n\n- `AuthorizationCommandFilter` and `CommandPipelineFilter` apply to every command. `AuthorizationQueryFilter` and `QueryPipelineFilter` apply to every query snapshot and observable subscription. Register them through `ArcOptions`, the builder's `add…` methods, or the matching decorators.\n  - Authorization filters always run before pipeline filters, validators, dependency construction and the handler.\n  - A denial is a 403 that never discloses validation results. It wins over invalid input, and severity filtering cannot override it.\n  - Command `/validate` runs the same filters without calling `provide()` or `handle()`.\n  - Observable queries run the filters once, when the subscription is admitted, not for each emission. That includes the health observable.\n  - Helpers build filter results, for example `unauthorizedCommandResult` and `unauthorizedQueryResult`.\n- Command and query contexts carry `operationName`, the declared name of the operation, the same as `CommandContext.Type` and `QueryContext.Name` in .NET. Framework-built contexts always set it, and it cannot be changed. Filters that rely on it must deny or handle a manually built context without it.\n- Paired .NET and TypeScript HTTP checks cover denied, denied with invalid input, allowed with invalid input, and allowed commands and queries.\n\n## Changed\n\n- Cancellation stops every stage that has not started: authorization policies, filters, validators, dependency resolution, `provide()`, `handle()`, query performers, renderers, read-model interceptors, observable producers, and command response handlers. Once a command handler has run, the command reports what actually happened. A completed outcome is not turned into a cancellation failure. A response handler that cancellation stops before it starts is reported as canceled. An effect that was already acknowledged is never reported as undone.\n- A defined Chronicle command whose append was acknowledged keeps its success when cancellation stops the wait for projections. A real observer failure is still reported.\n- Filter results are validated before use. Malformed authorization, readiness or severity values fail closed.\n- Each filter result's validation entries are filtered by the allowed severity before the chain decides whether to stop. A filtered-out warning therefore cannot switch off later authorization filters. This deliberately differs from Arc on .NET, which stops before severity filtering.\n\n## Fixed\n\n- Malformed command input no longer runs context-value providers or key resolvers before it is rejected.\n- The existing per-definition `CommandFilter<T>` and `QueryFilter<T>` callbacks are unchanged.\n",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Arc.TypeScript",
+  "tag": "v0.30.3",
+  "body": "Arc for TypeScript 0.30.3 lets the proxy generator handle commands that can reject, the TypeScript counterpart of `Result<TEvent, ValidationResult>` in Arc on .NET. npm publication remains disabled.\n\n## Fixed\n\n- Generating proxies no longer fails with \"Multiple unhandled command response types\" for commands that return events or a visible value alongside `rejected(...)` or `denied(...)`. This covers async, union and tuple returns. The rejection branches are not client response values; the client sees them as validation or authorization results, as at runtime.\n- Generated metadata for a command that returns either a rejection or an array of events now accepts the successful array.\n- Proxy generation rejects arrays of `Outcome` values with a clear error, because the runtime does not unwrap them.\n- The aggregate and Chronicle testing docs use the normal generate-and-discover path.\n",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Chronicle",
+  "tag": "v19.12.0",
+  "body": "This PR consolidates six fixes into one release. Each was reviewed separately, then tested together on top of v19.11.0.\n\n## Added\n\n- The .NET client's generated JSON schemas give inline object types a `title` with the type name. A declaration generated from a fluent composite-key projection (for example in the Workbench) can then name the key type and recompile. The fluent `CompositeKeyBuilder` still emits untyped expressions, so older kernels are unaffected (#4253)\n- The ASP.NET Core causation middleware records the matched route template in a new `routeTemplate` causation property, alongside the existing request path (#4260)\n\n## Changed\n\n- Pattern mining derives request features from route templates only, never from raw request paths, so identifiers embedded in a URL (such as `/customers/jane@example.com`) are no longer stored in mined patterns. Patterns stored before this release are not rewritten (#4260)\n- Registering an event type whose stored schema differs only in titles no longer rewrites the stored schema, and no longer invalidates caches on every reconnect. This matters when old and new clients run side by side (#4253)\n\n## Fixed\n\n- A MongoDB bulk write that fails part way now applies the remaining operations instead of silently dropping them. Later changes for the partition that failed are held back, so they can't overtake its replay. Each failed partition is reported once, at its earliest sequence number (#4244)\n- Forwarding events to another event store's inbox no longer acknowledges events whose append failed. It stops at the first failure and reports the last event it actually forwarded, so the retry resumes from the failed event (#4259)\n- Projection keys for immediate (passive) projections round-trip read-model keys that contain `#` (#4241)\n- `add` and `subtract` projection mappings accept negative, decimal and exponent operands (for example `-1`, `-2.5`, `1e-3`), and reject malformed operands. Exponent literals and integer literals beyond 2^53 in declarations still depend on the declaration parser (Cratis/Screenplay#285) (#4239)\n- Composite-key validation for generated declarations resolves the key type from the read model's `Id` schema first, so a same-named type elsewhere in the read model can't be picked by mistake (#4253)\n",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Components",
+  "tag": "v2.1.0",
+  "body": "Extracts the filter UI from `PivotViewer` into a generic, standalone `FilterPanel` component that can be used independently of any data viewer.\n\n## Added\n\n- `Source/Filter/` module: standalone `FilterPanel`, `FilterEditor`, `RangeHistogramFilter`, `useFilterState` hook, and full TypeScript type definitions (`FilterDefinition`, `FilterEditorProps`, `FilterEditorSlotProps`, `FilterValues`, `RangeValues`, `CustomFilterValues`) (#102)\n- `FilterEditor` slot component — declares a custom editor for a specific filter group as a declarative child of `<FilterPanel>`; value tracked separately in `customValues` (#102)\n- `type: 'custom'` filter type as an explicit opt-in for fully custom filter editors (#102)\n- 5 Storybook stories for `FilterPanel`: single-select, multi-select, numeric range/histogram, custom editor, and mixed filter types (#102)\n- `./Filter` subpath export in `package.json` for direct imports via `@cratis/components/Filter` (#102)\n- `Documentation/Filter/index.md` — full API reference covering all exported types, `FilterPanel` props, `FilterEditor` props, `useFilterState` hook, and usage examples for every filter type (#102)\n- BDD specs in `Source/Filter/for_useFilterState/` covering `buildFilterValues` and `buildRangeValues` — 9 tests across 4 spec files (#102)\n- `Source/Filter/utils.ts` exporting `buildFilterValues` and `buildRangeValues` as pure, testable utility functions (#102)\n\n## Changed\n\n- `FilterPanel` accepts `children?: ReactNode` — uses `React.Children` + `isValidElement` to discover `<FilterEditor>` slots and render them in the matching filter group (#102)\n- `PivotViewer/components/FilterPanel.tsx` is now a thin adapter: converts `PivotFilter<TItem>[]` + computed options into `FilterDefinition[]`, generates `<FilterEditor>` children from any `PivotFilter.renderEditor`, and delegates all rendering to the new standalone component — no breaking changes to the public API (#102)\n- `PivotFilter<TItem>` retains `renderEditor?` and `type: 'custom'` so PivotViewer consumers can inject custom filter editors without any workarounds (#102)\n- `Source/Filter/useFilterState.ts` now imports `buildFilterValues` and `buildRangeValues` from `./utils` (#102)\n- `Documentation/toc.yml` updated with Filter entries in both the Storybook section and Common Components section (#102)\n- `eslint.config.mjs` — added `argsIgnorePattern: '^_'` to the `@typescript-eslint/no-unused-vars` rule to honour the `_`-prefix convention for intentionally unused parameters (#102)\n\n## Fixed\n\n- Storybook static build (`storybook build`) now completes successfully — fixed a pre-existing `[lightningcss minify] Invalid empty selector` crash by adding `cssMinify: false` to the `viteFinal` config in `Source/.storybook/main.ts` (#102)\n- CI build failure caused by ESLint flagging `_props` in `FilterEditor.tsx` as unused — resolved by adding `argsIgnorePattern: '^_'` to the ESLint rule config (#102)\n\n**Usage — custom editor in standalone context:**\n```tsx\nimport { FilterPanel, FilterEditor, useFilterState } from '@cratis/components/Filter';\n\nconst filters: FilterDefinition[] = [\n  { key: 'score', label: 'Score', type: 'custom' },\n];\n\nfunction MyView() {\n  const state = useFilterState(filters);\n  const buttonRef = useRef<HTMLButtonElement>(null);\n  return (\n    <>\n      <button ref={buttonRef}>Filters</button>\n      <FilterPanel\n        isOpen={open}\n        filters={filters}\n        anchorRef={buttonRef}\n        customValues={state.customValues}\n        onCustomValueChange={state.handleCustomValueChange}\n        onFilterToggle={state.handleToggleFilter}\n        onFilterClear={state.handleClearFilter}\n        onRangeChange={state.handleRangeChange}\n        onExpandedFilterChange={state.setExpandedFilterKey}\n        onClose={() => setOpen(false)}\n        {...state}\n      >\n        <FilterEditor filterKey=\"score\">\n          {({ value, onChange }) => (\n            <MySlider value={value as number} onChange={onChange} />\n          )}\n        </FilterEditor>\n      </FilterPanel>\n    </>\n  );\n}\n```",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Screenplay",
+  "tag": "v4.39.0",
+  "body": "## Changed\n\n- A valid `persona` no longer stops a model from binding to the executable model. It is reported as information only, and models that already bound produce the same bytes. Personas and providers are still not part of the executable model; the authentication documentation describes where a renderer reads provider identities from the compilation result. This is part of #254.\n- A persona whose policy cannot be resolved is now an error in compilation, Safe authoring and executable binding, so it never falls back to anonymous access. Draft authoring still accepts it and reports the unresolved reference.\n\n## Fixed\n\n- A value indented under a clock trigger (`every …`, `at …`) reports `PLAY0450`, because clock triggers take no values. (#258)\n- A line indented under a `reads` line reports `PLAY0451`. It no longer becomes a property of the command or a value of the reaction trigger. (#259)\n",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Screenplay",
+  "tag": "v4.21.0",
+  "body": "This release tightens how the language is documented and checked. Modules and features can declare authorization, inline code blocks name their language on the fence, and inline code can read its context through typed accessors. The canonical corpus gains vectors for reordered and relocated sources, ESM v2 and fail-closed rejection. Documentation is now checked against the parsers, links and navigation.\n\n## Added\n\n- Modules and features accept `authorize`. It combines by AND with the policies of every command and query beneath them, and folder files merge it like behaviors; a repeated identical clause warns with `PLAY0394` (#75)\n- Inline code blocks carry their language as a fence info string (` ```csharp `). The previous forms — a language line above a bare fence, and `validate csharp` — still parse with a `PLAY0397` warning, and printing writes the new form (#184)\n- Typed accessors beside every `dynamic` context member (`CommandAs<T>()`, `ArgumentsAs<T>()`, `ArtifactAs<T>()`, …), so LINQ in inline code binds at compile time. A payload of another type throws `ContextPayloadTypeMismatch` (#84)\n- Canonical corpus vectors: RegisterProject with reordered and relocated documents (same revision and bytes), a pinned ESM v2 vector, and an unsupported vector that fails closed with no artifacts. The corpus package now runs package validation (#168)\n- Documentation gates: every construct the parsers accept must have a grammar production and a reference page; every relative link and anchor must resolve and every page must be reachable from navigation. Documentation-only pull requests now run these checks (#146)\n\n## Changed\n\n- A `file` constraint warns (`PLAY0396`): Chronicle only supports unique constraints, so declare them with `unique …`, and put other rules in validation or `require`. The constraints page now states Chronicle's actual guarantee (#223)\n",
+  "passes": true,
+  "rules": []
+ },
+ {
+  "repo": "Arc",
+  "tag": "v22.34.2",
+  "body": "## Changed\n\n- Observable query change sets look up an item type's identity property once per type instead of on every emission (Refs #2856)\n- The runtime-typed JSON serialization and reflection in change set computation and subscription scope snapshots now sit behind single call sites, ready for a resolver-based fix once Arc's JSON options carry a type-info resolver (#2854). This does not make them trim- or AOT-safe yet; it merges repeated unsafe calls, which lowers the trim/AOT baseline by 51 diagnostics (577 to 526 after merging main) (Refs #2856)\n\nSpecs pinning the current change set and scope-snapshot behavior were added first and pass unchanged.\n\nReviewed with Anthropic models only (no cross-provider review available right now).",
+  "passes": false,
+  "rules": [
+   "Closing or linking keyword",
+   "Issue reference position",
+   "Review, verification or provenance note"
+  ]
+ }
+]
