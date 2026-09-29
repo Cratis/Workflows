@@ -153,12 +153,18 @@ test("an optional ## Summary may come first, once, as prose, and not together wi
     fails("## Summary\n\nIt closes the loop (#12).\n\n## Added\n\n- A thing (#1)\n", ["Issue reference position"]);
 });
 
-test("sections appear once, in order, only when non-empty", () => {
+test("sections appear once, in order, only when they have bullets", () => {
     fails("## Fixed\n\n- A fix\n\n## Added\n\n- A thing\n", ["Section order"]);
     fails("## Added\n\n- A thing\n\n## Added\n\n- Another\n", ["Section order"]);
     fails("## Added\n\n- A thing\n\n## Removed\n\n<!-- nothing -->\n", ["Empty section"]);
     fails("## Added\n\n## Changed\n\n- A change\n", ["Empty section"]);
-    passes("## Added\n\n- A thing\n\n## Fixed\n\n```csharp\nvar example = 1;\n```\n");
+    // A section is its bullets: prose or an example alone is not a change list.
+    fails("## Added\n\n- A thing\n\n## Fixed\n\n```csharp\nvar example = 1;\n```\n", ["Section without bullets"]);
+    fails("## Added\n\n- A thing\n\n## Removed\n\nNone.\n", ["Section without bullets"]);
+    fails("## Added\n\n- A thing\n\n## Deprecated\n\n**Client layer**: converts skip/take to pages.\n", ["Section without bullets"]);
+    fails("## Added\n\nSome prose about the change.\n\n- A thing\n\n## Fixed\n\nA fixed thing, in prose.\n", ["Section without bullets"]);
+    passes("## Added\n\n- A thing\n\n## Changed\n\n### Group\n\n- A grouped change\n\n## Fixed\n\n1. A numbered fix\n");
+    passes("## Summary\n\nProse is what a summary is.\n\n## Added\n\n- A thing\n");
 });
 
 test("the preamble is at most one lead paragraph without bullets or sub-headings", () => {
@@ -297,7 +303,7 @@ test("a release-bound pull request needs a bullet under an allowed section", () 
         assert.match(result.errors[0].message, /^No release notes: The description\. /);
         fails("", ["No release notes"], { labels: [label] });
     }
-    fails("## Added\n\n```\ncode only\n```\n", ["No release notes"], { labels: ["patch"] });
+    fails("## Added\n\n```\ncode only\n```\n", ["No release notes", "Section without bullets"], { labels: ["patch"] });
 });
 
 test("Windows line endings are read like Unix ones", () => {
@@ -435,6 +441,88 @@ test("ordinary product bullets are not mistaken for review notes, results or pro
     passes("## Added\n\n" + bullets.map(bullet => `- ${bullet}`).join("\n") + "\n");
     passes("### Added in Chronicle\n\n".replace(/^/, "## Added\n\n") + "- A thing (#1)\n");
     passes("## Summary\n\nReviews are faster, tests run in parallel and a CI template ships with it.\n\n## Added\n\n- A thing (#1)\n");
+});
+
+test("a heading is a line of the description: its keywords, (#n), links, placeholders and provenance fail too", () => {
+    const under = heading => `## Added\n\n${heading}\n\n- A thing (#1)\n`;
+    for (const heading of ["### Big feature (#5)", "<h3>Thing (#4)</h3>", "### Thing (#4) and more"])
+        fails(under(heading), ["Issue reference position"]);
+    fails("## Added <!-- (#7) -->\n\n- A thing (#1)\n", ["Issue reference position"]);
+    fails(under("### Big feature\n\n<!-- (#8) -->"), ["Issue reference position"]);
+    for (const heading of ["### Closes #5", "### **Fixes** #5", "<h3>Refs #5</h3>", "### Resolves https://github.com/Cratis/Example/issues/5"])
+        fails(under(heading), ["Closing or linking keyword"]);
+    for (const heading of ["### See [x](docs/x.md)", "<h3><a href=\"docs/x.md\">x</a></h3>"])
+        fails(under(heading), ["Relative link"]);
+    fails(under("### Generated with Claude Code"), ["Review, verification or provenance note"]);
+    fails(under("### Reviewed with a cross-provider review"), ["Review, verification or provenance note"]);
+    fails(under("### Describe a new user-facing capability"), ["Template placeholder"]);
+    // A setext heading is not an allowed section, but its text still closes the issue, and is reported at the text line, not its underline.
+    const setext = run(under("Big feature (#5)\n---"));
+    assert(setext.rules.includes("Issue reference position"));
+    assert(setext.errors.some(error => /^Issue reference position: Line 3 `Big feature \(#5\)`/.test(error.message)));
+    passes("## Added\n\n### Sub-heading with `Closes #5` in code\n\n- A thing (#1)\n\n### See [x](https://cratis.io/x)\n\n- Another (#2)\n");
+});
+
+test("a link keeps its text when the text is a closing keyword", () => {
+    for (const line of ["[Closes #3](https://github.com/Cratis/Example/issues/3)", "[Closes](https://github.com/Cratis/Example/issues/3)",
+        "[Fixes](https://github.com/Cratis/Example/pull/3)", "**[Fixes](https://github.com/Cratis/Example/issues/3)**",
+        "<a href=\"https://github.com/Cratis/Example/issues/3\">Closes</a>"])
+        fails(`## Fixed\n\n- A fix (#9)\n\n${line}\n`, ["Closing or linking keyword"]);
+    passes("## Fixed\n\n- Reverts [the fix](https://github.com/Cratis/Example/pull/3) for observers (#1)\n- See [#3](https://github.com/Cratis/Example/issues/3) (#2)\n");
+});
+
+test("a multi-line <summary> and an italic-only line name a forbidden heading like the one-line forms", () => {
+    for (const name of ["Test plan", "Verification", "Notes for reviewers", "Testing"]) {
+        fails(`## Added\n\n- A thing (#1)\n\n<details>\n  <summary>\n    ${name}\n  </summary>\n\n  - ran it\n</details>\n`, ["Heading not allowed"]);
+        fails(`## Added\n\n- A thing (#1)\n\n<details><summary>\n${name}</summary>\n\n- ran it\n</details>\n`, ["Heading not allowed"]);
+        for (const wrapper of ["*", "_", "- *", "- _"])
+            fails(`## Added\n\n- A thing (#1)\n\n${wrapper}${name}${wrapper.replace("- ", "")}\n\n- More\n`, ["Heading not allowed"]);
+        fails(`## Added\n\n- A thing (#1)\n\n<i>${name}</i>\n\n- More\n`, ["Heading not allowed"]);
+        fails(`## Added\n\n- A thing (#1)\n\n*${name}*:\n\n- More\n`, ["Heading not allowed"]);
+    }
+    const located = fails("## Added\n\n- A thing (#1)\n\n<details>\n  <summary>\n    Test plan\n  </summary>\n</details>\n", ["Heading not allowed"]);
+    assert.match(located.errors[0].message, /Line 6 /);
+    passes("## Added\n\n- An *italic* word and _another_ one (#1)\n- *Emphasis* opens a bullet, then continues (#2)\n\n<details>\n  <summary>\n    More examples\n  </summary>\n\n  - Example\n</details>\n");
+});
+
+test("provenance fails at the start of a clause; product wording around the same words passes", () => {
+    for (const line of ["Review: Opus-only (same-provider) review.", "Reviewed with a cross-provider review.", "The review workflow passed.",
+        "Co-Authored-By: Claude <noreply@anthropic.com>", "Cross-provider review pending", "Same-provider review: no findings", "Quick cross-provider review (Opus 5.5 on GPT-written code).",
+        "Reviewed with Anthropic models only (no cross-provider review available right now).", "Reviewed by Claude", "Opus-only review", "Anthropic-only review (same-provider).",
+        "- Reviewed with a same-provider review", "- Cross-provider review pending (#3)", "- The review workflow passed", "- The review workflow returned findings",
+        "> Co-authored-by: Someone <someone@example.com>", "Done - the review workflow ran twice", "Review: the review workflow found nothing"]) {
+        const result = fails(`## Added\n\n- A thing (#1)\n\n${line}\n`, ["Review, verification or provenance note"]);
+        assert.match(result.errors[0].message, /pull request comment/, line);
+    }
+    // Indented under a bullet, the line continues that bullet and still reads as a note.
+    fails("## Added\n\n- A thing\n\n  Opus-only review\n", ["Review, verification or provenance note"]);
+    passes([
+        "## Added",
+        "",
+        "- Adds same-provider review routing to the review workflow (#1)",
+        "- Same-provider review routing now falls back to Sonnet (#2)",
+        "- Cross-provider review is now selectable per repository (#3)",
+        "- Cross-provider review, when enabled, now routes to a second model (#4)",
+        "- Opus-only review can now be enforced with a policy (#5)",
+        "- The review workflow passed to the runner is now validated (#6)",
+        "- The review workflow returned by the API now includes the reviewer (#7)",
+        "- The review workflow found in the repository is now used by default (#8)",
+        "- The review workflow now ran checks in parallel for large diffs (#9)",
+        "- The review workflow ran through the queue is now traced (#10)",
+        "- Co-authored-by trailers are now added to squash commits (#11)",
+        "- Adds support for trailers: Co-Authored-By: is now parsed (#12)",
+        "- Adds a Co-Authored-By: header to generated commits (#13)",
+        "- Reviewed with the new review page, comments are now threaded (#14)",
+        "- Anthropic-only review policies can now be configured per repository (#15)",
+        "- Reviews use a same-provider fallback when the primary model is down (#16)",
+        "- Supports a cross-provider review mode for pull request checks, configured in `review.json`",
+        "  and a second continuation line about the cross-provider review mode (#17)",
+        "",
+        "## Changed",
+        "",
+        "- The Review workflow now reports which provider reviewed the change in its check summary (#18)",
+        "",
+    ].join("\n"));
 });
 
 test("the program workflow runs whenever a file the spec reads changes", () => {
