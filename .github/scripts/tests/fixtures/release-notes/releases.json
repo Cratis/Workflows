@@ -71,7 +71,8 @@
   "passes": false,
   "rules": [
    "Agent transcript",
-   "Section heading level"
+   "Section heading level",
+   "Section without bullets"
   ]
  },
  {

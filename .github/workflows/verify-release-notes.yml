@@ -228,6 +228,13 @@ jobs:
           const SETEXT_UNDERLINE = /^ {0,3}(=+|-+)[ \t]*$/;
           const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
           const LIST_ITEM = /^\s*(?:[-*+]|\d{1,9}[.)])[ \t]+\S/;
+          // A bullet that only says there is nothing (`- None.`, `- **N/A**`) is a filler, not a change.
+          const FILLER = /^(?:none|n\/a|nothing)$/i;
+          const isFiller = text => FILLER.test(text
+              .replace(/^\s*(?:[-*+]|\d{1,9}[.)])[ \t]+/, "")
+              .replace(/<\/?(?:b|i|em|strong|u|s|del|ins)\b[^>]*>/gi, "")
+              .replace(/[*_~\s]+/g, " ")
+              .replace(/^[\s.,;:!?]+|[\s.,;:!?]+$/g, ""));
           // HTML that renders as a heading, or as a bold-only line, on the release page.
           const HTML_HEADING = /^\s*<h([1-6])\b[^>]*>(.*?)(?:<\/h\1>)?\s*$/i;
           const HTML_BOLD_ONLY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:<p[^>]*>\s*)?<(b|strong|i|em)>(.+?)<\/\1>\s*:?\s*(?:<\/p>)?\s*$/i;
@@ -476,7 +483,7 @@ jobs:
                           if (LIST_ITEM.test(line)) {
                               if (section.prose) {
                                   proseOnly(index);
-                              } else {
+                              } else if (!isFiller(prose.slice(index, bulletEnd[index] + 1).join(" "))) {
                                   section.bullets++;
                               }
                           }
@@ -545,7 +552,12 @@ jobs:
                       const end = bulletEnd[match.endLine];
                       const rest = prose[match.endLine].slice(match.endColumn);
                       const after = end < 0 ? null : [rest, ...prose.slice(match.endLine + 1, end + 1)].join("\n");
-                      if (after === null || !ONLY_ISSUES_AFTER.test(after)) {
+                      if (after !== null && !ONLY_ISSUES_AFTER.test(after)) {
+                          const followed = [lines[match.endLine].slice(match.endColumn), ...lines.slice(match.endLine + 1, end + 1)]
+                              .join(" ").replace(/\s+/g, " ").trim().replace(/`/g, "'");
+                          const excerpt = followed.length > 60 ? `${followed.slice(0, 57).trimEnd()} ...` : followed;
+                          report("Issue reference position", index, `\`(#${match.number})\` is followed by \`${excerpt}\`; move that text before \`(#${match.number})\` so the issue reference ends the bullet, or write \`(part of #${match.number})\` or \`see #${match.number}\` if it must stay open.`);
+                      } else if (after === null) {
                           report("Issue reference position", index, `Release-action closes \`(#${match.number})\` wherever it appears; put \`(#${match.number})\` at the end of the bullet that delivers the issue, or write \`(part of #${match.number})\` or \`see #${match.number}\` if it must stay open.`);
                       }
                   }

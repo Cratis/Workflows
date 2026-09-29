@@ -167,6 +167,19 @@ test("an optional ## Summary may come first, once, as prose, and not together wi
     fails("## Summary\n\nIt closes the loop (#12).\n\n## Added\n\n- A thing (#1)\n", ["Issue reference position"]);
 });
 
+test("a None / N/A / Nothing bullet is a filler, not a change", () => {
+    for (const filler of ["None", "None.", "**None**", "**None.**", "_N/A_", "n/a", "N/A.", "Nothing", "NOTHING!", "*Nothing.*", "<b>None</b>", "1. None"]) {
+        const bullet = /^\d/.test(filler) ? filler : `- ${filler}`;
+        fails(`## Added\n\n- A thing (#1)\n\n## Removed\n\n${bullet}\n`, ["Section without bullets"]);
+    }
+    fails("## Removed\n\n- None.\n", ["No release notes", "Section without bullets"]);
+    fails("## Added\n\n- A thing (#1)\n\n## Removed\n\n- None\n- N/A\n", ["Section without bullets"]);
+    // A filler beside a real bullet does not fail; a filler with more text is a real bullet.
+    passes("## Added\n\n- A thing (#1)\n- None\n");
+    passes("## Removed\n\n- None of the deprecated overloads (#2)\n");
+    passes("## Removed\n\n- `None`\n");
+});
+
 test("sections appear once, in order, only when they have bullets", () => {
     fails("## Fixed\n\n- A fix\n\n## Added\n\n- A thing\n", ["Section order"]);
     fails("## Added\n\n- A thing\n\n## Added\n\n- Another\n", ["Section order"]);
@@ -178,6 +191,7 @@ test("sections appear once, in order, only when they have bullets", () => {
     fails("## Added\n\n- A thing\n\n## Deprecated\n\n**Client layer**: converts skip/take to pages.\n", ["Section without bullets"]);
     fails("## Added\n\nSome prose about the change.\n\n- A thing\n\n## Fixed\n\nA fixed thing, in prose.\n", ["Section without bullets"]);
     passes("## Added\n\n- A thing\n\n## Changed\n\n### Group\n\n- A grouped change\n\n## Fixed\n\n1. A numbered fix\n");
+    passes("## Added\n\n- Nothing but a thing (#1)\n- None of the old options remain (#2)\n- N/A handling is added (#3)\n");
     passes("## Summary\n\nProse is what a summary is.\n\n## Added\n\n- A thing\n");
 });
 
@@ -269,7 +283,10 @@ test("(#n) closes an issue, so it belongs at the end of the bullet that delivers
         "## Added\n\n- A thing\n\nA paragraph (#1)\n",
     ]) {
         const result = fails(body, ["Issue reference position"]);
-        assert.match(result.errors[0].message, /Release-action closes `\(#\d+\)` wherever it appears; put `\(#\d+\)` at the end of the bullet that delivers the issue, or write `\(part of #\d+\)` or `see #\d+`/);
+        // Outside a bullet there is no text to quote; inside one the error quotes what follows the delivering (#n).
+        const outside = /Release-action closes `\(#\d+\)` wherever it appears; put `\(#\d+\)` at the end of the bullet that delivers the issue, or write `\(part of #\d+\)` or `see #\d+`/;
+        const inside = /`\(#\d+\)` is followed by `[^`]+`; move that text before `\(#\d+\)` so the issue reference ends the bullet, or write `\(part of #\d+\)` or `see #\d+`/;
+        assert.match(result.errors[0].message, /^(?:Lead|## Summary|## Added\n\n- A thing\n\nA)/.test(body) ? outside : inside);
     }
 });
 
@@ -370,6 +387,11 @@ test("a (#n) inside an HTML comment still closes the issue, so it fails; comment
 test("closing emphasis, <br> and further issue references may follow the delivering (#n)", () => {
     passes("## Fixed\n\n- **Thing** (#3)**\n- Thing (#3) (part of #4)\n- **Thing (#3)**\n- _Thing (#3)_\n- Thing (#3)<br>\n- Thing (#3)  <br/>\n- Thing (#3) (#4).\n");
     fails("## Fixed\n\n- Thing (#3) and more\n", ["Issue reference position"]);
+    const followed = fails("## Fixed\n\n- Thing (#12), see #11 and the follow-up work\n", ["Issue reference position"]);
+    assert.match(followed.errors[0].message, /`\(#12\)` is followed by `, see #11 and the follow-up work`; move that text before `\(#12\)`/);
+    const longer = fails(`## Fixed\n\n- Thing (#12) and ${"more words ".repeat(12)}\n  spilling onto a continuation line with \`code\`\n`, ["Issue reference position"]);
+    assert.match(longer.errors[0].message, /`\(#12\)` is followed by `and more words more words[^`]* \.\.\.`; move that text before `\(#12\)`/);
+    assert.equal(longer.errors[0].message.includes("code"), false, "the quoted text is capped");
     fails("## Fixed\n\n- Thing (#3) (part of #4) and more\n", ["Issue reference position"]);
     fails("## Fixed\n\n- Thing (#3) **and** more\n", ["Issue reference position"]);
 });
