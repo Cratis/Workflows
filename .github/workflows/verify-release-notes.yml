@@ -22,18 +22,24 @@ name: Verify Release Notes
 #   - a delivered issue is `(#n)` at the end of its bullet, `(part of #n)` or
 #     `see #n` keeps it open, `Cratis/Repo#n` names another repository; closing
 #     or linking keywords (`Closes #n`, `Fixes <issue URL>`, `Refs #n`, ...) never
-#     appear, and a `(#n)` anywhere else (lead paragraph, Summary, mid-bullet)
-#     would still close the issue, so it fails too;
+#     appear, also when wrapped in bold, italics or a link (`**Closes** #n`,
+#     `Closes [#n](url)`), and a `(#n)` anywhere else (lead paragraph, Summary,
+#     mid-bullet, even inside an HTML comment) would still close the issue, so it
+#     fails too;
 #   - no reviewer-facing content (test plans, verification, review notes and
 #     provenance, CI or test results, which agent or model wrote it), no relative
 #     links, no template placeholders, no Copilot "Original prompt" transcripts;
+#     an HTML `<h2>`, `<b>` or `<summary>` line counts as the heading it renders as;
 #   - the process phrasing above is what is rejected, not the topic: a bullet
 #     that says the review workflow now runs in parallel, or that validation
 #     rules now apply to commands, is a product change and passes;
 #   - at least one allowed section with a bullet.
-# Fenced and inline code are exempt, exactly as release-action ignores them when
-# closing issues, and so are closed HTML comments, which the release page never
-# shows. An unclosed `<!--` is an error: GitHub hides everything after it.
+# Fenced and inline code are exempt: release-action ignores them when closing
+# issues and the release page shows them as code. Closed HTML comments are not
+# shown on the release page, so the heading, keyword, link and placeholder rules
+# ignore them; release-action does NOT ignore them, so a `(#n)` inside a comment
+# still closes the issue and fails the position rule. An unclosed `<!--` is an
+# error: GitHub hides everything after it.
 # Whether a summary states a cohesive theme, whether a bullet is user-facing, and
 # whether an issue number exists cannot be decided from text; reviewers keep those.
 #
@@ -102,27 +108,46 @@ jobs:
           const KEYWORD = /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references)(?:[ \t]*:[ \t]*|[ \t]+)((?:[\w.-]+\/[\w.-]+)?#(\d+))/gi;
           const KEYWORD_URL = /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references)(?:[ \t]*:[ \t]*|[ \t]+)(https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+))/gi;
           // The pattern release-action closes issues with.
+          // It sees everything but fenced and inline code: HTML comments are not skipped.
           const CLOSES_ISSUE = /(?<![\w/-])\(#(\d+)\)/g;
           const ONLY_ISSUES_AFTER = /^(?:\s*\(#\d+\))*\s*[.;]?\s*$/;
           // Labels that only ever introduce process notes, bullet or not.
-          const PROCESS_LABEL = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:review|reviewed|tested|verified|test plan|test results?|notes for reviewers|reviewer notes|known follow-up)(?:\s*:|(?:\*\*|__|\*|_)\s*:)/i;
+          const PROCESS_LABEL = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:test plan|notes for reviewers|reviewer notes|known follow-up)(?:\s*:|(?:\*\*|__|\*|_)\s*:)/i;
           const REVIEWED_BY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?reviewed by\b/i;
-          // Labels that can also open a product bullet ("- Validation: rules now apply to commands (#3)"): they are
-          // notes when standalone, or when what follows reports a test or CI result.
-          const RESULT_LABEL = /^\s*(?<bullet>(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:validation|testing|verification|tests?)(?:\s*:|(?:\*\*|__|\*|_)\s*:)(?<rest>.*)$/i;
-          const RESULT_WORDING = /\b\d+\s+(?:\w+\s+)?(?:passed|passing|failed|failing)\b|\b(?:passed|passing|green|failed|failing)\b|\ball\s+(?:\w+\s+)?pass\b|\b(?:tests?|specs?|builds?|gates?|checks?)\s+pass\b|\blocally\b/i;
-          const RESULT_CLAIM = /\ball\s+(?:(?:the|unit|integration)\s+)*tests?\s+(?:now\s+)?(?:pass|passed|passing)\b|\bci\s+(?:is\s+|was\s+|has\s+been\s+)?(?:green|passing|passed)\b/i;
-          const BOLD_ONLY = /^\s*(?:\*\*|__)(.+?)(?:\*\*|__)\s*:?\s*$/;
+          // Labels that can also open a product bullet ("- Validation: rules now apply to commands (#3)", "- Review:
+          // requests are now sent when a pull request is ready (#4)"): they are notes when standalone, when not a
+          // bullet under a section, or when what follows reports a test, CI or review result.
+          const RESULT_LABEL = /^\s*(?<bullet>(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:validation|testing|verification|tests?|test results?|review|reviewed|tested|verified)(?:\s*:|(?:\*\*|__|\*|_)\s*:)(?<rest>.*)$/i;
+          // A result is reported, not described: the result word ends the clause ("all green", "12 specs passed"),
+          // so "failed commands now return a 400" and "green-field templates" stay product wording.
+          const END = String.raw`\s*(?:[.,;!:(]|$)`;
+          const RESULT_WORDING = new RegExp([
+              String.raw`\b\d+\s+(?:\w+\s+)?(?:passed|passing|failed|failing)\b`,
+              String.raw`^\s*(?:all\s+(?:\w+\s+){0,2}?)?(?:passed|passing|pass|green|failed|failing|ok|okay|done|locally|yes|no|clean|approved|lgtm|good|fine|none|pending)${END}`,
+              String.raw`\ball\s+(?:\w+\s+){0,2}?(?:pass|passed|passing|green)${END}`,
+              String.raw`\b(?:tests?|specs?|builds?|gates?|checks?)\s+(?:pass|passed)${END}`,
+              String.raw`\breviewers?\s+(?:\w+\s+){0,2}approved\b|\blgtm\b|\bno (?:blocking |new )?(?:findings|concerns)\b`,
+          ].join("|"), "i");
+          // A claim opens its own clause ("CI green, all tests passed."), so "The release is published when all tests
+          // pass" stays a product statement.
+          const CLAIM_START = String.raw`(?:^|[;,:.!]\s*)(?:(?:[-*+>]|\d{1,9}[.)])\s+)*(?:\*\*|__|\*|_)?\s*(?:done\s*[-;:,]\s*)?`;
+          const RESULT_CLAIM = new RegExp(CLAIM_START + "(?:" + [
+              String.raw`all\s+(?:(?:the|unit|integration)\s+)*tests?\s+(?:now\s+)?(?:pass|passed|passing)(?:${END}|\s+(?:locally|in\s+ci|again)\b)`,
+              String.raw`ci\s+(?:is\s+|was\s+|has\s+been\s+)?(?:green|passing|passed)(?:${END}|\s+(?:locally|again|and)\b)`,
+          ].join("|") + ")", "i");
+          const BOLD_ONLY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__)(.+?)(?:\*\*|__)\s*:?\s*$/;
           const AGENT = "(?:claude|copilot|codex|chatgpt|gpt|cursor|gemini|opus|sonnet|haiku|openai|anthropic|an? ai\\b|llm)";
+          // Authorship of the description itself starts the line ("Generated with Claude Code"); a bullet about a
+          // product feature that generates text with a model ("Text generated with OpenAI is now cached") does not.
+          const AUTHORED = new RegExp(`^\\s*(?:(?:[-*+>]|\\d{1,9}[.)])\\s+)*[^\\w\\s]*\\s*(?:(?:this|the)\\s+(?:pull request|pr|description|change|changes|code|patch|commit)\\s+(?:was|is|has been)\\s+)?(?:\\*\\*|__|\\*|_)?(?:generated|written|drafted|authored|produced)\\s+(?:entirely\\s+|mostly\\s+|partly\\s+)?(?:with|by)\\s+(?:an?\\s+)?\\[?${AGENT}`, "i");
           const PROVENANCE = new RegExp([
-              "\\b(?:same|cross)-provider\\s+review",
+              "\\b(?:same|cross)-provider\\)?\\s+review",
               "\\breview(?:ed|s)?\\s+(?:was\\s+|is\\s+)?(?:a\\s+)?(?:same|cross)-provider",
-              "\\b(?:opus|anthropic|gpt|claude|openai)-only\\s+review",
+              "\\b(?:opus|anthropic|gpt|claude|openai)-only\\s+(?:\\([^)]*\\)\\s+)?review",
               "\\breview workflow\\s+(?:has\\s+|had\\s+|also\\s+)?(?:passed|returned|ran|found)\\b",
-              `\\b(?:generated|written|drafted|authored|produced) (?:entirely |mostly )?(?:with|by) (?:an? )?\\[?${AGENT}`,
               "\\bco-authored-by:",
           ].join("|"), "i");
-          const TRANSCRIPT = /original prompt|copilot coding agent/i;
+          const TRANSCRIPT = /<summary>\s*original prompt\s*<\/summary>|^\s*(?:#{1,6}\s+|\*\*|__)?original prompt(?:\*\*|__)?\s*:?\s*$|\blet copilot coding agent\b|\bcopilot coding agent\s+(?:tips|settings|set things up)|\bfirewall rules blocked me\b/i;
           const INLINE_LINK = /\]\(\s*<?([^)\s>]+)/g;
           const REFERENCE_LINK = /^ {0,3}\[(?!\^)[^\]]+\]:\s*<?([^\s>]+)/;
           const HTML_LINK = /\b(?:href|src)\s*=\s*["']([^"']+)["']/gi;
@@ -131,8 +156,25 @@ jobs:
           const SETEXT_UNDERLINE = /^ {0,3}(=+|-+)[ \t]*$/;
           const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
           const LIST_ITEM = /^\s*(?:[-*+]|\d{1,9}[.)])[ \t]+\S/;
+          // HTML that renders as a heading, or as a bold-only line, on the release page.
+          const HTML_HEADING = /^\s*<h([1-6])\b[^>]*>(.*?)(?:<\/h\1>)?\s*$/i;
+          const HTML_BOLD_ONLY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:<p[^>]*>\s*)?<(b|strong)>(.+?)<\/\1>\s*:?\s*(?:<\/p>)?\s*$/i;
+          const HTML_SUMMARY = /<summary\b[^>]*>(.*?)<\/summary>/i;
+          const ISSUE_TEXT = /^(?:[\w.-]+\/[\w.-]+)?#\d+$/;
 
           const blank = (text, pattern, fill) => text.replace(pattern, match => match.replace(/[^\n]/g, fill));
+          const plain = html => html.replace(/<[^>]*>/g, "").trim();
+          // A closing keyword is still one when wrapped in emphasis or a link (`**Closes** #1`, `Closes [#1](url)`),
+          // so the keyword rules read the text as it renders: emphasis dropped, a link reduced to its issue
+          // reference or its URL.
+          const rendered = line => line
+              .replace(/\*+|~~|(?<!\w)_+|_+(?!\w)/g, "")
+              .replace(/<(https?:\/\/[^>\s]+)>/gi, "$1")
+              .replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, (whole, url, text) => ISSUE_TEXT.test(plain(text)) ? plain(text) : url)
+              .replace(/<\/?[a-z][^>]*>/gi, "")
+              .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g, (whole, text, url) => ISSUE_TEXT.test(text.trim()) ? text.trim() : url)
+              .replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1")
+              .replace(/[\[\]]/g, "");
           const normalize = name => name.replace(/^[*_\s]+|[*_\s:]+$/g, "").replace(/\s+/g, " ").toLowerCase();
           const quote = line => {
               const trimmed = line.trim();
@@ -143,6 +185,10 @@ jobs:
               const atx = ATX_HEADING.exec(visible[index]);
               if (atx) {
                   return { level: atx[1].length, name: (atx[2] || "").trim(), setext: false };
+              }
+              const html = HTML_HEADING.exec(visible[index]);
+              if (html) {
+                  return { level: Number(html[1]), name: plain(html[2]), setext: false, html: true };
               }
               const next = visible[index + 1];
               const underline = next === undefined ? null : SETEXT_UNDERLINE.exec(next);
@@ -177,6 +223,48 @@ jobs:
               return `Only ${ALLOWED_LIST} are allowed as sections. Breaking changes and upgrade steps are bullets in ## Changed or ## Removed; group bullets with a ### sub-heading inside an allowed section if needed.${setext}`;
           }
 
+          // The text release-action scans for `(#n)`: fenced code and then inline code removed outright (not blanked,
+          // so what surrounds a removed span joins up), with the original offset of every character kept.
+          function closingReferences(text, prose) {
+              let scanned = { text, origin: Array.from({ length: text.length }, (_, offset) => offset) };
+              for (const pattern of [FENCED_CODE, INLINE_CODE]) {
+                  let out = "";
+                  const origin = [];
+                  let last = 0;
+                  const keep = end => {
+                      out += scanned.text.slice(last, end);
+                      for (let offset = last; offset < end; offset++) {
+                          origin.push(scanned.origin[offset]);
+                      }
+                  };
+                  for (const match of scanned.text.matchAll(pattern)) {
+                      keep(match.index);
+                      last = match.index + match[0].length;
+                  }
+                  keep(scanned.text.length);
+                  scanned = { text: out, origin };
+              }
+              const starts = [0];
+              for (let offset = text.indexOf("\n"); offset >= 0; offset = text.indexOf("\n", offset + 1)) {
+                  starts.push(offset + 1);
+              }
+              const position = offset => {
+                  let line = starts.length - 1;
+                  while (starts[line] > offset) {
+                      line--;
+                  }
+                  return { line, column: offset - starts[line] };
+              };
+              const found = [];
+              for (const match of scanned.text.matchAll(CLOSES_ISSUE)) {
+                  const first = position(scanned.origin[match.index]);
+                  const last = position(scanned.origin[match.index + match[0].length - 1]);
+                  found.push({ number: match[1], line: first.line, endLine: last.line, endColumn: last.column + 1,
+                      commented: prose[first.line][first.column] === " " });
+              }
+              return found;
+          }
+
           function check({ body, repository, defaultBranch }) {
               const lines = body.replace(/\r\n?/g, "\n").split("\n");
               // Code keeps its extent (so a section holding only an example is not empty) but loses its text;
@@ -186,7 +274,12 @@ jobs:
               visible = blank(visible, INLINE_CODE, "x");
               visible = blank(visible, HTML_COMMENT, " ").split("\n");
               // The same without fenced code, which does not belong to the bullet text around it.
-              const prose = blank(blank(blank(text, FENCED_CODE, " "), INLINE_CODE, "x"), HTML_COMMENT, " ").split("\n");
+              const uncommented = blank(blank(text, FENCED_CODE, " "), INLINE_CODE, "x");
+              const prose = blank(uncommented, HTML_COMMENT, " ").split("\n");
+              // What release-action reads when it closes issues: it removes fenced and inline code, in that order,
+              // and nothing else, so a `(#n)` hidden in an HTML comment still closes its issue. Each match is
+              // mapped back to where it sits in the description.
+              const closes = closingReferences(text, prose);
 
               const violations = [];
               const report = (rule, index, fix) => violations.push({ rule, line: index === null ? null : index + 1,
@@ -249,8 +342,8 @@ jobs:
                           const leadParagraph = preamble && paragraphs > 0;
                           preamble = false;
                           if (summary) {
-                              if (heading.level !== 2) {
-                                  report("Section heading level", index, "Sections are level-2 headings: write `## Summary`.");
+                              if (heading.level !== 2 || heading.html) {
+                                  report("Section heading level", index, "Sections are level-2 Markdown headings: write `## Summary`.");
                               }
                               if (summaries > 0 || lastOrder >= 0) {
                                   report("Section order", index, `\`## Summary\` is optional, appears once and comes first, before ${ALLOWED_LIST}; move it to the top or delete it.`);
@@ -261,8 +354,8 @@ jobs:
                               section = { index, content: false, bullets: 0, prose: true, flagged: false };
                               sections.push(section);
                           } else if (order >= 0) {
-                              if (heading.level !== 2) {
-                                  report("Section heading level", index, `Sections are level-2 headings: write \`## ${ALLOWED[order]}\`.`);
+                              if (heading.level !== 2 || heading.html) {
+                                  report("Section heading level", index, `Sections are level-2 Markdown headings: write \`## ${ALLOWED[order]}\`.`);
                               }
                               if (order <= lastOrder) {
                                   report("Section order", index, `Each allowed section appears once, in the order ${ALLOWED_LIST}; merge the bullets into the earlier section.`);
@@ -315,7 +408,8 @@ jobs:
                       }
                   }
 
-                  for (const match of line.matchAll(KEYWORD)) {
+                  const shown = rendered(line);
+                  for (const match of shown.matchAll(KEYWORD)) {
                       const reference = match[2];
                       const number = match[3];
                       const fix = reference.startsWith("#")
@@ -323,7 +417,7 @@ jobs:
                           : `Replace \`${match[0].trim()}\` with a plain \`${reference}\` reference; another repository's issues are never closed from here.`;
                       report("Closing or linking keyword", index, `${fix} Keywords such as Closes, Fixes and Refs are never used in release notes.`);
                   }
-                  for (const match of line.matchAll(KEYWORD_URL)) {
+                  for (const match of shown.matchAll(KEYWORD_URL)) {
                       const sameRepository = match[3].toLowerCase() === repository.toLowerCase();
                       const fix = sameRepository
                           ? `Replace \`${match[0].trim()}\` with \`(#${match[4]})\` at the end of the bullet that delivers it, or \`(part of #${match[4]})\` if it must stay open.`
@@ -331,21 +425,28 @@ jobs:
                       report("Closing or linking keyword", index, `${fix} Keywords such as Closes, Fixes and Refs are never used in release notes, with an issue URL either.`);
                   }
                   const bold = BOLD_ONLY.exec(line);
+                  const htmlBold = HTML_BOLD_ONLY.exec(line);
+                  const summarized = HTML_SUMMARY.exec(line);
+                  const boldName = bold ? bold[1] : htmlBold ? plain(htmlBold[2]) : summarized ? plain(summarized[1]) : null;
                   const labelled = RESULT_LABEL.exec(line);
                   const underAllowedSection = Boolean(labelled && labelled.groups.bullet && section && !section.prose);
-                  if (bold && FORBIDDEN_HEADINGS.includes(normalize(bold[1]))) {
-                      // A bold line naming a forbidden heading is that heading, not a note.
-                      report("Heading not allowed", index, headingFix({ name: bold[1], setext: false }));
-                  } else if (PROCESS_LABEL.test(line) || REVIEWED_BY.test(line) || PROVENANCE.test(line) || RESULT_CLAIM.test(line)
+                  if (boldName !== null && FORBIDDEN_HEADINGS.includes(normalize(boldName))) {
+                      // A bold line or a <summary> naming a forbidden heading is that heading, not a note.
+                      report("Heading not allowed", index, headingFix({ name: boldName, setext: false }));
+                  } else if (PROCESS_LABEL.test(line) || REVIEWED_BY.test(line) || AUTHORED.test(line) || PROVENANCE.test(line) || RESULT_CLAIM.test(line)
                       || (labelled && (!underAllowedSection || RESULT_WORDING.test(labelled.groups.rest)))) {
                       report("Review, verification or provenance note", index, PR_COMMENT);
                   }
-                  for (const match of prose[index].matchAll(CLOSES_ISSUE)) {
-                      const end = bulletEnd[index];
-                      const rest = prose[index].slice(match.index + match[0].length);
-                      const after = end < 0 ? null : [rest, ...prose.slice(index + 1, end + 1)].join("\n");
+                  for (const match of closes.filter(candidate => candidate.line === index)) {
+                      if (match.commented) {
+                          report("Issue reference position", index, `\`(#${match.number})\` sits inside an HTML comment: the release page does not show the comment, but release-action still closes #${match.number}. Delete it from the comment, or write \`(part of #${match.number})\` or \`see #${match.number}\` outside the comment if it must stay open; never put issue references in comments.`);
+                          continue;
+                      }
+                      const end = bulletEnd[match.endLine];
+                      const rest = prose[match.endLine].slice(match.endColumn);
+                      const after = end < 0 ? null : [rest, ...prose.slice(match.endLine + 1, end + 1)].join("\n");
                       if (after === null || !ONLY_ISSUES_AFTER.test(after)) {
-                          report("Issue reference position", index, `Release-action closes \`(#${match[1]})\` wherever it appears; put \`(#${match[1]})\` at the end of the bullet that delivers the issue, or write \`(part of #${match[1]})\` or \`see #${match[1]}\` if it must stay open.`);
+                          report("Issue reference position", index, `Release-action closes \`(#${match.number})\` wherever it appears; put \`(#${match.number})\` at the end of the bullet that delivers the issue, or write \`(part of #${match.number})\` or \`see #${match.number}\` if it must stay open.`);
                       }
                   }
                   if (TRANSCRIPT.test(line)) {

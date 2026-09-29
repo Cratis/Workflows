@@ -12,6 +12,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf8");
+const PROGRAM_WORKFLOW = readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8");
+const SPEC_SOURCE = readFileSync(".github/scripts/tests/verify-release-notes.spec.mjs", "utf8");
 const RELEASES = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/releases.json", "utf8"));
 const VERBATIM = "This pull request description is published verbatim as the release notes; editing the description re-runs this check.";
 
@@ -175,7 +177,8 @@ test("review, verification and provenance notes fail", () => {
         "The review workflow ran twice", "The review workflow found nothing",
         "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)", "Co-Authored-By: Claude <noreply@anthropic.com>",
         "Written by Claude", "Drafted by an AI", "CI green, all tests passed.", "All tests pass.", "CI is green", "ci green",
-        "- Done; all the tests passed (#1)"]) {
+        "- Done; all the tests passed (#1)", "Review: Opus-only (same-provider) review.", "- Review: no findings", "- Review: all good",
+        "> Generated with Claude Code", "Test results: 12 passed", "This pull request was generated with Copilot"]) {
         const result = fails(`## Added\n\n- A thing\n\n${line}\n`, ["Review, verification or provenance note"]);
         assert.match(result.errors[0].message, /pull request comment/);
     }
@@ -208,7 +211,7 @@ test("product bullets that mention review, validation or testing pass", () => {
 });
 
 test("a bold-only line naming a forbidden heading fails like the heading", () => {
-    for (const line of ["**Test plan**", "**Verification**", "**Notes for reviewers**", "__Testing__", "**Test plan:**", "**Notes**:", "**Why**"]) {
+    for (const line of ["**Test plan**", "- **Test plan**", "**Verification**", "**Notes for reviewers**", "__Testing__", "**Test plan:**", "**Notes**:", "**Why**"]) {
         const result = fails(`## Added\n\n- A thing\n\n${line}\n\n- More\n`, ["Heading not allowed"]);
         assert.match(result.errors[0].message, /pull request comment|Remove the heading/);
     }
@@ -323,6 +326,129 @@ test("only a release-bound pull request is checked; every other is skipped with 
     for (const label of ["major", "minor", "patch"])
         fails(bad, ["Heading not allowed", "Closing or linking keyword", "No release notes"], { labels: [label] });
     fails(bad, ["Heading not allowed", "Closing or linking keyword", "No release notes"], { labels: ["bug", "minor"], base: "develop", defaultBranch: "develop" });
+});
+
+test("a (#n) inside an HTML comment still closes the issue, so it fails; comments stay ignored for everything else", () => {
+    for (const body of [
+        "<!-- follow-up (#7) -->\n\n## Added\n\n- A thing (#1)\n",
+        "## Added\n\n- A thing (#1) <!-- also (#8) -->\n",
+        "## Added\n\n- A thing (#1)\n  <!-- (#9) -->\n- Other (#2)\n",
+        "## Added\n\n- A thing (#1)\n<!--\nsee (#9)\n-->\n",
+        "## Added\n\n- A thing (#1) <!-- (#3) -->\r\n",
+    ]) {
+        const result = fails(body, ["Issue reference position"]);
+        assert.match(result.errors[0].message, /sits inside an HTML comment.*release-action still closes #\d+.*never put issue references in comments/);
+    }
+    // Only fenced and inline code hide a reference, as in release-action, and what surrounds removed code joins up.
+    passes("## Added\n\n- A thing (#1)\n\n```\n<!-- (#9) -->\n```\n- Another `<!-- (#8) -->` (#2)\n");
+    fails("## Added\n\n- Thing (`x`#5) done\n", ["Issue reference position"]);
+    passes("## Added\n\n- A \u{1F680} thing \u{1F389} (#5)\n");
+    // Comments are still ignored for headings, keywords, placeholders and links.
+    passes("## Added\n\n- A thing (#1) <!-- Closes Cratis/Chronicle#3, ## Test plan, [x](docs/y.md) -->\n");
+});
+
+test("closing keywords fail when wrapped in emphasis or a link", () => {
+    for (const line of ["**Closes** #1", "**Closes #1**", "_Fixes_ #2", "__Resolves__: #2", "Closes [#3](https://github.com/o/r/issues/3)",
+        "Fixes: [Cratis/Arc#4](https://github.com/Cratis/Arc/issues/4)", "Resolves [the issue](https://github.com/Cratis/Example/issues/6)",
+        "Closes <https://github.com/Cratis/Example/issues/6>", "Closes [#3][ref]\n\n[ref]: https://github.com/o/r/issues/3",
+        "Fixes <a href=\"https://github.com/Cratis/Example/issues/6\">#6</a>", "**Refs** [#5](https://github.com/Cratis/Example/issues/5)",
+        "- A fix (#9) Closes [#3](https://github.com/o/r/issues/3)"])
+        assert(run(`## Fixed\n\n- A fix (#9)\n\n${line}\n`).rules.includes("Closing or linking keyword"), line);
+    passes("## Fixed\n\n- The [fix strategy](https://cratis.io/fix) is now **configurable** (#1)\n- Adds _closes_ support (#2)\n");
+});
+
+test("HTML that renders as a reviewer heading fails like the Markdown heading; HTML section names are not sections", () => {
+    for (const html of ["<h2>Test plan</h2>", "<h3>Verification</h3>", "<H2>Notes for reviewers</H2>", "<h4>Testing</h4>", "<b>Test plan</b>",
+        "<strong>Verification</strong>", "<b>Test plan:</b>", "<p><b>Tests</b></p>", "- <b>Test plan</b>",
+        "<details><summary>Test plan</summary>", "<summary>Verification</summary>"]) {
+        const result = fails(`## Added\n\n- A thing (#1)\n\n${html}\n\n- ran it\n`, ["Heading not allowed"]);
+        assert.match(result.errors[0].message, /pull request comment/);
+    }
+    const level = fails("<h2>Added</h2>\n\n- A thing (#1)\n", ["Section heading level"]);
+    assert.equal(level.errors[0].rule, "Section heading level");
+    assert.match(level.errors[0].message, /write `## Added`/);
+    passes("## Added\n\n- Renders <b>bold</b> and <h2> headings in notes (#1)\n- Adds `<h2>Test plan</h2>` to the output (#2)\n");
+});
+
+test("ordinary product bullets are not mistaken for review notes, results or provenance", () => {
+    const bullets = [
+        "Specifications can now generate a test plan for a feature (#1)",
+        "Test plan generation is available from the CLI (#2)",
+        "The tests project template now targets .NET 10 (#3)",
+        "Tests can now be filtered by tag (#4)",
+        "Adds a `Verified` flag to signed events (#5)",
+        "Events are now verified against their schema before append (#6)",
+        "Reviewed items are now shown first in the workbench (#7)",
+        "Reviewers see pending items in the inbox (#8)",
+        "Review: requests are now sent when a pull request is ready (#9)",
+        "Review: submitting a review now notifies the author (#10)",
+        "Reviewed: items can be filtered in the workbench (#11)",
+        "CI templates now target Ubuntu 24.04 (#12)",
+        "Adds a CI status badge to the project template (#13)",
+        "Release notes are now generated from pull requests (#14)",
+        "Notes can now be attached to an observer (#15)",
+        "A summary view is now available for projections (#16)",
+        "Summary: the read model now includes totals (#17)",
+        "Fixes the #1 priority ordering bug for queues (#18)",
+        "See https://github.com/Cratis/Chronicle/blob/main/Source/Foo.cs#L10 for details (#19)",
+        "Adds C# 14 support for generators (#20)",
+        "Adds support for F# (#3)",
+        "Supports `#region` folding in the generated code (#21)",
+        "Supports #region folding in the generated code (#22)",
+        "Renames the type in `Foo` (#12) (#13)",
+        "Failed commands now return a 400 status (#23)",
+        "Failing observers are now retried with backoff (#24)",
+        "Passing a null name now throws an ArgumentNullException (#25)",
+        "Green-field templates now include a Dockerfile (#26)",
+        "Text generated with OpenAI is now cached (#27)",
+        "Content written by Claude can now be imported as a document (#28)",
+        "Code generated by Copilot can now be attached to a review (#29)",
+        "Generated with the new source generator (#30)",
+        "Adds an integration with Anthropic models for summarization (#31)",
+        "Validation: a command with an empty name is now rejected (#32)",
+        "Testing: new Specification helpers are available (#33)",
+        "Verification: signatures are now checked on import (#34)",
+        "Tests: the runner now supports parallel execution (#35)",
+        "Test results are now exposed as a read model (#36)",
+        "Test results: a new report format is available (#37)",
+        "Tested: how the runner handles timeouts is now configurable (#38)",
+        "The Copilot coding agent can now be configured per tenant (#39)",
+        "Original prompt text is now preserved on the audit log (#40)",
+        "The build now passes the analyzer settings through (#42)",
+        "Checks now pass through the pipeline in order (#43)",
+        "Refs are now resolved lazily (#44)",
+        "References to removed types are reported as diagnostics (#45)",
+        "Closes the connection gracefully on shutdown (#46)",
+        "Closed sessions are purged after one hour (#49)",
+        "Adds `Closes` and `Refs` as keywords for the parser (#53)",
+        "The release is published when all tests pass (#54)",
+        "When all tests pass, the release is published (#55)",
+        "Publishing waits until CI is green (#56)",
+        "AI models can now be selected per request (#57)",
+        "An LLM-generated title is now stored on the read model (#58)",
+        "Written by the user, the note is stored verbatim (#59)",
+        "Approved requests are now routed to the owner (#60)",
+    ];
+    assert(bullets.length >= 40);
+    for (const bullet of bullets)
+        assert.equal(run(`## Added\n\n- ${bullet}\n`).status, 0, bullet);
+    passes("## Added\n\n" + bullets.map(bullet => `- ${bullet}`).join("\n") + "\n");
+    passes("### Added in Chronicle\n\n".replace(/^/, "## Added\n\n") + "- A thing (#1)\n");
+    passes("## Summary\n\nReviews are faster, tests run in parallel and a CI template ships with it.\n\n## Added\n\n- A thing (#1)\n");
+});
+
+test("the program workflow runs whenever a file the spec reads changes", () => {
+    const paths = section => {
+        const block = PROGRAM_WORKFLOW.split(`\n  ${section}:\n`)[1].split("\n    paths:\n")[1].split(/\n(?! {6}- )/)[0];
+        return block.split("\n").map(line => line.replace(/^ {6}- /, "").trim());
+    };
+    const covers = (patterns, file) => patterns.some(pattern => pattern === file
+        || (pattern.endsWith("/**") && file.startsWith(pattern.slice(0, -2))));
+    const read = [...SPEC_SOURCE.matchAll(/readFileSync\(\s*"(\.github\/[^"]+)"/g)].map(match => match[1]);
+    assert(read.length >= 3, read.join());
+    for (const section of ["pull_request", "push"])
+        for (const file of [...read, ".github/workflows/verify-release-notes-program.yml", ".github/scripts/tests/verify-release-notes.spec.mjs"])
+            assert(covers(paths(section), file), `${section} paths must cover ${file}`);
 });
 
 test("real release bodies: flagged ones fail with the expected rules, clean ones pass", () => {
