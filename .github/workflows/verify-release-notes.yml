@@ -200,6 +200,9 @@ jobs:
           // required (#4)"); inside a bullet those words describe the feature, so the strict tail leaves them out.
           const NOTE_RESULT_STRICT = String.raw`\s*(?:(?:is|was|has\s+been)\s+)?(?:pending|passed|passing|done|complete|completed|approved|clean|green|ok|skipped|missing|unavailable)\b`;
           const NOTE_TAIL_STRICT = new RegExp(`^(?:${NOTE_RESULT_STRICT})?(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
+          // An outright result or provenance claim ("Reviewed with Anthropic models only") keeps every result word:
+          // only the topic path is narrowed for product wording.
+          const NOTE_TAIL_CLAIM = new RegExp(`^(?:${NOTE_RESULT})?(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
           const NOTE_TAIL_LOOSE = new RegExp(`^(?:${NOTE_RESULT}|\\s*[:;,.!\u2014\u2013-]\\s*\\S|\\s*\\((?!#)|[\\s:;,.!]*$)`, "i");
           const PROVENANCE_RESULT = new RegExp(NOTE_START + "(?:" + [
               // "Reviewed with Anthropic models only (...)": a clause that opens by saying who or what reviewed it.
@@ -224,7 +227,7 @@ jobs:
                   return true;
               }
               const result = PROVENANCE_RESULT.exec(line);
-              if (result && (!strict || strictTail(line.slice(result.index + result[0].length)))) {
+              if (result && (!strict || NOTE_TAIL_CLAIM.test(withoutIssues(line.slice(result.index + result[0].length))))) {
                   return true;
               }
               const topic = PROVENANCE_TOPIC.exec(line);

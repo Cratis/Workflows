@@ -93,6 +93,13 @@ test("a product bullet naming a review feature with its delivered issue passes; 
     assert.equal(result.status, 1);
 });
 
+test("an outright review result or provenance claim in a bullet fails even when it ends in an issue reference", () => {
+    for (const bullet of ["- The review workflow passed (#5)", "- Reviewed by Claude (#5)", "- Reviewed with Anthropic models only (#5)"]) {
+        const result = run(`## Changed\n\n- Real change (#2)\n${bullet}\n`);
+        assert.equal(result.status, 1, bullet);
+    }
+});
+
 test("product bullets saying a review is required, requested or only applies pass", () => {
     passes("## Changed\n\n- Cross-provider review is required (#4)\n- A same-provider review is requested for drafts (#5)\n");
 });
