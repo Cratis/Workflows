@@ -407,6 +407,33 @@ The common workflow bootstrap also propagates **`.github/codeql/codeql-config.ym
 
 ---
 
+## Verifying release intent and release notes
+
+Two pull-request gates run in releasing repositories through thin callers that hold no logic:
+
+- **`verify-release-intent.yml`** (called by each repository's `verify-semver-label.yml`) requires exactly one of `major`, `minor`, `patch` or `no-release`.
+- **`verify-release-notes.yml`** checks the pull request description, because [release-action](https://github.com/Cratis/release-action) publishes it verbatim as the GitHub release and closes every issue written as `(#n)` outside code.
+
+The release-notes gate checks release-bound pull requests only: those into the default branch that carry exactly one of `major`, `minor` or `patch`. A pull request with no release label yet, `no-release`, more than one release label, a Dependabot pull request, or one into another base passes with a notice, and the check re-runs when a release label is added or the description is edited. For a release-bound pull request it enforces the release-note contract:
+
+- An optional summary, first: either a short `## Summary` section of prose or one lead paragraph without a heading, not both. Then only `## Added`, `## Changed`, `## Fixed`, `## Removed`, `## Security` and `## Deprecated`, in that order, each once and only when non-empty, with at least one bullet. `###` sub-headings may group bullets inside a section.
+- A delivered issue is `(#n)` at the end of its bullet. `(part of #n)` or `see #n` keeps an issue open, and `Cratis/Repo#n` names another repository. `Closes`, `Fixes`, `Refs` and the other closing or linking keywords never appear, with `#n` or an issue URL, and a `(#n)` in the summary or in the middle of a bullet fails because release-action would still close it.
+- No Overview, Test plan, Verification, Notes or other headings, no review, verification, test-result or provenance notes (which agent or model wrote it, `Reviewed by`, CI results), no relative links, no template placeholders, no unclosed `<!--` and no Copilot "Original prompt" transcripts. A bullet that merely mentions review or validation as a product change, such as `- Validation: rules now apply to commands (#3)`, passes. Reviewer-facing information goes in a pull request comment.
+
+Fenced code, inline code and closed HTML comments are exempt. Each violation is reported as its own error, naming the rule, the offending line and the fix. Whether a summary states a cohesive theme, whether a bullet is user-facing and whether an issue number exists cannot be decided from text; reviewers keep those.
+
+A repository calls the gate with a job named `release-notes`, so the check reads `release-notes / verify` and does not collide with other `verify / verify` gates. The caller runs on `opened`, `edited`, `reopened`, `synchronize`, `labeled`, `unlabeled` and `ready_for_review`:
+
+```yaml
+jobs:
+  release-notes:
+    uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main
+```
+
+The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including real release bodies.
+
+---
+
 ## Workflows in this repository
 
 ### `cleanup-pr-artifacts.yml`
