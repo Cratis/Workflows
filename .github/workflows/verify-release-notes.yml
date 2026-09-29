@@ -23,7 +23,9 @@ name: Verify Release Notes
 #     `### Added` is only a sub-heading; before or between sections it is a
 #     section at the wrong level);
 #   - a delivered issue is `(#n)` at the end of its bullet (only more references,
-#     closing emphasis, `<br>` or punctuation may follow), `(part of #n)` or
+#     including `(part of #n)`, `(see #n)` and `(Cratis/Repo#n)`, closing emphasis,
+#     `<br>` or punctuation may follow), one `(#n)` per issue: `(#56, #57)` closes
+#     nothing, write `(#56) (#57)`; `(part of #n)` or
 #     `see #n` keeps it open, `Cratis/Repo#n` names another repository; closing
 #     or linking keywords (`Closes #n`, `Fixes <issue URL>`, `Refs #n`, ...) never
 #     appear, also when wrapped in bold, italics or a link (`**Closes** #n`,
@@ -71,14 +73,23 @@ name: Verify Release Notes
 # interpolation into the script, so a description cannot inject shell.
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      runs-on:
+        description: >-
+          Runner label the gate job runs on. Callers in private repositories
+          should pass their self-hosted scale-set label (for example cratis-arc)
+          so the gate does not consume billed GitHub-hosted minutes.
+        type: string
+        required: false
+        default: ubuntu-latest
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
 
     steps:
@@ -126,8 +137,11 @@ jobs:
           // It sees everything but fenced and inline code: HTML comments are not skipped.
           const CLOSES_ISSUE = /(?<![\w/-])\(#(\d+)\)/g;
           // What may follow the delivering `(#n)` and still count as the end of the bullet: more issue references
-          // (also `(part of #n)`), closing emphasis, a trailing `<br>` and sentence punctuation.
-          const ONLY_ISSUES_AFTER = /^(?:\s*(?:\((?:part of )?#\d+\)|\*\*|__|\*|_|<br\s*\/?>|[.;]))*\s*$/i;
+          // (`(part of #n)`, `(see #n)`, `(Cratis/Repo#n)` too), closing emphasis, a trailing `<br>` and sentence
+          // punctuation (a `:` may introduce nested bullets).
+          const ONLY_ISSUES_AFTER = /^(?:\s*(?:\((?:(?:part of|see) )?(?:[\w.-]+\/[\w.-]+)?#\d+\)|\*\*|__|\*|_|<br\s*\/?>|[.,;:!?]))*\s*$/i;
+          // `(#56, #57)` closes nothing: release-action only recognises a `(#n)` of its own.
+          const GROUPED_ISSUES = /\(#\d+(?:\s*[, ]\s*#\d+)+\)/g;
           // Labels that only ever introduce process notes, bullet or not.
           const PROCESS_LABEL = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:test plan|notes for reviewers|reviewer notes|known follow-up)(?:\s*:|(?:\*\*|__|\*|_)\s*:)/i;
           // "Reviewed by ..." opens a note only outside a bullet or prose section: "- Reviewed by status is now shown
@@ -518,6 +532,10 @@ jobs:
                   } else if (PROCESS_LABEL.test(noted) || (!productText && REVIEWED_BY.test(noted)) || AUTHORED.test(noted) || provenance(noted, productText) || RESULT_CLAIM.test(noted)
                       || (labelled && (!underAllowedSection || RESULT_WORDING.test(labelled.groups.rest)))) {
                       report("Review, verification or provenance note", index, PR_COMMENT);
+                  }
+                  for (const match of prose[index].matchAll(GROUPED_ISSUES)) {
+                      const numbers = [...match[0].matchAll(/\d+/g)].map(number => number[0]);
+                      report("Issue reference position", index, `\`${match[0]}\` closes nothing: release-action only recognises a \`(#n)\` of its own. Write each delivered issue as its own \`(#n)\`: \`${numbers.map(number => `(#${number})`).join(" ")}\`.`);
                   }
                   for (const match of closes.filter(candidate => candidate.line === index)) {
                       if (match.commented) {

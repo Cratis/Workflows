@@ -73,7 +73,8 @@ test("the program reaches the runner only through the environment", () => {
         "PR_AUTHOR: ${{ github.event.pull_request.user.login }}",
         "PR_BASE: ${{ github.event.pull_request.base.ref }}",
         "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
-        "workflow_call: {}",
+        "workflow_call:",
+        "runs-on: ${{ inputs.runs-on }}",
         "contents: read"])
         assert(WORKFLOW.includes(variable), variable);
 });
@@ -85,6 +86,15 @@ test("a description in the allowed shape passes and writes a summary", () => {
 
 test("allowed issue references pass: (#n), (part of #n), see #n and Cratis/Repo#n", () => {
     passes("## Changed\n\n- Delivered (#1)\n- Partial (part of #2)\n- Related, see #3\n- Elsewhere Cratis/Chronicle#4\n");
+});
+
+test("the runner is an optional runs-on input that defaults to ubuntu-latest", () => {
+    const input = /^      runs-on:\n((?: {8}.*\n)+)/m.exec(WORKFLOW);
+    assert(input, "workflow_call declares a runs-on input");
+    assert(/^ {8}type: string$/m.test(input[1]));
+    assert(/^ {8}required: false$/m.test(input[1]));
+    assert(/^ {8}default: ubuntu-latest$/m.test(input[1]));
+    assert.equal(WORKFLOW.includes("runs-on: ubuntu-latest"), false, "the job does not hard-code its runner");
 });
 
 test("allowed ### sub-headings group bullets inside a section", () => {
@@ -362,6 +372,30 @@ test("closing emphasis, <br> and further issue references may follow the deliver
     fails("## Fixed\n\n- Thing (#3) and more\n", ["Issue reference position"]);
     fails("## Fixed\n\n- Thing (#3) (part of #4) and more\n", ["Issue reference position"]);
     fails("## Fixed\n\n- Thing (#3) **and** more\n", ["Issue reference position"]);
+});
+
+test("sentence punctuation after the delivering (#n) is still the end of the bullet", () => {
+    for (const ending of [".", ",", ";", ":", "!", "?", " ,"])
+        passes(`## Added\n\n- Thing (#1)${ending}\n`);
+    passes("## Added\n\n- Thing (#1):\n  - detail one\n  - detail two\n- Other (#2)\n");
+    fails("## Added\n\n- Thing (#1): more text\n", ["Issue reference position"]);
+    fails("## Added\n\n- Thing (#1):\n  continued text\n", ["Issue reference position"]);
+});
+
+test("cross-repository and (part of|see ...) references may follow the delivering (#n)", () => {
+    passes("## Added\n\n- Thing (#1) (Cratis/Arc#7)\n- Thing (#2) (part of Cratis/Arc#7)\n- Thing (#3) (see #9)\n- Thing (#4) (see Cratis/Arc#9).\n- Thing (#5) (#6) (Cratis/Arc#7)\n");
+    fails("## Added\n\n- Thing (#1) (Cratis/Arc#7) and more\n", ["Issue reference position"]);
+    fails("## Added\n\n- Thing (#1) (see #9) and more\n", ["Issue reference position"]);
+    fails("## Added\n\n- Thing (#1) (see the docs)\n", ["Issue reference position"]);
+});
+
+test("(#56, #57) closes nothing and fails: one (#n) per issue", () => {
+    for (const grouped of ["(#56, #57)", "(#56,#57)", "(#56 #57)", "(#56, #57, #58)"]) {
+        const result = fails(`## Added\n\n- Thing ${grouped}\n`, ["Issue reference position"]);
+        assert.match(result.errors[0].message, /closes nothing: release-action only recognises a `\(#n\)` of its own\. Write each delivered issue as its own `\(#n\)`: `\(#56\) \(#57\)/);
+    }
+    fails("## Summary\n\nTheme (#56, #57)\n\n## Added\n\n- Thing (#1)\n", ["Issue reference position"]);
+    passes("## Added\n\n- Thing (#56) (#57)\n- Thing (part of #58, #59)\n- Thing, see #58 and #59 (#60)\n- Thing `(#56, #57)` (#61)\n");
 });
 
 test("closing keywords fail when wrapped in emphasis or a link", () => {
