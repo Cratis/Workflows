@@ -507,7 +507,10 @@ jobs:
                   for (const match of shown.matchAll(KEYWORD)) {
                       const reference = match[2];
                       const number = match[3];
-                      const fix = reference.startsWith("#")
+                      const bracketed = shown[match.index - 1] === "(" && shown[match.index + match[0].length] === ")";
+                      const fix = reference.startsWith("#") && bracketed
+                          ? `Replace \`(${match[0].trim()})\` with \`(#${number})\` if this change delivers it, or \`(part of #${number})\` if it must stay open.`
+                          : reference.startsWith("#")
                           ? `Replace \`${match[0].trim()}\` with \`(#${number})\` at the end of the bullet that delivers it, or \`(part of #${number})\` if it must stay open.`
                           : `Replace \`${match[0].trim()}\` with a plain \`${reference}\` reference; another repository's issues are never closed from here.`;
                       report("Closing or linking keyword", index, `${fix} Keywords such as Closes, Fixes and Refs are never used in release notes.`);

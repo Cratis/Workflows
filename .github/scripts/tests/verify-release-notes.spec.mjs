@@ -116,6 +116,13 @@ test("closing and linking keywords fail with the rewrite to (#n) or (part of #n)
     passes("## Fixed\n\n- A hotfix #3 regression and the prefix #4 issue (#5)\n");
 });
 
+test("a keyword directly inside parentheses quotes the bracketed text as the thing to replace", () => {
+    const bracketed = fails("## Fixed\n\n- Thing (Refs #2880)\n", ["Closing or linking keyword"]);
+    assert.match(bracketed.errors[0].message, /Replace `\(Refs #2880\)` with `\(#2880\)` if this change delivers it, or `\(part of #2880\)` if it must stay open\./);
+    const bare = fails("## Fixed\n\n- Thing, Refs #2880\n", ["Closing or linking keyword"]);
+    assert.match(bare.errors[0].message, /Replace `Refs #2880` with `\(#2880\)` at the end of the bullet that delivers it, or `\(part of #2880\)` if it must stay open\./);
+});
+
 test("every error names the rule, the line and the fix, and says the description is published verbatim", () => {
     const result = fails("## Fixed\n\n- A fix\n\nRefs #93\n", ["Closing or linking keyword"]);
     assert.match(result.errors[0].message, /^Closing or linking keyword: Line 5 `Refs #93`\. Replace `Refs #93`/);
