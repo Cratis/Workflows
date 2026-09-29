@@ -196,7 +196,10 @@ jobs:
           // In product wording the note must end the clause: nothing but a result word, punctuation, closing emphasis
           // or `<br>` after it. Elsewhere any punctuation that continues the note ("Cross-provider review: no
           // findings") is enough.
-          const NOTE_TAIL_STRICT = new RegExp(`^(?:${NOTE_RESULT})?(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
+          // Product wording can say a review "is required", "is requested" or "only" applies ("Cross-provider review is
+          // required (#4)"); inside a bullet those words describe the feature, so the strict tail leaves them out.
+          const NOTE_RESULT_STRICT = String.raw`\s*(?:(?:is|was|has\s+been)\s+)?(?:pending|passed|passing|done|complete|completed|approved|clean|green|ok|skipped|missing|unavailable)\b`;
+          const NOTE_TAIL_STRICT = new RegExp(`^(?:${NOTE_RESULT_STRICT})?(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
           const NOTE_TAIL_LOOSE = new RegExp(`^(?:${NOTE_RESULT}|\\s*[:;,.!\u2014\u2013-]\\s*\\S|\\s*\\((?!#)|[\\s:;,.!]*$)`, "i");
           const PROVENANCE_RESULT = new RegExp(NOTE_START + "(?:" + [
               // "Reviewed with Anthropic models only (...)": a clause that opens by saying who or what reviewed it.

@@ -79,6 +79,18 @@ test("the program reaches the runner only through the environment", () => {
         assert(WORKFLOW.includes(variable), variable);
 });
 
+test("node is set up with the pinned setup-node before the program runs", () => {
+    const setup = WORKFLOW.indexOf("uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+    assert(setup > 0, "the verify job sets up node with the pinned actions/setup-node");
+    assert(/uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020[^\n]*\n\s+with:\n\s+node-version: 24\n/.test(WORKFLOW), "node-version 24");
+    assert(setup < WORKFLOW.indexOf("        run: |\n"), "set up before the program step");
+    assert(readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8").includes("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"), "same SHA as the program-test workflow");
+});
+
+test("product bullets saying a review is required, requested or only applies pass", () => {
+    passes("## Changed\n\n- Cross-provider review is required (#4)\n- A same-provider review is requested for drafts (#5)\n");
+});
+
 test("a description in the allowed shape passes and writes a summary", () => {
     const result = passes(GOOD);
     assert.match(result.summary, /follows the release-note contract/);
