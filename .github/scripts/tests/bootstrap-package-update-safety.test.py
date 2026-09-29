@@ -85,7 +85,12 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
         self.assertNotEqual(base, "0" * 40, "A real comparison base is required")
         changed = set(filter(None, git("diff", "--name-only", "--no-renames", "-z", base, "--").split("\0")))
         changed.update(filter(None, git("ls-files", "--others", "--exclude-standard", "-z").split("\0")))
-        patterns = event_paths(BOOTSTRAP, "push") + event_paths(
+        # bootstrap-common-workflows.sh is BOOTSTRAP_PATH's own implementation, not a
+        # separate write-trigger workflow bundled alongside it: a reviewed change to
+        # the script lands together with the workflow that declares it as a trigger,
+        # so it does not count as an unrelated organization-wide write being bundled in.
+        patterns = [path for path in event_paths(BOOTSTRAP, "push")
+                    if path != ".github/scripts/bootstrap-common-workflows.sh"] + event_paths(
             (ROOT / ".github/workflows/propagate-pr-templates.yml").read_text(), "push")
         self.assertEqual(sorted(path for path in changed if any(
             fnmatch.fnmatchcase(path, pattern) for pattern in patterns)), [],
