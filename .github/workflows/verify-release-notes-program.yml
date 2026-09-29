@@ -9,6 +9,7 @@ on:
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
       - .github/scripts/tests/fixtures/release-notes/**
+      - .github/pull_request_template.md
   push:
     branches: [main]
     paths:
@@ -16,6 +17,7 @@ on:
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
       - .github/scripts/tests/fixtures/release-notes/**
+      - .github/pull_request_template.md
 
 permissions:
   contents: read

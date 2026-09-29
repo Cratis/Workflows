@@ -439,6 +439,8 @@ The optional `runs-on` input (default `ubuntu-latest`) names the runner label, a
       runs-on: cratis-arc
 ```
 
+The pull request template's comment states the same contract; it is propagated to every repository that is not in the template propagation's ignore list, including those where the check is not installed, so it says editing the description re-runs the check "where it is installed". Its placeholder bullets carry no `(#n)`: the comment shows the syntax, and a description that only fills in the placeholders must not arrive with a literal `(#123)`.
+
 The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including real release bodies.
 
 ---
@@ -479,7 +481,7 @@ separate approval before merging a watched file.
 
 Propagates the Pull Request and Issue templates from this repository (`Cratis/Workflows`) directly to the default branch of every other non-archived Cratis repository. Silently skips repositories where files are already up to date.
 
-**Excluded repositories:** `Workflows`, `cratis.github.io`, `StudioIssues`.
+**Excluded repositories:** `Workflows`, `cratis.github.io`, `StudioIssues`, `Dockerfiles`, `.github`, `cratis.studio`, and the repositories that keep a deliberately customized pull request template (Arc, Arc.Kotlin, Arc.TypeScript, Chronicle, Chronicle.Dapr, Chronicle.Kotlin, Chronicle.Python, Chronicle.Wolverine, Prompter, Scene, Screenplay, Screenplay.CritterStack, Screenplay.Generation, Strategy, Studio, Synopsis). The push replaces a template that differs, so a repository whose template has content beyond a version of the org template is added to `REPOS_TO_IGNORE`, with the reason in the comment beside it. Excluding a repository skips it entirely, so these repositories also stop receiving issue-template updates. `.github` is the organization default template (`Cratis/.github`), shown in repositories without their own; it is kept in step by a pull request in that repository.
 
 **Secrets required:** `PAT_WORKFLOWS` — classic PAT with `repo` scope, or fine-grained PAT with **Contents** read/write + **Metadata** read. The PAT owner must be a bypass actor on each target repository's branch protection ruleset.
 
