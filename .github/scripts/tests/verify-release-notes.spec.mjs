@@ -135,6 +135,10 @@ test("allowed section names at another level fail and name the level-2 form", ()
     const result = fails("### Fixed\n\n- A fix (#1)\n", ["Section heading level"]);
     assert.match(result.errors[0].message, /write `## Fixed`/);
     fails("# Added\n\n- A thing\n", ["Section heading level"]);
+    fails("A lead paragraph.\n\n### Added\n\n- A thing (#1)\n", ["Section heading level"]);
+    // Inside an open section a `###` with an allowed name is only a sub-heading; the level rule applies at the top.
+    passes("## Changed\n\n### Added\n\n- A thing (#1)\n\n### Fixed\n\n- Another (#2)\n");
+    passes("## Changed\n\n<h3>Removed</h3>\n\n- A thing (#1)\n");
 });
 
 test("an optional ## Summary may come first, once, as prose, and not together with a lead paragraph", () => {
@@ -175,7 +179,7 @@ test("the preamble is at most one lead paragraph without bullets or sub-headings
 });
 
 test("review, verification and provenance notes fail", () => {
-    for (const line of ["Review: two reviewers approved", "Reviewed: yes", "Reviewed by Opus", "- Reviewed by the maintainers",
+    for (const line of ["Review: two reviewers approved", "Reviewed: yes", "Reviewed by Opus", "Reviewed by the maintainers", "- Reviewed by Opus",
         "**Verification:** all green", "- Tested: locally", "Testing: specs pass", "__Validation__: done", "Validation: rules apply",
         "Test plan: run the suite", "- Test plan: run the suite", "Verified: locally", "Tests: 400 passed", "- Tests: 400 passed",
         "- Testing: 12 specs passed", "- Verification: CI green", "Reviewed with a same-provider review", "cross-provider review pending",
@@ -353,6 +357,13 @@ test("a (#n) inside an HTML comment still closes the issue, so it fails; comment
     passes("## Added\n\n- A thing (#1) <!-- Closes Cratis/Chronicle#3, ## Test plan, [x](docs/y.md) -->\n");
 });
 
+test("closing emphasis, <br> and further issue references may follow the delivering (#n)", () => {
+    passes("## Fixed\n\n- **Thing** (#3)**\n- Thing (#3) (part of #4)\n- **Thing (#3)**\n- _Thing (#3)_\n- Thing (#3)<br>\n- Thing (#3)  <br/>\n- Thing (#3) (#4).\n");
+    fails("## Fixed\n\n- Thing (#3) and more\n", ["Issue reference position"]);
+    fails("## Fixed\n\n- Thing (#3) (part of #4) and more\n", ["Issue reference position"]);
+    fails("## Fixed\n\n- Thing (#3) **and** more\n", ["Issue reference position"]);
+});
+
 test("closing keywords fail when wrapped in emphasis or a link", () => {
     for (const line of ["**Closes** #1", "**Closes #1**", "_Fixes_ #2", "__Resolves__: #2", "Closes [#3](https://github.com/o/r/issues/3)",
         "Fixes: [Cratis/Arc#4](https://github.com/Cratis/Arc/issues/4)", "Resolves [the issue](https://github.com/Cratis/Example/issues/6)",
@@ -434,6 +445,17 @@ test("ordinary product bullets are not mistaken for review notes, results or pro
         "An LLM-generated title is now stored on the read model (#58)",
         "Written by the user, the note is stored verbatim (#59)",
         "Approved requests are now routed to the owner (#60)",
+        "Pull requests reviewed by the new bot are labelled (#61)",
+        "Reviewed by status is now shown on the dashboard (#62)",
+        "Reviewed by default, pull requests are now assigned (#63)",
+        "Reviewed with Anthropic models is now supported (#64)",
+        "Reviewed by Claude Code is now a supported reviewer (#65)",
+        "Cross-provider review pending until the router lands (#66)",
+        "The review workflow returned findings for the pull request now appear inline (#67)",
+        "The review workflow ran twice as fast (#68)",
+        "Adds a [Fixes](https://github.com/Cratis/Example/issues/3) page to the docs (#69)",
+        "See the [Closes](https://github.com/Cratis/Example/issues/3) docs (#70)",
+        "Use [the docs](https://cratis.io/docs and read on (#71)",
     ];
     assert(bullets.length >= 40);
     for (const bullet of bullets)
@@ -441,6 +463,16 @@ test("ordinary product bullets are not mistaken for review notes, results or pro
     passes("## Added\n\n" + bullets.map(bullet => `- ${bullet}`).join("\n") + "\n");
     passes("### Added in Chronicle\n\n".replace(/^/, "## Added\n\n") + "- A thing (#1)\n");
     passes("## Summary\n\nReviews are faster, tests run in parallel and a CI template ships with it.\n\n## Added\n\n- A thing (#1)\n");
+    // A `## Summary` and a lead paragraph are product wording too: the note must end the clause to be one.
+    for (const text of ["Reviewed with the new review page, comments are now threaded.", "Cross-provider review: routing is now configurable.",
+        "Same-provider review: fallback now works.", "The review workflow ran twice as fast."]) {
+        passes(`## Summary\n\n${text}\n\n## Added\n\n- A thing (#1)\n`);
+        passes(`${text}\n\n## Added\n\n- A thing (#1)\n`);
+    }
+    fails("## Summary\n\nCross-provider review pending\n\n## Added\n\n- A thing (#1)\n", ["Review, verification or provenance note"]);
+    fails("Opus-only review\n\n## Added\n\n- A thing (#1)\n", ["Review, verification or provenance note"]);
+    // A stand-alone line outside a bullet, a summary or the lead paragraph keeps the loose tail.
+    fails("## Added\n\n- A thing (#1)\n\nSame-provider review: no findings\n", ["Review, verification or provenance note"]);
 });
 
 test("a heading is a line of the description: its keywords, (#n), links, placeholders and provenance fail too", () => {
@@ -468,6 +500,10 @@ test("a link keeps its text when the text is a closing keyword", () => {
         "[Fixes](https://github.com/Cratis/Example/pull/3)", "**[Fixes](https://github.com/Cratis/Example/issues/3)**",
         "<a href=\"https://github.com/Cratis/Example/issues/3\">Closes</a>"])
         fails(`## Fixed\n\n- A fix (#9)\n\n${line}\n`, ["Closing or linking keyword"]);
+    // ... but only where the link opens a clause; inside a sentence the link is reduced to its URL.
+    for (const line of ["- [Fixes](https://github.com/Cratis/Example/issues/3) (#9)", "- A fix. [Closes](https://github.com/Cratis/Example/issues/3) (#9)",
+        "- A fix ([Fixes](https://github.com/Cratis/Example/issues/3)) (#9)", "- A fix; [Refs](https://github.com/Cratis/Example/pull/3) (#9)"])
+        fails(`## Fixed\n\n${line}\n`, ["Closing or linking keyword"]);
     passes("## Fixed\n\n- Reverts [the fix](https://github.com/Cratis/Example/pull/3) for observers (#1)\n- See [#3](https://github.com/Cratis/Example/issues/3) (#2)\n");
 });
 

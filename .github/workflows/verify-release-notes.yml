@@ -19,12 +19,16 @@ name: Verify Release Notes
 #     `## Changed`, `## Fixed`, `## Removed`, `## Security`, `## Deprecated`, in
 #     that order, each once and only when it has bullets (prose or a code example
 #     alone, such as a `None.` filler, is not a change list); `###` sub-headings
-#     inside a section, never with a forbidden name;
-#   - a delivered issue is `(#n)` at the end of its bullet, `(part of #n)` or
+#     inside a section, never with a forbidden name (inside a section even
+#     `### Added` is only a sub-heading; before or between sections it is a
+#     section at the wrong level);
+#   - a delivered issue is `(#n)` at the end of its bullet (only more references,
+#     closing emphasis, `<br>` or punctuation may follow), `(part of #n)` or
 #     `see #n` keeps it open, `Cratis/Repo#n` names another repository; closing
 #     or linking keywords (`Closes #n`, `Fixes <issue URL>`, `Refs #n`, ...) never
 #     appear, also when wrapped in bold, italics or a link (`**Closes** #n`,
-#     `Closes [#n](url)`, `[Closes #n](url)`), and a `(#n)` anywhere else (lead
+#     `Closes [#n](url)`, and `[Closes #n](url)` or `[Closes](url)` where the link
+#     starts a clause), and a `(#n)` anywhere else (lead
 #     paragraph, Summary, a heading, mid-bullet, even inside an HTML comment)
 #     would still close the issue, so it fails too;
 #   - no reviewer-facing content (test plans, verification, review notes and
@@ -36,7 +40,14 @@ name: Verify Release Notes
 #     provenance;
 #   - the process phrasing above is what is rejected, not the topic: a bullet
 #     that says the review workflow now runs in parallel, or that validation
-#     rules now apply to commands, is a product change and passes;
+#     rules now apply to commands, is a product change and passes. Inside a
+#     bullet, a `## Summary` or the lead paragraph, provenance is recognised only
+#     when it ends the clause (`- Cross-provider review pending (#3)`), and
+#     `Reviewed by ...` is not read at all (`- Reviewed by status is now shown on
+#     the dashboard (#4)` passes; "Reviewed by Claude" is still caught as
+#     provenance). Only a stand-alone line outside them is read loosely. The
+#     heuristics are deliberately narrow: blocking a good product bullet costs
+#     more than missing an exotic note, which reviewers still catch;
 #   - at least one allowed section with a bullet.
 # Fenced and inline code are exempt: release-action ignores them when closing
 # issues and the release page shows them as code. Closed HTML comments are not
@@ -114,9 +125,13 @@ jobs:
           // The pattern release-action closes issues with.
           // It sees everything but fenced and inline code: HTML comments are not skipped.
           const CLOSES_ISSUE = /(?<![\w/-])\(#(\d+)\)/g;
-          const ONLY_ISSUES_AFTER = /^(?:\s*\(#\d+\))*\s*[.;]?\s*$/;
+          // What may follow the delivering `(#n)` and still count as the end of the bullet: more issue references
+          // (also `(part of #n)`), closing emphasis, a trailing `<br>` and sentence punctuation.
+          const ONLY_ISSUES_AFTER = /^(?:\s*(?:\((?:part of )?#\d+\)|\*\*|__|\*|_|<br\s*\/?>|[.;]))*\s*$/i;
           // Labels that only ever introduce process notes, bullet or not.
           const PROCESS_LABEL = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:test plan|notes for reviewers|reviewer notes|known follow-up)(?:\s*:|(?:\*\*|__|\*|_)\s*:)/i;
+          // "Reviewed by ..." opens a note only outside a bullet or prose section: "- Reviewed by status is now shown
+          // on the dashboard (#4)" is a product bullet, and "Reviewed by Claude" is caught by the provenance rules.
           const REVIEWED_BY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?reviewed by\b/i;
           // Labels that can also open a product bullet ("- Validation: rules now apply to commands (#3)", "- Review:
           // requests are now sent when a pull request is ready (#4)"): they are notes when standalone, when not a
@@ -124,7 +139,7 @@ jobs:
           const RESULT_LABEL = /^\s*(?<bullet>(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:validation|testing|verification|tests?|test results?|review|reviewed|tested|verified)(?:\s*:|(?:\*\*|__|\*|_)\s*:)(?<rest>.*)$/i;
           // A result is reported, not described: the result word ends the clause ("all green", "12 specs passed"),
           // so "failed commands now return a 400" and "green-field templates" stay product wording.
-          const END = String.raw`\s*(?:[.,;!:(]|$)`;
+          const END = String.raw`\s*(?=[.,;!:(]|$)`;
           const RESULT_WORDING = new RegExp([
               String.raw`\b\d+\s+(?:\w+\s+)?(?:passed|passing|failed|failing)\b`,
               String.raw`^\s*(?:all\s+(?:\w+\s+){0,2}?)?(?:passed|passing|pass|green|failed|failing|ok|okay|done|locally|yes|no|clean|approved|lgtm|good|fine|none|pending)${END}`,
@@ -145,9 +160,11 @@ jobs:
           // product feature that generates text with a model ("Text generated with OpenAI is now cached") does not.
           const AUTHORED = new RegExp(`^\\s*(?:(?:[-*+>]|\\d{1,9}[.)])\\s+)*[^\\w\\s]*\\s*(?:(?:this|the)\\s+(?:pull request|pr|description|change|changes|code|patch|commit)\\s+(?:was|is|has been)\\s+)?(?:\\*\\*|__|\\*|_)?(?:generated|written|drafted|authored|produced)\\s+(?:entirely\\s+|mostly\\s+|partly\\s+)?(?:with|by)\\s+(?:an?\\s+)?\\[?${AGENT}`, "i");
           // Provenance is a note when it starts a clause ("Reviewed with a cross-provider review.", "Review: Opus-only
-          // review"), not when it sits inside a product sentence ("Adds same-provider review routing ..."). The topic
-          // patterns also need what follows to read as a note, and inside a bullet under an allowed section to read as
-          // a result ("- Cross-provider review pending"), so "- Cross-provider review is now selectable (#5)" passes.
+          // review"), not when it sits inside a product sentence ("Adds same-provider review routing ..."). Where the
+          // text is product wording (a bullet under an allowed section, a `## Summary` or a lead paragraph) the note
+          // must also END the clause, apart from issue references and a result word ("- Cross-provider review
+          // pending (#5)"), so "- Cross-provider review is now selectable (#5)" passes. Only a stand-alone line
+          // outside those uses the loose tail below.
           const PROVIDER = "(?:opus|anthropic|gpt|claude|openai)-only";
           const QUALIFIER = String.raw`(?:(?:an?|the|this|our|quick|brief|short|final|full|independent|second|extra|additional|another|fresh|light)\s+)*`;
           const NOTE_START = CLAIM_START.replace("(?:^|", "(?:^\\s*|");
@@ -157,9 +174,10 @@ jobs:
               String.raw`${QUALIFIER}${PROVIDER}\s+(?:\([^)]*\)\s+)?review\b`,
           ].join("|") + ")", "i");
           const NOTE_RESULT = String.raw`\s*(?:(?:is|was|has\s+been)\s+)?(?:pending|passed|passing|done|complete|completed|approved|clean|green|ok|skipped|missing|unavailable|only|requested|required)\b`;
-          // Inside a bullet the topic must end the bullet or be followed by a result word; elsewhere any punctuation
-          // that continues the note ("Cross-provider review: no findings") is enough.
-          const NOTE_TAIL_BULLET = new RegExp(`^(?:${NOTE_RESULT}|[\\s:;,.!]*$)`, "i");
+          // In product wording the note must end the clause: nothing but a result word, punctuation, closing emphasis
+          // or `<br>` after it. Elsewhere any punctuation that continues the note ("Cross-provider review: no
+          // findings") is enough.
+          const NOTE_TAIL_STRICT = new RegExp(`^(?:${NOTE_RESULT})?(?:[\\s:;,.!*_]|<br\\s*\\/?>)*$`, "i");
           const NOTE_TAIL_LOOSE = new RegExp(`^(?:${NOTE_RESULT}|\\s*[:;,.!\u2014\u2013-]\\s*\\S|\\s*\\((?!#)|[\\s:;,.!]*$)`, "i");
           const PROVENANCE_RESULT = new RegExp(NOTE_START + "(?:" + [
               // "Reviewed with Anthropic models only (...)": a clause that opens by saying who or what reviewed it.
@@ -172,8 +190,12 @@ jobs:
           ].join("|") + ")", "i");
           const CO_AUTHORED = /^\s*(?:(?:[-*+>]|\d{1,9}[.)])\s+)*(?:\*\*|__|\*|_)?\s*co-authored-by:/i;
           const withoutIssues = text => text.replace(/(?:\s*\((?:part of )?#\d+\))+\s*$/, "");
-          const provenance = (line, inBullet) => {
-              if (CO_AUTHORED.test(line) || PROVENANCE_RESULT.test(line)) {
+          const provenance = (line, strict) => {
+              if (CO_AUTHORED.test(line)) {
+                  return true;
+              }
+              const result = PROVENANCE_RESULT.exec(line);
+              if (result && (!strict || NOTE_TAIL_STRICT.test(withoutIssues(line.slice(result.index + result[0].length))))) {
                   return true;
               }
               const topic = PROVENANCE_TOPIC.exec(line);
@@ -181,7 +203,7 @@ jobs:
                   return false;
               }
               const tail = withoutIssues(line.slice(topic.index + topic[0].length));
-              return (inBullet ? NOTE_TAIL_BULLET : NOTE_TAIL_LOOSE).test(tail);
+              return (strict ? NOTE_TAIL_STRICT : NOTE_TAIL_LOOSE).test(tail);
           };
           const TRANSCRIPT = /<summary>\s*original prompt\s*<\/summary>|^\s*(?:#{1,6}\s+|\*\*|__)?original prompt(?:\*\*|__)?\s*:?\s*$|\blet copilot coding agent\b|\bcopilot coding agent\s+(?:tips|settings|set things up)|\bfirewall rules blocked me\b/i;
           const INLINE_LINK = /\]\(\s*<?([^)\s>]+)/g;
@@ -205,16 +227,20 @@ jobs:
           // A closing keyword is still one when wrapped in emphasis or a link (`**Closes** #1`, `Closes [#1](url)`),
           // so the keyword rules read the text as it renders: emphasis dropped, a link reduced to its issue
           // reference or its URL, or, when the link text is itself a keyword, to that text followed by its URL (`[Closes](issue-url)`).
-          const linkAs = (text, url) => {
+          // A keyword as link text is a keyword only where it starts a clause ("[Closes](url)", "Done. [Fixes](url)"), not
+          // inside a sentence ("Adds a [Fixes](url) page").
+          const CLAUSE_START = /(?:^|[.;:!(])\s*(?:(?:[-*+>]|\d{1,9}[.)])\s+)*$/;
+          const linkAs = (text, url, before) => {
               const trimmed = text.trim();
-              return ISSUE_TEXT.test(trimmed) ? trimmed : KEYWORD_TEXT.test(trimmed) ? `${trimmed} ${url}` : url;
+              return ISSUE_TEXT.test(trimmed) ? trimmed
+                  : KEYWORD_TEXT.test(trimmed) && CLAUSE_START.test(before) ? `${trimmed} ${url}` : url;
           };
           const rendered = line => line
               .replace(/\*+|~~|(?<!\w)_+|_+(?!\w)/g, "")
               .replace(/<(https?:\/\/[^>\s]+)>/gi, "$1")
-              .replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, (whole, url, text) => linkAs(plain(text), url))
+              .replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, (whole, url, text, offset, all) => linkAs(plain(text), url, all.slice(0, offset)))
               .replace(/<\/?[a-z][^>]*>/gi, "")
-              .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g, (whole, text, url) => linkAs(text, url))
+              .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s[^)]*)?\)/g, (whole, text, url, offset, all) => linkAs(text, url, all.slice(0, offset)))
               .replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1")
               .replace(/[\[\]]/g, "");
           const normalize = name => name.replace(/^[*_\s]+|[*_\s:]+$/g, "").replace(/\s+/g, " ").toLowerCase();
@@ -387,7 +413,10 @@ jobs:
                       const name = normalize(heading.name);
                       const order = ALLOWED.findIndex(allowed => allowed.toLowerCase() === name);
                       const summary = name === "summary";
-                      if (heading.level <= 2 || order >= 0 || (summary && preamble)) {
+                      // Inside an open section a `###` named like an allowed section (`### Added`) is a sub-heading; at the
+                      // top, before or between sections, it is a section written at the wrong level.
+                      const subHeading = heading.level > 2 && section !== null;
+                      if (heading.level <= 2 || (order >= 0 && !subHeading) || (summary && preamble)) {
                           const leadParagraph = preamble && paragraphs > 0;
                           preamble = false;
                           if (summary) {
@@ -480,10 +509,13 @@ jobs:
                   // Inside a bullet under an allowed section (or a continuation line of it) wording is product wording
                   // unless it reads as a result.
                   const inBullet = bulletEnd[index] >= 0 && Boolean(section) && !section.prose;
+                  // Product wording: a bullet, a `## Summary` or the lead paragraph. Only a stand-alone line outside them
+                  // is checked loosely for provenance and "Reviewed by".
+                  const productText = inBullet || (section ? section.prose : preamble);
                   if (boldName !== null && FORBIDDEN_HEADINGS.includes(normalize(boldName))) {
                       // A bold line or a <summary> naming a forbidden heading is that heading, not a note.
                       report("Heading not allowed", index, headingFix({ name: boldName, setext: false }));
-                  } else if (PROCESS_LABEL.test(noted) || REVIEWED_BY.test(noted) || AUTHORED.test(noted) || provenance(noted, inBullet) || RESULT_CLAIM.test(noted)
+                  } else if (PROCESS_LABEL.test(noted) || (!productText && REVIEWED_BY.test(noted)) || AUTHORED.test(noted) || provenance(noted, productText) || RESULT_CLAIM.test(noted)
                       || (labelled && (!underAllowedSection || RESULT_WORDING.test(labelled.groups.rest)))) {
                       report("Review, verification or provenance note", index, PR_COMMENT);
                   }
