@@ -14,6 +14,7 @@ import test from "node:test";
 const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf8");
 const PROGRAM_WORKFLOW = readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8");
 const SPEC_SOURCE = readFileSync(".github/scripts/tests/verify-release-notes.spec.mjs", "utf8");
+const TEMPLATE = readFileSync(".github/pull_request_template.md", "utf8");
 const RELEASES = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/releases.json", "utf8"));
 const VERBATIM = "This pull request description is published verbatim as the release notes; editing the description re-runs this check.";
 
@@ -679,4 +680,22 @@ test("real release bodies: flagged ones fail with the expected rules, clean ones
         assert.equal(result.status, release.passes ? 0 : 1, `${release.repo} ${release.tag}: ${JSON.stringify(result.rules)}`);
         assert.deepEqual([...new Set(result.rules)].sort(), release.rules, `${release.repo} ${release.tag}`);
     }
+});
+
+test("the pull request template itself only fails on its placeholders", () => {
+    const result = run(TEMPLATE);
+    assert.deepEqual([...new Set(result.rules)], ["Template placeholder"]);
+    // The placeholder bullets carry no issue reference: a description that keeps them all and only fills in the text
+    // must not read as a clean one, and the comment above them already shows the (#n) syntax.
+    assert.equal(TEMPLATE.split("-->\n")[1].includes("(#"), false, "the placeholder bullets carry no (#n)");
+    let issue = 0;
+    const filled = TEMPLATE.replace(/^(- )Short statement of .*$/gm, (_, bullet) => `${bullet}A real change (#${++issue})`);
+    assert.equal(issue, 6);
+    assert.equal(filled.split("-->\n")[1].includes("(#123)"), false, "the clean case does not repeat the comment's example number");
+    passes(filled);
+    passes(TEMPLATE.replace(/^(- )Short statement of .*$/gm, "$1A real change"));
+    for (const rule of ["published verbatim", "(#123)", "(part of #123)", "Closes #123", "Test plan", "pull request comment", "https://",
+        "## Summary", "re-runs the release-notes check where it is installed", "only when they have bullets", "headings and the summary included",
+        "(there even `### Added` is only a sub-heading); a section itself is always level 2"])
+        assert(TEMPLATE.includes(rule), rule);
 });
