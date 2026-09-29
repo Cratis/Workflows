@@ -30,7 +30,26 @@ on:
 env:
   # Repositories to skip when propagating templates.
   # Historically matched the retired Copilot-sync exceptions; kept as the template-propagation exceptions.
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio"]'
+  # The workflow pushes the template straight to the default branch of every other repository whose
+  # .github/pull_request_template.md differs, so a repository that deliberately customized its template
+  # (content beyond any version of the org template) must be listed here, or the push silently replaces it:
+  # Arc, Scene - the org template with the issue-reference line sharpened (never leave `(#123)`
+  #   or `(#issue)` as a placeholder)
+  # Arc.Kotlin, Chronicle, Chronicle.Kotlin - the org template with user-facing-impact guidance and optional
+  #   issue references
+  # Chronicle.Wolverine, Screenplay, Screenplay.CritterStack, Screenplay.Generation, Studio - the org
+  #   template with the placeholder bullets stripped of `(#123)` and the "leave bullets without issue
+  #   references by default" rule
+  # Arc.TypeScript - Arc's release-intent template: copyright header, breaking/major parity policy that
+  #   needs a human merge, its own section names
+  # Chronicle.Dapr - private incubation template: classification (DEC-0025..DEC-0030), purpose, work package
+  #   and release-impact checklist
+  # Chronicle.Python - the org sections plus a Verification checklist (ruff, mypy, pytest)
+  # Strategy - private governance template: confidential classification, linked work, release-impact
+  #   classification
+  # Prompter, Synopsis - their own layout: a Summary with `###` sections (Prompter), a shortened preamble
+  #   and bullets without issue references (Synopsis)
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio","Arc","Arc.Kotlin","Arc.TypeScript","Chronicle","Chronicle.Dapr","Chronicle.Kotlin","Chronicle.Python","Chronicle.Wolverine","Prompter","Scene","Screenplay","Screenplay.CritterStack","Screenplay.Generation","Strategy","Studio","Synopsis"]'
 
 permissions:
   contents: read
