@@ -15,6 +15,7 @@ const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf
 const PROGRAM_WORKFLOW = readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8");
 const SPEC_SOURCE = readFileSync(".github/scripts/tests/verify-release-notes.spec.mjs", "utf8");
 const TEMPLATE = readFileSync(".github/pull_request_template.md", "utf8");
+const BOOTSTRAP_SCRIPT = readFileSync(".github/scripts/bootstrap-common-workflows.sh", "utf8");
 const BOOTSTRAP_WORKFLOW = readFileSync(".github/workflows/bootstrap-common-workflows.yml", "utf8");
 const RELEASES = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/releases.json", "utf8"));
 const VERBATIM = "This pull request description is published verbatim as the release notes; editing the description re-runs this check.";
@@ -701,6 +702,35 @@ test("the pull request template itself only fails on its placeholders", () => {
         assert(TEMPLATE.includes(rule), rule);
 });
 
+test("the bootstrap installs the canonical thin caller", () => {
+    const encoded = /BOOTSTRAPPED_FILES\["\.github\/workflows\/verify-release-notes\.yml"\]="([^"]+)"/.exec(BOOTSTRAP_SCRIPT);
+    assert(encoded, "wrapper registered in bootstrap-common-workflows.sh");
+    const wrapper = Buffer.from(encoded[1], "base64").toString("utf8");
+    for (const required of [
+        "name: Verify Release Notes",
+        "cancel-in-progress: true",
+        "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "types: [opened, edited, reopened, synchronize, labeled, unlabeled, ready_for_review]",
+        "permissions:\n  contents: read",
+        "jobs:\n  release-notes:\n    uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main",
+        // RUNNER_GATE is an outage escape hatch, normally unset: the default stays the hosted runner of a public repository.
+        "    with:\n      runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}\n",
+    ])
+        assert(wrapper.includes(required), required);
+    assert.equal(/^\s*(?:run|steps):/m.test(wrapper), false, "the wrapper carries no logic");
+    assert(wrapper.includes("RUNNER_GATE is an outage escape hatch and is normally unset"), "RUNNER_GATE is documented as an escape hatch");
+    assert(wrapper.includes("`runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc' }}`"), "a private repository is pointed at its own fallback");
+    assert.equal(/setting the RUNNER_GATE/.test(wrapper), false, "the wrapper does not tell a repository to set RUNNER_GATE permanently");
+    const documented = wrapper.trimEnd().split("\n").map(line => `#   ${line}`.trimEnd()).join("\n");
+    assert(BOOTSTRAP_SCRIPT.includes(documented), "the decoded comment matches the encoded wrapper");
+    assert(wrapper.trimEnd().endsWith("      runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}"), "the variable-driven runs-on is the caller's only input");
+    assert(WORKFLOW.includes("runs-on: ${{ inputs.runs-on }}") && /runs-on:\n\s+description:[\s\S]*?\n\s+type: string\n\s+required: false\n\s+default: ubuntu-latest\n/.test(WORKFLOW),
+        "the reusable workflow takes runs-on, defaulting to ubuntu-latest");
+    // Deliberately not a bootstrap push path: logic changes do not change the wrapper, and must not trigger
+    // organization-wide writes (bootstrap-package-update-safety.test.py pins that list).
+    assert.equal(BOOTSTRAP_WORKFLOW.includes("- \".github/workflows/verify-release-notes.yml\""), false);
+});
+
 test("the bootstrap leaves private and deliberately customized repositories to their own change", () => {
     const ignored = JSON.parse(/^ {2}REPOS_TO_IGNORE: '([^']+)'$/m.exec(BOOTSTRAP_WORKFLOW)[1]);
     // Private repositories have no GitHub-hosted Actions budget: their wrappers run on cratis-arc, and Strategy and
@@ -715,4 +745,6 @@ test("the bootstrap leaves private and deliberately customized repositories to t
     assert(BOOTSTRAP_WORKFLOW.includes("cratis-arc") && BOOTSTRAP_WORKFLOW.includes("RUNNER_GATE"), "the reason names the private runner routing");
     assert(BOOTSTRAP_WORKFLOW.includes("vars.ENSEMBLE_RUNNER"), "Ensemble's own runner variable is named");
     assert.equal(ignored.includes("Workflows"), true);
+    // The ignore list is what keeps the overwrite semantics untouched: no repository-visibility branch is added.
+    assert.equal(/visibility|isPrivate/i.test(BOOTSTRAP_SCRIPT), false);
 });
