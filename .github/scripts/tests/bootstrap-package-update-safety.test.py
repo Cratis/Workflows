@@ -61,6 +61,9 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
             "Workflows", "cratis.github.io", "StudioIssues", "Documentation", "cratis.studio",
             "Automation", ".github", "Dockerfiles", "AI", "Templates", "Dockerfiles",
             "release-action", "Chronicle.Dapr", "Chronicle.Wolverine", "Stage",
+            "Studio", "Direct", "Ensemble", "Infrastructure", "Experiments", "Strategy", "Identity",
+            "Ante", "Chronicle.Elixir", "Components", "Orleans", "AI.Distribution",
+            "Arc.TypeScript", "Chronicle.Python", "Eventmodelers-Build-Kit-Java", "Eventmodelers-Build-Kit-Kotlin",
         ])
         self.assertIn("# Stage - owns its reviewed package-update/kernel guard workflow and pin;", BOOTSTRAP)
         self.assertIn("#   bootstrap must not overwrite it", BOOTSTRAP)

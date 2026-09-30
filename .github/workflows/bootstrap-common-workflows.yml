@@ -5,6 +5,8 @@ name: Bootstrap Common Workflows
 #   • cleanup-pr-artifacts.yml            — deletes GitHub Packages published during a PR
 #   • update-packages.yml                 — weekly NuGet + NPM package updates
 #   • auto-approve-publish-deployments.yml — approves npm/nuget trusted publishing deployments
+#   • verify-no-work-records.yml           — fails PRs that track AI session work records
+#   • verify-release-notes.yml             — fails release-bound PRs whose description breaks the release-note contract
 #   • .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Handles both initial bootstrap (new repos) and ongoing updates:
@@ -50,7 +52,25 @@ env:
   #   manual reviewed-update path; the bootstrap's @main rewrites violate it
   # Stage - owns its reviewed package-update/kernel guard workflow and pin;
   #   bootstrap must not overwrite it
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage"]'
+  # Studio, Direct, Ensemble, Infrastructure, Experiments - private repositories with no GitHub-hosted
+  #   Actions budget: their verify-no-work-records, update-packages and auto-approve-publish-deployments
+  #   wrappers deliberately run on cratis-arc (`runs-on: cratis-arc`, `${{ vars.RUNNER_GATE || 'cratis-arc' }}`
+  #   or, in Ensemble, `${{ vars.ENSEMBLE_RUNNER || 'cratis-arc' }}`), so overwriting them with the canonical
+  #   ubuntu-latest wrappers would fail their jobs; Studio and Direct also removed cleanup-pr-artifacts on purpose
+  # Strategy - private, and deliberately removed its cleanup-pr-artifacts, update-packages and
+  #   auto-approve-publish-deployments workflows (2026-09-27); its verify-no-work-records runs on cratis-arc
+  # Identity - private and new: the canonical wrappers run on ubuntu-latest, which has no budget there
+  # Ante, Chronicle.Elixir, Components, Orleans - public repositories with a deliberately customized
+  #   update-packages.yml (staggered cron, pull-request publication mode, paused schedule, post-update command)
+  # AI.Distribution - no longer in use; its branch protection also rejects direct pushes
+  # Arc.TypeScript, Chronicle.Python, Eventmodelers-Build-Kit-Java, Eventmodelers-Build-Kit-Kotlin - never
+  #   bootstrapped (the bootstrap has failed since 2026-08-25), so a run would also install every standard
+  #   wrapper there for the first time; held back until that is decided, and they install
+  #   verify-release-notes.yml through their own reviewed change meanwhile
+  # The ignored private and customized repositories install verify-release-notes.yml through their own
+  #   reviewed change, copying the caller with their own runner fallback in its `runs-on` input (RUNNER_GATE is
+  #   only an outage escape hatch, normally unset; Ensemble uses vars.ENSEMBLE_RUNNER)
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin"]'
 
 jobs:
   bootstrap:
