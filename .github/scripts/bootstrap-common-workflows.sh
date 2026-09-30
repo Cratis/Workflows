@@ -7,6 +7,7 @@
 #   - update-packages.yml                  — weekly package updates (NuGet + NPM)
 #   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
 #   - verify-no-work-records.yml           — fails PRs that track AI session work records
+#   - verify-release-notes.yml             — fails release-bound PRs whose description breaks the release-note contract
 #   - .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
@@ -117,6 +118,50 @@ BOOTSTRAPPED_FILES[".github/workflows/auto-approve-publish-deployments.yml"]="bm
 #     verify:
 #       uses: Cratis/Workflows/.github/workflows/verify-no-work-records.yml@main
 BOOTSTRAPPED_FILES[".github/workflows/verify-no-work-records.yml"]="bmFtZTogVmVyaWZ5IE5vIFdvcmsgUmVjb3JkcwoKb246CiAgcHVsbF9yZXF1ZXN0OgogIHB1c2g6CiAgICBicmFuY2hlczogWyJtYWluIl0KCmpvYnM6CiAgdmVyaWZ5OgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy92ZXJpZnktbm8td29yay1yZWNvcmRzLnltbEBtYWluCg=="
+
+# verify-release-notes.yml — fails release-bound PRs whose description (published
+# verbatim as the release notes) breaks the release-note contract
+# Decodes to:
+#   name: Verify Release Notes
+#
+#   # Thin caller of the organization-wide release-notes gate. This pull request's
+#   # description is published verbatim as the release notes, so the gate checks it
+#   # before the merge. The contract - which sections, issue references and content
+#   # are allowed, and what the errors say - lives in
+#   # Cratis/Workflows/.github/workflows/verify-release-notes.yml; do not reintroduce
+#   # logic here. Installed and kept current by Cratis/Workflows'
+#   # bootstrap-common-workflows.
+#   #
+#   # `edited` re-runs the check when the description changes and `labeled` and
+#   # `unlabeled` when the release label does. There is no branch or label filter: the
+#   # gate itself only checks pull requests into the default branch that carry exactly
+#   # one of major, minor or patch, and passes the rest (no release label yet,
+#   # no-release, Dependabot) with a notice.
+#   #
+#   # The job is named release-notes so the check reads `release-notes / verify` and
+#   # does not collide with other `verify / verify` gates.
+#   #
+#   # RUNNER_GATE is an outage escape hatch and is normally unset: set it temporarily to reroute the
+#   # job when the default runner is down. A private repository does not use this caller as is; it
+#   # keeps its own copy with its own fallback, for example
+#   # `runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc' }}`.
+#   concurrency:
+#     group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+#     cancel-in-progress: true
+#
+#   on:
+#     pull_request:
+#       types: [opened, edited, reopened, synchronize, labeled, unlabeled, ready_for_review]
+#
+#   permissions:
+#     contents: read
+#
+#   jobs:
+#     release-notes:
+#       uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main
+#       with:
+#         runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}
+BOOTSTRAPPED_FILES[".github/workflows/verify-release-notes.yml"]="bmFtZTogVmVyaWZ5IFJlbGVhc2UgTm90ZXMKCiMgVGhpbiBjYWxsZXIgb2YgdGhlIG9yZ2FuaXphdGlvbi13aWRlIHJlbGVhc2Utbm90ZXMgZ2F0ZS4gVGhpcyBwdWxsIHJlcXVlc3QncwojIGRlc2NyaXB0aW9uIGlzIHB1Ymxpc2hlZCB2ZXJiYXRpbSBhcyB0aGUgcmVsZWFzZSBub3Rlcywgc28gdGhlIGdhdGUgY2hlY2tzIGl0CiMgYmVmb3JlIHRoZSBtZXJnZS4gVGhlIGNvbnRyYWN0IC0gd2hpY2ggc2VjdGlvbnMsIGlzc3VlIHJlZmVyZW5jZXMgYW5kIGNvbnRlbnQKIyBhcmUgYWxsb3dlZCwgYW5kIHdoYXQgdGhlIGVycm9ycyBzYXkgLSBsaXZlcyBpbgojIENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2Utbm90ZXMueW1sOyBkbyBub3QgcmVpbnRyb2R1Y2UKIyBsb2dpYyBoZXJlLiBJbnN0YWxsZWQgYW5kIGtlcHQgY3VycmVudCBieSBDcmF0aXMvV29ya2Zsb3dzJwojIGJvb3RzdHJhcC1jb21tb24td29ya2Zsb3dzLgojCiMgYGVkaXRlZGAgcmUtcnVucyB0aGUgY2hlY2sgd2hlbiB0aGUgZGVzY3JpcHRpb24gY2hhbmdlcyBhbmQgYGxhYmVsZWRgIGFuZAojIGB1bmxhYmVsZWRgIHdoZW4gdGhlIHJlbGVhc2UgbGFiZWwgZG9lcy4gVGhlcmUgaXMgbm8gYnJhbmNoIG9yIGxhYmVsIGZpbHRlcjogdGhlCiMgZ2F0ZSBpdHNlbGYgb25seSBjaGVja3MgcHVsbCByZXF1ZXN0cyBpbnRvIHRoZSBkZWZhdWx0IGJyYW5jaCB0aGF0IGNhcnJ5IGV4YWN0bHkKIyBvbmUgb2YgbWFqb3IsIG1pbm9yIG9yIHBhdGNoLCBhbmQgcGFzc2VzIHRoZSByZXN0IChubyByZWxlYXNlIGxhYmVsIHlldCwKIyBuby1yZWxlYXNlLCBEZXBlbmRhYm90KSB3aXRoIGEgbm90aWNlLgojCiMgVGhlIGpvYiBpcyBuYW1lZCByZWxlYXNlLW5vdGVzIHNvIHRoZSBjaGVjayByZWFkcyBgcmVsZWFzZS1ub3RlcyAvIHZlcmlmeWAgYW5kCiMgZG9lcyBub3QgY29sbGlkZSB3aXRoIG90aGVyIGB2ZXJpZnkgLyB2ZXJpZnlgIGdhdGVzLgojCiMgUlVOTkVSX0dBVEUgaXMgYW4gb3V0YWdlIGVzY2FwZSBoYXRjaCBhbmQgaXMgbm9ybWFsbHkgdW5zZXQ6IHNldCBpdCB0ZW1wb3JhcmlseSB0byByZXJvdXRlIHRoZQojIGpvYiB3aGVuIHRoZSBkZWZhdWx0IHJ1bm5lciBpcyBkb3duLiBBIHByaXZhdGUgcmVwb3NpdG9yeSBkb2VzIG5vdCB1c2UgdGhpcyBjYWxsZXIgYXMgaXM7IGl0CiMga2VlcHMgaXRzIG93biBjb3B5IHdpdGggaXRzIG93biBmYWxsYmFjaywgZm9yIGV4YW1wbGUKIyBgcnVucy1vbjogJHt7IHZhcnMuUlVOTkVSX0dBVEUgfHwgJ2NyYXRpcy1hcmMnIH19YC4KY29uY3VycmVuY3k6CiAgZ3JvdXA6ICR7eyBnaXRodWIud29ya2Zsb3cgfX0tJHt7IGdpdGh1Yi5ldmVudC5wdWxsX3JlcXVlc3QubnVtYmVyIHx8IGdpdGh1Yi5yZWYgfX0KICBjYW5jZWwtaW4tcHJvZ3Jlc3M6IHRydWUKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbb3BlbmVkLCBlZGl0ZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkLCByZWFkeV9mb3JfcmV2aWV3XQoKcGVybWlzc2lvbnM6CiAgY29udGVudHM6IHJlYWQKCmpvYnM6CiAgcmVsZWFzZS1ub3RlczoKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2Utbm90ZXMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHJ1bnMtb246ICR7eyB2YXJzLlJVTk5FUl9HQVRFIHx8ICd1YnVudHUtbGF0ZXN0JyB9fQo="
 
 # .github/codeql/codeql-config.yml — shared CodeQL configuration
 # Decodes to:
