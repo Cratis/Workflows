@@ -15,6 +15,7 @@ const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf
 const PROGRAM_WORKFLOW = readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8");
 const SPEC_SOURCE = readFileSync(".github/scripts/tests/verify-release-notes.spec.mjs", "utf8");
 const TEMPLATE = readFileSync(".github/pull_request_template.md", "utf8");
+const BOOTSTRAP_WORKFLOW = readFileSync(".github/workflows/bootstrap-common-workflows.yml", "utf8");
 const RELEASES = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/releases.json", "utf8"));
 const VERBATIM = "This pull request description is published verbatim as the release notes; editing the description re-runs this check.";
 
@@ -698,4 +699,20 @@ test("the pull request template itself only fails on its placeholders", () => {
         "## Summary", "re-runs the release-notes check where it is installed", "only when they have bullets", "headings and the summary included",
         "(there even `### Added` is only a sub-heading); a section itself is always level 2"])
         assert(TEMPLATE.includes(rule), rule);
+});
+
+test("the bootstrap leaves private and deliberately customized repositories to their own change", () => {
+    const ignored = JSON.parse(/^ {2}REPOS_TO_IGNORE: '([^']+)'$/m.exec(BOOTSTRAP_WORKFLOW)[1]);
+    // Private repositories have no GitHub-hosted Actions budget: their wrappers run on cratis-arc, and Strategy and
+    // Identity have none of the canonical ones (removed on purpose, or a new repository whose CI is its own).
+    const privateRepositories = ["Studio", "Direct", "Ensemble", "Infrastructure", "Experiments", "Strategy", "Identity"];
+    // Public repositories whose update-packages.yml differs from the canonical wrapper on purpose.
+    const customized = ["Ante", "Chronicle.Elixir", "Components", "Orleans"];
+    for (const repository of [...privateRepositories, ...customized]) {
+        assert(ignored.includes(repository), `${repository} must stay in REPOS_TO_IGNORE`);
+        assert(new RegExp(`^ {2}#[^\\n]*\\b${repository.replace(".", "\\.")}\\b`, "m").test(BOOTSTRAP_WORKFLOW), `${repository} needs a comment saying why it is ignored`);
+    }
+    assert(BOOTSTRAP_WORKFLOW.includes("cratis-arc") && BOOTSTRAP_WORKFLOW.includes("RUNNER_GATE"), "the reason names the private runner routing");
+    assert(BOOTSTRAP_WORKFLOW.includes("vars.ENSEMBLE_RUNNER"), "Ensemble's own runner variable is named");
+    assert.equal(ignored.includes("Workflows"), true);
 });

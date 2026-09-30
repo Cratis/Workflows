@@ -10,6 +10,7 @@ on:
       - .github/scripts/tests/verify-release-notes.spec.mjs
       - .github/scripts/tests/fixtures/release-notes/**
       - .github/pull_request_template.md
+      - .github/workflows/bootstrap-common-workflows.yml
   push:
     branches: [main]
     paths:
@@ -18,6 +19,7 @@ on:
       - .github/scripts/tests/verify-release-notes.spec.mjs
       - .github/scripts/tests/fixtures/release-notes/**
       - .github/pull_request_template.md
+      - .github/workflows/bootstrap-common-workflows.yml
 
 permissions:
   contents: read
