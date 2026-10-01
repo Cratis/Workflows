@@ -14,6 +14,8 @@ permissions:
 jobs:
   approve:
     runs-on: ubuntu-latest
+    # The script polls for up to 30 minutes (180 attempts, 10 seconds apart).
+    timeout-minutes: 40
     steps:
       - name: Approve pending npm/nuget deployments
         env:
