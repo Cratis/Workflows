@@ -1,7 +1,6 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 """Offline usage-report fixtures; no token or live GitHub calls."""
-import base64
 import datetime as dt
 import importlib.util
 from pathlib import Path
@@ -143,35 +142,27 @@ class UsageReportTests(unittest.TestCase):
         self.assertIn("| Cratis/Public / Build | 1 | 10.0 |", output)
         self.assertIn("not job execution or billing", output)
 
-    def test_public_job_inventory_only_for_arc_workflows_and_definition_is_cached(self):
-        calls = []
+    def test_public_collection_uses_only_run_level_data_for_all_workflows(self):
         def get(endpoint):
-            calls.append(endpoint)
             if endpoint == "rate_limit":
                 return {"resources": {"core": {"remaining": 5000}}}
             if endpoint == "orgs/Cratis":
                 return {"total_private_repos": 0}
             if endpoint.startswith("orgs/Cratis/repos?"):
                 return [PUBLIC]
-            if "/git/trees/" in endpoint:
-                return {"tree": [{"path": ".github/workflows/hosted.yml", "type": "blob", "sha": "hosted"},
-                                 {"path": ".github/workflows/arc.yml", "type": "blob", "sha": "arc"}]}
-            if "/git/blobs/" in endpoint:
-                text = "runs-on: cratis-arc" if endpoint.endswith("/arc") else "runs-on: ubuntu-latest"
-                return {"content": base64.b64encode(text.encode()).decode()}
-            if "/jobs?" in endpoint:
-                return {"jobs": [job(group="Custom", labels=["cratis-arc"]), job(2)]}
-            return {"workflow_runs": [{"id": i, "path": path, "head_sha": "abc", "name": "Build"}
-                                      for i, path in ((1, ".github/workflows/hosted.yml"),
-                                                      (2, ".github/workflows/arc.yml"),
-                                                      (3, ".github/workflows/arc.yml"))]}
+            if "/actions/runs?" in endpoint:
+                return {"workflow_runs": [{"id": i, "path": path, "head_sha": str(i), "name": "Build"}
+                                         for i, path in enumerate((".github/workflows/hosted.yml",
+                                                                   ".github/workflows/arc.yml",
+                                                                   "dynamic/dependabot/dependabot-updates"))]}
+            self.fail(f"Public workflows must not request definitions or jobs: {endpoint}")
         data = report.collect(get, "Cratis", SINCE, UNTIL)
         self.assertEqual(len(data[2]), 3)
-        self.assertEqual(len(data[3]), 1)
-        self.assertEqual(sum("/git/trees/" in call for call in calls), 1)
-        self.assertEqual(sum("/git/blobs/" in call for call in calls), 2)
-        self.assertEqual(sum("/jobs?" in call for call in calls), 2)
+        self.assertFalse(data[3])
         self.assertFalse(data[4])
+        output = report.render(*data, SINCE, UNTIL)
+        self.assertIn("reported from run-level data only", output)
+        self.assertIn("queue statistics cover private repositories only", output)
 
     def test_budget_exhaustion_is_explicit_and_a_fresh_collection_can_resume(self):
         calls = []
@@ -278,10 +269,6 @@ class UsageReportTests(unittest.TestCase):
                     return repos
                 if endpoint == "orgs/Cratis":
                     return {"total_private_repos": 3}
-                if "/git/trees/" in endpoint:
-                    return {"tree": [{"path": ".github/workflows/build.yml", "type": "blob", "sha": "hosted"}]}
-                if "/git/blobs/" in endpoint:
-                    return {"content": base64.b64encode(b"runs-on: ubuntu-latest").decode()}
                 if "/jobs?" in endpoint:
                     return {"jobs": []}
                 page = int(endpoint.rsplit("=", 1)[1])
@@ -375,10 +362,10 @@ class UsageReportTests(unittest.TestCase):
         self.assertEqual(len(data[3]), 1)
         self.assertIn("Private coverage unconfirmed", report.render(*data, SINCE, UNTIL))
 
-    def test_busy_private_repositories_finish_with_latency_and_shared_worker_and_request_limits(self):
+    def test_busy_private_and_300_sha_public_repositories_finish_with_latency_and_shared_limits(self):
         volumes = {"Studio": 1428, "Direct": 509, "Strategy": 474,
                    "Infrastructure": 191, "Chronicle.Wolverine": 129, "Other": 397}
-        repos = [{"full_name": f"Cratis/{name}", "private": True} for name in volumes]
+        repos = [PUBLIC] + [{"full_name": f"Cratis/{name}", "private": True} for name in volumes]
         lock = threading.Lock()
         calls = active = peak = 0
         # Compress 0.8-second API latency and the 480-second deadline by 80x.
@@ -397,12 +384,16 @@ class UsageReportTests(unittest.TestCase):
                 if endpoint.startswith("orgs/Cratis/repos?"):
                     return repos
                 if endpoint == "orgs/Cratis":
-                    return {"total_private_repos": len(repos)}
+                    return {"total_private_repos": len(volumes)}
+                if "/git/" in endpoint or "repos/Cratis/Public/actions/runs/" in endpoint:
+                    self.fail(f"Public collection must not inspect definitions or jobs: {endpoint}")
                 if "/jobs?" in endpoint:
                     return {"jobs": [job(int(endpoint.split("/runs/")[1].split("/")[0]))]}
                 name = endpoint.split("repos/Cratis/")[1].split("/")[0]
                 day = int(endpoint.split("created=2026-09-")[1][:2]) - 24
-                entries = [{"id": i, "name": "Build"} for i in range(volumes[name]) if i % 7 == day]
+                volume = 2100 if name == "Public" else volumes[name]
+                entries = [{"id": i, "name": "Build", "head_sha": f"sha-{i % 300}"}
+                           for i in range(volume) if i % 7 == day]
                 page = int(endpoint.rsplit("=", 1)[1])
                 return {"total_count": len(entries), "workflow_runs": entries[(page - 1) * 100:page * 100]}
             finally:
@@ -412,10 +403,69 @@ class UsageReportTests(unittest.TestCase):
         data = report.collect(get, "Cratis", SINCE, UNTIL, max_seconds=budget)
         self.assertFalse(data[4])
         self.assertEqual(len(data[3]), sum(volumes.values()))
+        self.assertEqual(len(data[2]), sum(volumes.values()) + 2100)
+        self.assertEqual(len({run[2]["head_sha"] for run in data[2] if run[1] == "public"}), 300)
         self.assertLess(time.monotonic() - start, budget)
         self.assertLess(calls, 4900)
         self.assertGreater(peak, 1)
         self.assertLessEqual(peak, 8)
+
+    def test_private_jobs_start_before_public_run_inventory_finishes(self):
+        private_job_started = threading.Event()
+        def get(endpoint):
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 5000}}}
+            if endpoint.startswith("orgs/Cratis/repos?"):
+                return [PUBLIC, PRIVATE]
+            if endpoint == "orgs/Cratis":
+                return {"total_private_repos": 1}
+            if "/jobs?" in endpoint:
+                private_job_started.set()
+                return {"jobs": [job()]}
+            if "repos/Cratis/Public/" in endpoint:
+                self.assertTrue(private_job_started.wait(1), "Private jobs waited for public inventory")
+                return {"workflow_runs": []}
+            return {"workflow_runs": [{"id": 1}]}
+        data = report.collect(get, "Cratis", SINCE, UNTIL, workers=2)
+        self.assertEqual(len(data[3]), 1)
+        self.assertFalse(data[4])
+
+    def test_budget_cut_keeps_newest_private_days_and_names_missing_older_runs(self):
+        listing_days, job_days = [], []
+        def get(endpoint):
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 111}}}
+            if endpoint.startswith("orgs/Cratis/repos?"):
+                return [PRIVATE]
+            if endpoint == "orgs/Cratis":
+                return {"total_private_repos": 1}
+            if "/jobs?" in endpoint:
+                day = int(endpoint.split("/runs/")[1].split("/")[0])
+                job_days.append(day)
+                return {"jobs": [job(day)]}
+            day = int(endpoint.split("created=2026-09-")[1][:2])
+            listing_days.append(day)
+            return {"workflow_runs": [{"id": day, "created_at": f"2026-09-{day}T12:00:00Z"}]}
+        data = report.collect(get, "Cratis", SINCE, UNTIL, workers=1)
+        self.assertEqual(listing_days, list(range(30, 23, -1)))
+        self.assertEqual(job_days, [30, 29])
+        self.assertEqual([entry[3]["id"] for entry in data[3]], [30, 29])
+        self.assertTrue(any("older private runs may be missing" in error and "5 runs" in error for error in data[4]))
+
+    def test_run_inventory_stop_is_not_misreported_as_one_missing_run(self):
+        def get(endpoint):
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 104}}}
+            if endpoint.startswith("orgs/Cratis/repos?"):
+                return [PRIVATE]
+            if endpoint == "orgs/Cratis":
+                return {"total_private_repos": 1}
+            day = int(endpoint.split("created=2026-09-")[1][:2])
+            return {"workflow_runs": [{"id": day}]}
+        data = report.collect(get, "Cratis", SINCE, UNTIL, workers=1)
+        self.assertIn("Run inventory stopped before completing Cratis/Private; older runs may be missing.", data[4])
+        self.assertTrue(any("Job inventory stopped" in error and "2 runs" in error for error in data[4]))
+        self.assertFalse(any("1 runs" in error for error in data[4]))
 
     def test_filtered_search_cap_is_not_silent_truncation(self):
         with self.assertRaises(report.APIError):

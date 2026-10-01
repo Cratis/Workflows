@@ -2,7 +2,6 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 """Report job execution, estimated hosted billing, and scale-set queue pressure."""
-import base64
 import datetime as dt
 import json
 import math
@@ -10,9 +9,8 @@ import os
 import subprocess
 import threading
 import time
-from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from collections import Counter, defaultdict, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 
 class APIError(Exception):
@@ -91,8 +89,8 @@ def window_runs(get, full, start, end):
         middle = (start + (end - start) / 2).replace(microsecond=0)
         if middle <= start or middle >= end:
             raise  # Even a one-second window is capped: report the gap explicitly.
-        yield from window_runs(get, full, start, middle)
         yield from window_runs(get, full, middle, end)
+        yield from window_runs(get, full, start, middle)
 
 
 def timestamp(value):
@@ -128,59 +126,30 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
         full = repo["full_name"]
         visibility = repo.get("visibility", "private" if repo.get("private") else "public")
         runs, candidates, seen_runs, failures = [], [], set(), Counter()
-        definitions, trees = {}, {}
-        cursor = since
+        inventory_errors = []
+        cursor = until
         try:
-            while cursor < until:
-                window_end = min(cursor + dt.timedelta(days=1), until)
+            while cursor > since:
+                window_start = max(cursor - dt.timedelta(days=1), since)
                 try:
-                    for run in window_runs(request, full, cursor, window_end):
+                    for run in window_runs(request, full, window_start, cursor):
                         if run["id"] in seen_runs:
                             continue  # GitHub's range endpoints are inclusive.
                         seen_runs.add(run["id"])
                         runs.append((full, visibility, run))
-                        try:
-                            if visibility != "private":
-                                # Public ranking needs no jobs. Resolve the historical workflow
-                                # blob via one tree per commit, then cache by content SHA: most
-                                # commits do not change workflows, so no per-run contents call.
-                                path, sha = run.get("path", "").split("@")[0], run.get("head_sha")
-                                if path.startswith("dynamic/"):
-                                    continue  # GitHub-managed hosted workflows have no repository blob.
-                                if sha not in trees:
-                                    trees[sha] = {}
-                                    if sha:
-                                        tree = request(f"repos/{full}/git/trees/{quote(sha)}?recursive=1")
-                                        if not tree.get("truncated"):
-                                            trees[sha] = {entry["path"]: entry["sha"] for entry in tree["tree"]
-                                                          if entry["type"] == "blob"}
-                                blob = trees[sha].get(path)
-                                if not blob:
-                                    failures["Public runner discovery incomplete"] += 1
-                                    continue
-                                if blob not in definitions:
-                                    definitions[blob] = None
-                                    content = request(f"repos/{full}/git/blobs/{quote(blob)}")
-                                    definitions[blob] = "cratis-arc" in base64.b64decode(content["content"]).decode()
-                                if definitions[blob] is None:
-                                    failures["Public runner discovery incomplete"] += 1
-                                    continue
-                                if not definitions[blob]:
-                                    continue
+                        # Public repositories use hosted runners and need run-level data only.
+                        if visibility == "private":
                             candidates.append((full, visibility, run))
-                        except CollectionStopped:
-                            raise
-                        except (APIError, KeyError, ValueError, UnicodeError):
-                            failures["Job or runner inventory incomplete"] += 1
                 except CollectionStopped:
                     raise
                 except APIError:
                     failures["Run inventory incomplete"] += 1
-                cursor = window_end
+                cursor = window_start
         except CollectionStopped:
-            failures["Collection stopped before completing repository"] += 1
-        return runs, candidates, [f"{kind} for {full}: {count} {'daily windows' if kind == 'Run inventory incomplete' else 'runs'}."
-                                  for kind, count in failures.items()]
+            inventory_errors.append(f"Run inventory stopped before completing {full}; older runs may be missing.")
+        candidates.sort(key=lambda entry: timestamp(entry[2].get("created_at")) or since, reverse=True)
+        inventory_errors.extend(f"{kind} for {full}: {count} daily windows." for kind, count in failures.items())
+        return runs, candidates, inventory_errors
 
     def job_inventory(candidate):
         full, visibility, run = candidate
@@ -189,32 +158,44 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
             # Each run is independent: a busy repository uses the entire bounded
             # pool instead of serializing thousands of job requests on one worker.
             for job in pages(request, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
-                if visibility == "private" or "cratis-arc" in (job.get("labels") or []):
-                    found.append((full, visibility, run.get("name") or "Unnamed workflow", job))
+                found.append((full, visibility, run.get("name") or "Unnamed workflow", job))
         except CollectionStopped:
-            return found, "Collection stopped before completing repository"
+            return found, "Job inventory stopped before completing repository (older private runs may be missing)"
         except (APIError, KeyError, ValueError, UnicodeError):
             return found, "Job or runner inventory incomplete"
         return found, None
 
     active = [repo for repo in repos if not repo.get("archived")]
     active.sort(key=lambda repo: not (repo.get("private") or repo.get("visibility") == "private"))
-    runs, jobs, candidates, seen_jobs, job_failures = [], [], [], set(), Counter()
+    runs, jobs, seen_jobs, job_failures = [], [], set(), Counter()
+    remaining_repos, candidates, pending = deque(active), deque(), {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for repo_runs, repo_candidates, repo_errors in pool.map(inventory, active):
-            runs.extend(repo_runs)
-            candidates.extend(repo_candidates)
-            errors.extend(repo_errors)
-        # Reuse the same pool and request budget for job pagination; at most
-        # `workers` API requests are in flight across both collection stages.
-        for candidate, (found, failure) in zip(candidates, pool.map(job_inventory, candidates)):
-            if failure:
-                job_failures[(candidate[0], failure)] += 1
-            for entry in found:
-                key = (entry[0], entry[3]["id"])
-                if key not in seen_jobs:
-                    seen_jobs.add(key)
-                    jobs.append(entry)
+        while remaining_repos or candidates or pending:
+            # Bound queued work as well as requests. Prioritize private jobs as soon
+            # as their repository listing finishes, without waiting for public listings.
+            while len(pending) < workers and (candidates or remaining_repos):
+                if candidates:
+                    candidate = candidates.popleft()
+                    pending[pool.submit(job_inventory, candidate)] = candidate
+                else:
+                    pending[pool.submit(inventory, remaining_repos.popleft())] = None
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                candidate = pending.pop(future)
+                if candidate is None:
+                    repo_runs, repo_candidates, repo_errors = future.result()
+                    runs.extend(repo_runs)
+                    candidates.extend(repo_candidates)
+                    errors.extend(repo_errors)
+                    continue
+                found, failure = future.result()
+                if failure:
+                    job_failures[(candidate[0], failure)] += 1
+                for entry in found:
+                    key = (entry[0], entry[3]["id"])
+                    if key not in seen_jobs:
+                        seen_jobs.add(key)
+                        jobs.append(entry)
     errors.extend(f"{kind} for {full}: {count} runs." for (full, kind), count in job_failures.items())
     if request.reason:
         errors.append(request.reason + "; remaining repositories/runs were not collected. Missing usage is unknown.")
@@ -299,7 +280,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
                 unknown_runner += 1
             else:
                 p[2] += minutes
-    lines = [f"Job-level Actions usage from {since.isoformat()} to {until.isoformat()} (UTC).", "",
+    lines = [f"Actions usage from {since.isoformat()} to {until.isoformat()} (UTC).", "",
              "Hosted private minutes are estimates: each completed job is rounded up to a minute, "
              "then multiplied by Linux 1×, Windows 2× or macOS 10×. Public hosted jobs are free. "
              "Self-hosted execution is not billed by GitHub; this is not an invoice. "
@@ -348,8 +329,8 @@ def render(repos, private_total, runs, jobs, errors, since, until):
         lines.append(f"| {name.replace('|', '/')} | {n} | {minutes:,.1f} | {short} |")
     lines.extend(["", "### Top 20 public workflows by run elapsed minutes", "",
                   "Run-level elapsed time includes dependency waits and is not job execution or billing. "
-                  "Public job inventory is limited to workflows with literal cratis-arc labels in their historical definitions; "
-                  "indirect runner selection is not observable.", "",
+                  "Public repositories use GitHub-hosted runners and are reported from run-level data only. "
+                  "Job-level billing and cratis-arc queue statistics cover private repositories only.", "",
                   "| Workflow | completed runs | elapsed minutes |", "|---|---:|---:|"])
     for name, (n, minutes) in sorted(public_workflows.items(), key=lambda item: -item[1][1])[:20]:
         lines.append(f"| {name.replace('|', '/')} | {n} | {minutes:,.1f} |")
