@@ -1025,13 +1025,14 @@ test("the drift comparison warns when a merge from the base branch changed what 
     assert.deepEqual(drift(repo.root, body, { before: "" }), []);
 });
 
-test("the drift job only warns, reads the pull request head with history, and skips label changes and Dependabot", () => {
+test("the drift job only warns, reads the pull request head with history, skips Dependabot and also runs on label changes", () => {
     const job = WORKFLOW.split("\n  drift:\n")[1];
     assert(job, "a drift job");
-    for (const required of ["github.event.pull_request.user.login != 'dependabot[bot]'", "github.event.action != 'labeled'",
-        "github.event.action != 'unlabeled'", "runs-on: ${{ inputs.runs-on }}", "ref: ${{ github.event.pull_request.head.sha }}",
+    for (const required of ["github.event.pull_request.user.login != 'dependabot[bot]'", "runs-on: ${{ inputs.runs-on }}", "ref: ${{ github.event.pull_request.head.sha }}",
         "fetch-depth: 0", "filter: blob:none", "continue-on-error: true", "BEFORE: ${{ github.event.before }}", "ACTION: ${{ github.event.action }}"])
         assert(job.includes(required), required);
+    // A label change cancels the caller's whole run, so the job must run for it and replace the cancelled check.
+    assert.equal(job.split("\n    runs-on:")[0].includes("github.event.action"), false, "no label-event exclusion");
     assert(/actions\/checkout@[0-9a-f]{40} # v7\.0\.1/.test(job), "checkout is pinned to a SHA");
     assert(PROGRAMS["release-notes-drift"].includes("process.exit(0);"));
     assert.equal(/process\.exit\([^0]/.test(PROGRAMS["release-notes-drift"]), false, "the drift program never exits non-zero");

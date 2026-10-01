@@ -8,7 +8,8 @@
 #   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
 #   - verify-no-work-records.yml           — fails PRs that track AI session work records
 #   - verify-release-notes.yml             — fails release-bound PRs whose description breaks the release-note contract
-#   - verify-semver-label.yml              — requires exactly one release-intent label; no-release only on Dependabot PRs
+#   - verify-semver-label.yml              — requires exactly one release-intent label; no-release only on Dependabot PRs;
+#                                            only in repositories that release with Cratis/release-action
 #   - .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
@@ -167,7 +168,8 @@ BOOTSTRAPPED_FILES[".github/workflows/verify-no-work-records.yml"]="bmFtZTogVmVy
 BOOTSTRAPPED_FILES[".github/workflows/verify-release-notes.yml"]="bmFtZTogVmVyaWZ5IFJlbGVhc2UgTm90ZXMKCiMgVGhpbiBjYWxsZXIgb2YgdGhlIG9yZ2FuaXphdGlvbi13aWRlIHJlbGVhc2Utbm90ZXMgZ2F0ZS4gVGhpcyBwdWxsIHJlcXVlc3QncwojIGRlc2NyaXB0aW9uIGlzIHB1Ymxpc2hlZCB2ZXJiYXRpbSBhcyB0aGUgcmVsZWFzZSBub3Rlcywgc28gdGhlIGdhdGUgY2hlY2tzIGl0CiMgYmVmb3JlIHRoZSBtZXJnZS4gVGhlIGNvbnRyYWN0IC0gd2hpY2ggc2VjdGlvbnMsIGlzc3VlIHJlZmVyZW5jZXMgYW5kIGNvbnRlbnQKIyBhcmUgYWxsb3dlZCwgYW5kIHdoYXQgdGhlIGVycm9ycyBzYXkgLSBsaXZlcyBpbgojIENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2Utbm90ZXMueW1sOyBkbyBub3QgcmVpbnRyb2R1Y2UKIyBsb2dpYyBoZXJlLiBJbnN0YWxsZWQgYW5kIGtlcHQgY3VycmVudCBieSBDcmF0aXMvV29ya2Zsb3dzJwojIGJvb3RzdHJhcC1jb21tb24td29ya2Zsb3dzLgojCiMgYGVkaXRlZGAgcmUtcnVucyB0aGUgY2hlY2sgd2hlbiB0aGUgZGVzY3JpcHRpb24gY2hhbmdlcyBhbmQgYGxhYmVsZWRgIGFuZAojIGB1bmxhYmVsZWRgIHdoZW4gdGhlIHJlbGVhc2UgbGFiZWwgZG9lcy4gVGhlcmUgaXMgbm8gYnJhbmNoIG9yIGxhYmVsIGZpbHRlcjogdGhlCiMgZ2F0ZSBpdHNlbGYgY2hlY2tzIHB1bGwgcmVxdWVzdHMgaW50byB0aGUgZGVmYXVsdCBicmFuY2gsIGZhaWxzIG9uZSB0aGF0IGNhcnJpZXMKIyBtYWpvciwgbWlub3Igb3IgcGF0Y2gsIHdhcm5zIG9uIG9uZSBsYWJlbGxlZCBuby1yZWxlYXNlIG9yIG5vdCBsYWJlbGxlZCB5ZXQsIGFuZAojIHBhc3NlcyBEZXBlbmRhYm90J3Mgd2l0aCBhIG5vdGljZS4gYHB1bGwtcmVxdWVzdHM6IHJlYWRgIGxldHMgaXQgcmVhZCB0aGUgcHVsbAojIHJlcXVlc3QgYXMgaXQgaXMgbm93LCBzbyBhIHJlLXJ1biBzZWVzIHRoZSBjdXJyZW50IGxhYmVscyBhbmQgZGVzY3JpcHRpb24uCiMKIyBUaGUgam9iIGlzIG5hbWVkIHJlbGVhc2Utbm90ZXMgc28gdGhlIGNoZWNrIHJlYWRzIGByZWxlYXNlLW5vdGVzIC8gdmVyaWZ5YCBhbmQKIyBkb2VzIG5vdCBjb2xsaWRlIHdpdGggb3RoZXIgYHZlcmlmeSAvIHZlcmlmeWAgZ2F0ZXMuCiMKIyBSVU5ORVJfR0FURSBpcyBhbiBvdXRhZ2UgZXNjYXBlIGhhdGNoIGFuZCBpcyBub3JtYWxseSB1bnNldDogc2V0IGl0IHRlbXBvcmFyaWx5IHRvIHJlcm91dGUgdGhlCiMgam9iIHdoZW4gdGhlIGRlZmF1bHQgcnVubmVyIGlzIGRvd24uIEEgcHJpdmF0ZSByZXBvc2l0b3J5IGRvZXMgbm90IHVzZSB0aGlzIGNhbGxlciBhcyBpczsgaXQKIyBrZWVwcyBpdHMgb3duIGNvcHkgd2l0aCBpdHMgb3duIGZhbGxiYWNrLCBmb3IgZXhhbXBsZQojIGBydW5zLW9uOiAke3sgdmFycy5SVU5ORVJfR0FURSB8fCAnY3JhdGlzLWFyYycgfX1gLgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKb246CiAgcHVsbF9yZXF1ZXN0OgogICAgdHlwZXM6IFtvcGVuZWQsIGVkaXRlZCwgcmVvcGVuZWQsIHN5bmNocm9uaXplLCBsYWJlbGVkLCB1bmxhYmVsZWQsIHJlYWR5X2Zvcl9yZXZpZXddCgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZAogIHB1bGwtcmVxdWVzdHM6IHJlYWQKCmpvYnM6CiAgcmVsZWFzZS1ub3RlczoKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2Utbm90ZXMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHJ1bnMtb246ICR7eyB2YXJzLlJVTk5FUl9HQVRFIHx8ICd1YnVudHUtbGF0ZXN0JyB9fQo="
 
 # verify-semver-label.yml — requires exactly one of major, minor, patch or no-release,
-# and only no-release on a Dependabot pull request (whose labels it corrects first)
+# and only no-release on a Dependabot pull request (whose labels it corrects first).
+# Installed only where the repository releases (see releases_with_release_action).
 # Decodes to:
 #   name: Verify Semver Label
 #
@@ -250,6 +252,34 @@ skips_file() {
   for skipped in ${SKIP_FILE_REPOS[$file_path]:-}; do
     [ "$skipped" = "$repo" ] && return 0
   done
+  return 1
+}
+
+# ================================================================
+# Release-intent caller: only where a repository releases
+# ================================================================
+# verify-semver-label.yml demands one of major/minor/patch/no-release on every pull request. That is only
+# meaningful where merging can cut a release, so a repository that never releases (a blog, a samples or workshop
+# repository, a Homebrew tap) must not get a gate that turns every one of its pull requests red.
+
+SEMVER_LABEL_FILE=".github/workflows/verify-semver-label.yml"
+
+# Whether repository $1 releases with Cratis/release-action: it already has the release-intent caller, or one of
+# its workflows uses Cratis/release-action (the owner is matched case-insensitively). $2 is the repository's
+# recursive tree (JSON). A repository that starts releasing is picked up on the next run, without a list to
+# maintain.
+releases_with_release_action() {
+  local repo="$1" tree="$2" blob_sha content
+  if echo "$tree" | jq -e --arg path "$SEMVER_LABEL_FILE" '.tree[] | select(.path == $path)' >/dev/null 2>&1; then
+    return 0
+  fi
+  while read -r blob_sha; do
+    [ -n "$blob_sha" ] || continue
+    content=$(gh api "repos/Cratis/$repo/git/blobs/$blob_sha" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
+    if grep -qi 'Cratis/release-action' <<<"$content"; then
+      return 0
+    fi
+  done < <(echo "$tree" | jq -r '.tree[] | select(.type == "blob" and (.path | test("^[.]github/workflows/[^/]+[.]ya?ml$"))) | .sha')
   return 1
 }
 
@@ -349,10 +379,20 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   has_changes=false
   commit_parts=()
 
+  repo_releases=""
   for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
     if skips_file "$file_path" "$repo"; then
       echo "  ℹ Skipping $file_path (Cratis/$repo keeps its own copy)"
       continue
+    fi
+    if [ "$file_path" = "$SEMVER_LABEL_FILE" ]; then
+      if [ -z "$repo_releases" ]; then
+        if releases_with_release_action "$repo" "$subtree"; then repo_releases=yes; else repo_releases=no; fi
+      fi
+      if [ "$repo_releases" = no ]; then
+        echo "  ℹ Skipping $file_path (Cratis/$repo does not release with Cratis/release-action)"
+        continue
+      fi
     fi
     file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
     case "$file_path" in

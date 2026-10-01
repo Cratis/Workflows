@@ -18,8 +18,11 @@ name: Verify Release Intent
 #
 # Dependabot pull requests carry only `no-release`: release-action never releases
 # them, and the major/minor/patch label Dependabot adds on its own describes the
-# dependency's version bump, not this product's. normalize-dependabot-labels.yml
-# corrects the labels before this gate runs in the same caller.
+# dependency's version bump, not this product's. This gate never fails a Dependabot
+# pull request for its labels: it replaces major/minor/patch with no-release itself
+# when the token can write, and passes with a notice when it cannot, which keeps
+# callers that predate the normalizer working. normalize-dependabot-labels.yml does
+# the same in the current caller, whose gate job only has `pull-requests: read`.
 #
 # The labels are read from the pull request as it is now, not from the event
 # payload: "Re-run" replays the event that started the run, so a payload read
@@ -63,13 +66,31 @@ jobs:
           none=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "no-release")] | length')
           count=$((version + none))
 
+          # A Dependabot pull request is never failed for its labels. Callers that predate normalize-dependabot-labels.yml
+          # (the repositories the bootstrap ignores) have no job to correct them, so the gate corrects them itself when the
+          # token can write, and passes with a notice when it cannot.
           if [ "$AUTHOR" = "dependabot[bot]" ]; then
             if [ "$version" -eq 0 ] && [ "$none" -eq 1 ]; then
               echo "Dependabot pull request labelled no-release only."
               exit 0
             fi
-            echo "::error::Dependabot pull requests carry only no-release, with none of major, minor or patch. Dependabot applies major/minor/patch from the dependency's own version; release-action never releases Dependabot PRs. Remove major, minor and patch and add no-release; the normalize-dependabot-labels job in verify-semver-label.yml does this automatically."
-            exit 1
+            corrected=true
+            if [ -z "$NUMBER" ]; then
+              corrected=false
+            else
+              for label in $(printf '%s' "$LABELS" | jq -r '.[] | select(. == "major" or . == "minor" or . == "patch")'); do
+                gh api -X DELETE "repos/$REPOSITORY/issues/$NUMBER/labels/$label" > /dev/null 2>&1 || corrected=false
+              done
+              if [ "$none" -eq 0 ]; then
+                gh api -X POST "repos/$REPOSITORY/issues/$NUMBER/labels" -f "labels[]=no-release" > /dev/null 2>&1 || corrected=false
+              fi
+            fi
+            if [ "$corrected" = true ]; then
+              echo "Dependabot pull request: replaced major, minor and patch with no-release. Dependabot applies those from the dependency's own version; release-action never releases Dependabot PRs."
+            else
+              echo "::notice title=Dependabot labels not corrected::Dependabot pull requests carry only no-release, but this one does not, for example because Dependabot added major, minor or patch from the dependency's own version, and this token cannot change labels. release-action never releases Dependabot PRs, so this passes; grant the caller pull-requests: write or add the normalize-dependabot-labels job to verify-semver-label.yml."
+            fi
+            exit 0
           fi
 
           if [ "$count" -eq 1 ]; then

@@ -816,12 +816,12 @@ jobs:
 
   # Warnings only: whether a bullet still describes this pull request cannot be decided from text alone, so this
   # job points at the likely drift and never fails. It reads the pull request as it is now, like the gate.
+  # It runs on `labeled` and `unlabeled` too: the caller's concurrency group cancels the whole run when a label changes,
+  # so a job that skipped those events would leave the check cancelled with no run to replace it.
   drift:
     if: >-
       github.event_name == 'pull_request'
       && github.event.pull_request.user.login != 'dependabot[bot]'
-      && github.event.action != 'labeled'
-      && github.event.action != 'unlabeled'
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
 
