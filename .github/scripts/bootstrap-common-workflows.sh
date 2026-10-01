@@ -75,19 +75,20 @@ declare -A BOOTSTRAPPED_FILES
 #       secrets: inherit
 BOOTSTRAPPED_FILES[".github/workflows/cleanup-pr-artifacts.yml"]="bmFtZTogQ2xlYW51cCBQUiBBcnRpZmFjdHMKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbY2xvc2VkXQoKam9iczoKICBjbGVhbnVwOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy9jbGVhbnVwLXByLWFydGlmYWN0cy55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcHVsbF9yZXF1ZXN0OiAke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfX0KICAgIHNlY3JldHM6IGluaGVyaXQK"
 
-# update-packages.yml — nightly scheduled + manual trigger, delegates to reusable workflow
+# update-packages.yml — weekly scheduled + manual trigger, delegates to reusable workflow
+# The cron placeholder is replaced per repository before creating its blob.
 # Decodes to:
 #   name: Update Packages
 #   on:
 #     schedule:
-#       - cron: '0 6 * * *'
+#       - cron: '__PACKAGE_UPDATE_CRON__'
 #     workflow_dispatch:
 #   jobs:
 #     update:
 #       uses: Cratis/Workflows/.github/workflows/update-packages.yml@main
 #       secrets:
 #         PAT_WORKFLOWS: ${{ secrets.PAT_WORKFLOWS }}
-BOOTSTRAPPED_FILES[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJzAgNiAqICogKicKICB3b3JrZmxvd19kaXNwYXRjaDoKCmpvYnM6CiAgdXBkYXRlOgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy91cGRhdGUtcGFja2FnZXMueW1sQG1haW4KICAgIHNlY3JldHM6CiAgICAgIFBBVF9XT1JLRkxPV1M6ICR7eyBzZWNyZXRzLlBBVF9XT1JLRkxPV1MgfX0K"
+BOOTSTRAPPED_FILES[".github/workflows/update-packages.yml"]="bmFtZTogVXBkYXRlIFBhY2thZ2VzCgpvbjoKICBzY2hlZHVsZToKICAgIC0gY3JvbjogJ19fUEFDS0FHRV9VUERBVEVfQ1JPTl9fJwogIHdvcmtmbG93X2Rpc3BhdGNoOgoKam9iczoKICB1cGRhdGU6CiAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3VwZGF0ZS1wYWNrYWdlcy55bWxAbWFpbgogICAgc2VjcmV0czoKICAgICAgUEFUX1dPUktGTE9XUzogJHt7IHNlY3JldHMuUEFUX1dPUktGTE9XUyB9fQo="
 
 # auto-approve-publish-deployments.yml — approves pending npm/nuget deployments
 # for Publish workflow runs (trusted publishing environments).
@@ -229,6 +230,14 @@ BOOTSTRAPPED_FILES[".github/workflows/verify-semver-label.yml"]="bmFtZTogVmVyaWZ
 #     - exclude:
 #         id: ca1031
 BOOTSTRAPPED_FILES[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAjIENBMTAzMSBpcyBpbnRlbnRpb25hbGx5IGV4Y2x1ZGVkIGZyb20gdGhlIHNoYXJlZCBiYXNlbGluZS4KICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
+
+# Stable POSIX checksum of the repository name: Monday, minute 1-59, 03:00-07:59 UTC.
+# Unlike an array index, this does not move existing schedules when repositories are added.
+package_update_cron() {
+  local checksum remainder
+  read -r checksum remainder < <(printf '%s' "$1" | cksum)
+  printf '%d %d * * 1' "$((checksum % 59 + 1))" "$((checksum / 59 % 5 + 3))"
+}
 
 # ================================================================
 # Per-file skips
@@ -395,6 +404,11 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       fi
     fi
     file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
+    if [ "$file_path" = ".github/workflows/update-packages.yml" ]; then
+      file_content=$(printf '%s' "$file_b64" | base64 -d)
+      file_content="${file_content/__PACKAGE_UPDATE_CRON__/$(package_update_cron "$repo")}"
+      file_b64=$(printf '%s\n' "$file_content" | base64 | tr -d '\n')
+    fi
     case "$file_path" in
       .github/codeql/codeql-config.yml)
         file_label="codeql-config"
