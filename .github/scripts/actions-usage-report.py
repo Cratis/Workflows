@@ -23,6 +23,10 @@ class CollectionStopped(APIError):
     pass
 
 
+class RunWindowTooLarge(APIError):
+    pass
+
+
 class RequestBudget:
     """Reserve each request (including pagination) atomically across workers."""
     def __init__(self, get, remaining, max_seconds):
@@ -66,7 +70,7 @@ def pages(get, endpoint, key=None):
     for page in range(1, 1001):
         response = get(f"{endpoint}{separator}per_page=100&page={page}")
         if key == "workflow_runs" and response.get("total_count", 0) > 1000:
-            raise APIError("Filtered run search exceeds GitHub's 1000-result limit")
+            raise RunWindowTooLarge("Filtered run search exceeds GitHub's 1000-result limit")
         items = response[key] if key else response
         if not isinstance(items, list):
             raise APIError("Invalid API listing")
@@ -74,6 +78,21 @@ def pages(get, endpoint, key=None):
         if len(items) < 100:
             return
     raise APIError("API pagination limit exceeded")
+
+
+def window_runs(get, full, start, end):
+    """Bisect capped searches; callers deduplicate inclusive range boundaries."""
+    start_query = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_query = end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    endpoint = f"repos/{full}/actions/runs?created={start_query}..{end_query}"
+    try:
+        yield from pages(get, endpoint, "workflow_runs")
+    except RunWindowTooLarge:
+        middle = (start + (end - start) / 2).replace(microsecond=0)
+        if middle <= start or middle >= end:
+            raise  # Even a one-second window is capped: report the gap explicitly.
+        yield from window_runs(get, full, start, middle)
+        yield from window_runs(get, full, middle, end)
 
 
 def timestamp(value):
@@ -89,33 +108,33 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
     # Do not start a collection whose request budget cannot be established.
     try:
         remaining = get("rate_limit")["resources"]["core"]["remaining"]
-    except (APIError, KeyError, TypeError):
-        return [], None, [], [], ["API rate budget unavailable; collection not started."]
+    except (APIError, KeyError, TypeError) as error:
+        raise APIError("API rate budget unavailable; collection not started.") from error
     request = RequestBudget(get, remaining, max_seconds)
     repos, private_total, errors = [], None, []
     try:
         # Retain archived metadata for the visibility check, but never collect its usage.
         repos = list(pages(request, f"orgs/{owner}/repos"))
+    except APIError as error:
+        raise APIError("Unable to enumerate repositories; collection not started.") from error
+    try:
         private_total = request(f"orgs/{owner}").get("total_private_repos")
     except CollectionStopped as error:
         return repos, private_total, [], [], [str(error)]
     except APIError:
-        errors.append("Repository visibility or organization private-repository count unavailable; coverage cannot be confirmed.")
+        errors.append("Organization private-repository count unavailable; coverage cannot be confirmed.")
 
     def inventory(repo):
         full = repo["full_name"]
         visibility = repo.get("visibility", "private" if repo.get("private") else "public")
-        runs, jobs, seen, seen_runs, failures = [], [], set(), set(), Counter()
+        runs, candidates, seen_runs, failures = [], [], set(), Counter()
         definitions, trees = {}, {}
         cursor = since
         try:
             while cursor < until:
                 window_end = min(cursor + dt.timedelta(days=1), until)
                 try:
-                    start_query = cursor.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    end_query = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    endpoint = f"repos/{full}/actions/runs?created={start_query}..{end_query}"
-                    for run in pages(request, endpoint, "workflow_runs"):
+                    for run in window_runs(request, full, cursor, window_end):
                         if run["id"] in seen_runs:
                             continue  # GitHub's range endpoints are inclusive.
                         seen_runs.add(run["id"])
@@ -126,6 +145,8 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                                 # blob via one tree per commit, then cache by content SHA: most
                                 # commits do not change workflows, so no per-run contents call.
                                 path, sha = run.get("path", "").split("@")[0], run.get("head_sha")
+                                if path.startswith("dynamic/"):
+                                    continue  # GitHub-managed hosted workflows have no repository blob.
                                 if sha not in trees:
                                     trees[sha] = {}
                                     if sha:
@@ -146,13 +167,7 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                                     continue
                                 if not definitions[blob]:
                                     continue
-                            # Include rerun attempts rather than silently dropping earlier jobs.
-                            for job in pages(request, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
-                                if visibility != "private" and "cratis-arc" not in (job.get("labels") or []):
-                                    continue
-                                if job["id"] not in seen:
-                                    seen.add(job["id"])
-                                    jobs.append((full, visibility, run.get("name") or "Unnamed workflow", job))
+                            candidates.append((full, visibility, run))
                         except CollectionStopped:
                             raise
                         except (APIError, KeyError, ValueError, UnicodeError):
@@ -164,17 +179,43 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                 cursor = window_end
         except CollectionStopped:
             failures["Collection stopped before completing repository"] += 1
-        return runs, jobs, [f"{kind} for {full}: {count} {'daily windows' if kind == 'Run inventory incomplete' else 'runs'}."
-                            for kind, count in failures.items()]
+        return runs, candidates, [f"{kind} for {full}: {count} {'daily windows' if kind == 'Run inventory incomplete' else 'runs'}."
+                                  for kind, count in failures.items()]
+
+    def job_inventory(candidate):
+        full, visibility, run = candidate
+        found = []
+        try:
+            # Each run is independent: a busy repository uses the entire bounded
+            # pool instead of serializing thousands of job requests on one worker.
+            for job in pages(request, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
+                if visibility == "private" or "cratis-arc" in (job.get("labels") or []):
+                    found.append((full, visibility, run.get("name") or "Unnamed workflow", job))
+        except CollectionStopped:
+            return found, "Collection stopped before completing repository"
+        except (APIError, KeyError, ValueError, UnicodeError):
+            return found, "Job or runner inventory incomplete"
+        return found, None
 
     active = [repo for repo in repos if not repo.get("archived")]
     active.sort(key=lambda repo: not (repo.get("private") or repo.get("visibility") == "private"))
-    runs, jobs = [], []
+    runs, jobs, candidates, seen_jobs, job_failures = [], [], [], set(), Counter()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for repo_runs, repo_jobs, repo_errors in pool.map(inventory, active):
+        for repo_runs, repo_candidates, repo_errors in pool.map(inventory, active):
             runs.extend(repo_runs)
-            jobs.extend(repo_jobs)
+            candidates.extend(repo_candidates)
             errors.extend(repo_errors)
+        # Reuse the same pool and request budget for job pagination; at most
+        # `workers` API requests are in flight across both collection stages.
+        for candidate, (found, failure) in zip(candidates, pool.map(job_inventory, candidates)):
+            if failure:
+                job_failures[(candidate[0], failure)] += 1
+            for entry in found:
+                key = (entry[0], entry[3]["id"])
+                if key not in seen_jobs:
+                    seen_jobs.add(key)
+                    jobs.append(entry)
+    errors.extend(f"{kind} for {full}: {count} runs." for (full, kind), count in job_failures.items())
     if request.reason:
         errors.append(request.reason + "; remaining repositories/runs were not collected. Missing usage is unknown.")
     return repos, private_total, runs, jobs, errors
@@ -265,6 +306,9 @@ def render(repos, private_total, runs, jobs, errors, since, until):
              "The inventory covers runs created in the period and their completed jobs that started in the period.", "",
              f"Visible non-archived repositories: **{len(repos)}**, private: **{private_active}**. "
              f"Inventoried runs: **{len(runs)}**, jobs (all attempts): **{len(jobs)}**.", ""]
+    dynamic_runs = sum(visibility != "private" and run.get("path", "").startswith("dynamic/")
+                       for _, visibility, run in runs)
+    lines.extend([f"GitHub-managed dynamic runs (not inspected): **{dynamic_runs}**.", ""])
     if private_visible == 0:
         lines.append("**Private repository coverage unavailable:** PAT_WORKFLOWS exposes no private repositories. "
                      "This is not evidence of zero private usage. Give the reporting token read access to private "

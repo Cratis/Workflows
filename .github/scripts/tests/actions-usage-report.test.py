@@ -175,7 +175,7 @@ class UsageReportTests(unittest.TestCase):
 
     def test_budget_exhaustion_is_explicit_and_a_fresh_collection_can_resume(self):
         calls = []
-        remaining = 105
+        remaining = 111
         def get(endpoint):
             calls.append(endpoint)
             if endpoint == "rate_limit":
@@ -186,10 +186,11 @@ class UsageReportTests(unittest.TestCase):
                 return {"total_private_repos": 1}
             if "/jobs?" in endpoint:
                 return {"jobs": [job(1), job(2)]}
-            return {"workflow_runs": [{"id": 1, "name": "Build"}]}
+            day = int(endpoint.split("created=2026-09-")[1][:2])
+            return {"workflow_runs": [{"id": day, "name": "Build"}]}
         data = report.collect(get, "Cratis", SINCE, UNTIL)
         self.assertEqual(calls[0], "rate_limit")
-        self.assertEqual(len(calls), 6)  # Preflight plus exactly five reserved requests.
+        self.assertEqual(len(calls), 12)  # Preflight plus exactly eleven reserved requests.
         self.assertIn("API request budget exhausted", render(errors=data[4]))
         self.assertEqual(len(data[3]), 2)  # Successful data retained, not silently zeroed.
         remaining = 5000
@@ -233,15 +234,15 @@ class UsageReportTests(unittest.TestCase):
         def get(endpoint):
             calls.append(endpoint)
             raise report.APIError("denied")
-        data = report.collect(get, "Cratis", SINCE, UNTIL)
+        with self.assertRaisesRegex(report.APIError, "collection not started"):
+            report.collect(get, "Cratis", SINCE, UNTIL)
         self.assertEqual(calls, ["rate_limit"])
-        self.assertIn("collection not started", data[4][0])
 
     def test_time_budget_stops_with_partial_report(self):
         def get(endpoint):
             return {"resources": {"core": {"remaining": 5000}}}
-        data = report.collect(get, "Cratis", SINCE, UNTIL, max_seconds=0)
-        self.assertIn("Collection time budget exhausted", data[4][0])
+        with self.assertRaisesRegex(report.APIError, "Unable to enumerate repositories"):
+            report.collect(get, "Cratis", SINCE, UNTIL, max_seconds=0)
 
     def test_job_failures_are_collapsed_per_repository(self):
         def get(endpoint):
@@ -296,6 +297,123 @@ class UsageReportTests(unittest.TestCase):
         self.assertEqual(len(data[2]), 14000)
         self.assertFalse(data[4])
         self.assertLess(calls, 5000)
+        self.assertGreater(peak, 1)
+        self.assertLessEqual(peak, 8)
+
+    def test_dynamic_workflows_skip_tree_lookup_and_do_not_mark_coverage_incomplete(self):
+        calls = []
+        def get(endpoint):
+            calls.append(endpoint)
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 5000}}}
+            if endpoint == "orgs/Cratis":
+                return {"total_private_repos": 0}
+            if endpoint.startswith("orgs/Cratis/repos?"):
+                return [PUBLIC]
+            if "/actions/runs?" in endpoint:
+                return {"workflow_runs": [{"id": i, "path": path, "head_sha": "abc"}
+                                         for i, path in enumerate(("dynamic/github-code-quality/codeql",
+                                                                   "dynamic/dependabot/dependabot-updates"))]}
+            self.fail(f"Dynamic workflows must not request definitions or jobs: {endpoint}")
+        data = report.collect(get, "Cratis", SINCE, UNTIL)
+        output = report.render(*data, SINCE, UNTIL)
+        self.assertFalse(data[4])
+        self.assertIn("GitHub-managed dynamic runs (not inspected): **2**", output)
+        self.assertNotIn("Incomplete API coverage", output)
+
+    def test_over_cap_window_is_recursively_split_and_inclusive_boundaries_are_deduplicated(self):
+        calls = []
+        end = SINCE + dt.timedelta(days=1)
+        middle = SINCE + dt.timedelta(hours=12)
+        created = [SINCE + dt.timedelta(seconds=i * 60) for i in range(1201)]
+        def get(endpoint):
+            calls.append(endpoint)
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 5000}}}
+            if endpoint == "orgs/Cratis":
+                return {"total_private_repos": 1}
+            if endpoint.startswith("orgs/Cratis/repos?"):
+                return [PRIVATE]
+            if "/jobs?" in endpoint:
+                return {"jobs": [job(int(endpoint.split("/runs/")[1].split("/")[0]))]}
+            query = endpoint.split("created=")[1].split("&")[0]
+            start, stop = (report.timestamp(value) for value in query.split(".."))
+            entries = [{"id": i, "name": "Build"} for i, date in enumerate(created) if start <= date <= stop]
+            page = int(endpoint.rsplit("=", 1)[1])
+            return {"total_count": len(entries), "workflow_runs": entries[(page - 1) * 100:page * 100]}
+        data = report.collect(get, "Cratis", SINCE, end)
+        self.assertFalse(data[4])
+        self.assertEqual(len(data[2]), 1201)
+        self.assertEqual(len(data[3]), 1201)
+        self.assertTrue(any(f"..{middle.strftime('%Y-%m-%dT%H:%M:%SZ')}" in call for call in calls))
+
+    def test_even_a_capped_one_second_window_reports_a_gap(self):
+        with self.assertRaises(report.RunWindowTooLarge):
+            list(report.window_runs(lambda _: {"total_count": 1001, "workflow_runs": []},
+                                    "Cratis/Private", SINCE, SINCE + dt.timedelta(seconds=1)))
+
+    def test_repository_listing_failure_aborts_instead_of_publishing_a_token_diagnosis(self):
+        def get(endpoint):
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 5000}}}
+            raise report.APIError("transient repository listing failure")
+        with self.assertRaisesRegex(report.APIError, "Unable to enumerate repositories"):
+            report.collect(get, "Cratis", SINCE, UNTIL)
+
+    def test_private_count_failure_retains_enumerated_repository_usage(self):
+        def get(endpoint):
+            if endpoint == "rate_limit":
+                return {"resources": {"core": {"remaining": 5000}}}
+            if endpoint.startswith("orgs/Cratis/repos?"):
+                return [PRIVATE]
+            if endpoint == "orgs/Cratis":
+                raise report.APIError("denied")
+            if "/jobs?" in endpoint:
+                return {"jobs": [job()]}
+            return {"workflow_runs": [{"id": 1}]}
+        data = report.collect(get, "Cratis", SINCE, UNTIL)
+        self.assertEqual(len(data[3]), 1)
+        self.assertIn("Private coverage unconfirmed", report.render(*data, SINCE, UNTIL))
+
+    def test_busy_private_repositories_finish_with_latency_and_shared_worker_and_request_limits(self):
+        volumes = {"Studio": 1428, "Direct": 509, "Strategy": 474,
+                   "Infrastructure": 191, "Chronicle.Wolverine": 129, "Other": 397}
+        repos = [{"full_name": f"Cratis/{name}", "private": True} for name in volumes]
+        lock = threading.Lock()
+        calls = active = peak = 0
+        # Compress 0.8-second API latency and the 480-second deadline by 80x.
+        # Studio alone would take >14 seconds serially, beyond this 6-second budget.
+        latency, budget = .01, 6
+        def get(endpoint):
+            nonlocal calls, active, peak
+            with lock:
+                calls += 1
+                active += 1
+                peak = max(peak, active)
+            try:
+                time.sleep(latency)
+                if endpoint == "rate_limit":
+                    return {"resources": {"core": {"remaining": 5000}}}
+                if endpoint.startswith("orgs/Cratis/repos?"):
+                    return repos
+                if endpoint == "orgs/Cratis":
+                    return {"total_private_repos": len(repos)}
+                if "/jobs?" in endpoint:
+                    return {"jobs": [job(int(endpoint.split("/runs/")[1].split("/")[0]))]}
+                name = endpoint.split("repos/Cratis/")[1].split("/")[0]
+                day = int(endpoint.split("created=2026-09-")[1][:2]) - 24
+                entries = [{"id": i, "name": "Build"} for i in range(volumes[name]) if i % 7 == day]
+                page = int(endpoint.rsplit("=", 1)[1])
+                return {"total_count": len(entries), "workflow_runs": entries[(page - 1) * 100:page * 100]}
+            finally:
+                with lock:
+                    active -= 1
+        start = time.monotonic()
+        data = report.collect(get, "Cratis", SINCE, UNTIL, max_seconds=budget)
+        self.assertFalse(data[4])
+        self.assertEqual(len(data[3]), sum(volumes.values()))
+        self.assertLess(time.monotonic() - start, budget)
+        self.assertLess(calls, 4900)
         self.assertGreater(peak, 1)
         self.assertLessEqual(peak, 8)
 
