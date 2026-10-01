@@ -167,6 +167,17 @@ test("the normalizer never turns a run red: a token that cannot write, a failed 
 // The bootstrap installs the release-intent caller only where a repository releases. Its decision function is run
 // with bash and a stub `gh` that serves workflow blobs from the test.
 const BOOTSTRAP = readFileSync(".github/scripts/bootstrap-common-workflows.sh", "utf8");
+
+test("the bootstrapped work-record caller filters markdown and local work records and cancels superseded runs", () => {
+    const encoded = /BOOTSTRAPPED_FILES\["\.github\/workflows\/verify-no-work-records\.yml"\]="([^"]+)"/.exec(BOOTSTRAP)[1];
+    const caller = Buffer.from(encoded, "base64").toString("utf8");
+    assert.match(caller, /pull_request:\n    paths: \["\*\*\.md", "\.ai-work\/\*\*"\]/);
+    assert.match(caller, /push:\n    branches: \["main"\]\n    paths: \["\*\*\.md", "\.ai-work\/\*\*"\]/);
+    assert(caller.includes("group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"));
+    assert(caller.includes("cancel-in-progress: true"));
+    assert(caller.includes("uses: Cratis/Workflows/.github/workflows/verify-no-work-records.yml@main"));
+    assert.match(readFileSync(".github/workflows/verify-no-work-records.yml", "utf8"), /timeout-minutes: 5/);
+});
 const releasesFunction = /^releases_with_release_action\(\) \{\n[\s\S]*?^\}$/m.exec(BOOTSTRAP)[0];
 const blobs = mkdtempSync(join(tmpdir(), "bootstrap-blobs-"));
 writeFileSync(join(blobs, "gh"), `#!/usr/bin/env bash

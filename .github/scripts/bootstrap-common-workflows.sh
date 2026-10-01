@@ -114,12 +114,17 @@ BOOTSTRAPPED_FILES[".github/workflows/auto-approve-publish-deployments.yml"]="bm
 #   name: Verify No Work Records
 #   on:
 #     pull_request:
+#       paths: ["**.md", ".ai-work/**"]
 #     push:
 #       branches: ["main"]
+#       paths: ["**.md", ".ai-work/**"]
+#   concurrency:
+#     group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+#     cancel-in-progress: true
 #   jobs:
 #     verify:
 #       uses: Cratis/Workflows/.github/workflows/verify-no-work-records.yml@main
-BOOTSTRAPPED_FILES[".github/workflows/verify-no-work-records.yml"]="bmFtZTogVmVyaWZ5IE5vIFdvcmsgUmVjb3JkcwoKb246CiAgcHVsbF9yZXF1ZXN0OgogIHB1c2g6CiAgICBicmFuY2hlczogWyJtYWluIl0KCmpvYnM6CiAgdmVyaWZ5OgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy92ZXJpZnktbm8td29yay1yZWNvcmRzLnltbEBtYWluCg=="
+BOOTSTRAPPED_FILES[".github/workflows/verify-no-work-records.yml"]="bmFtZTogVmVyaWZ5IE5vIFdvcmsgUmVjb3JkcwoKb246CiAgcHVsbF9yZXF1ZXN0OgogICAgcGF0aHM6IFsiKioubWQiLCAiLmFpLXdvcmsvKioiXQogIHB1c2g6CiAgICBicmFuY2hlczogWyJtYWluIl0KICAgIHBhdGhzOiBbIioqLm1kIiwgIi5haS13b3JrLyoqIl0KCmNvbmN1cnJlbmN5OgogIGdyb3VwOiAke3sgZ2l0aHViLndvcmtmbG93IH19LSR7eyBnaXRodWIuZXZlbnQucHVsbF9yZXF1ZXN0Lm51bWJlciB8fCBnaXRodWIucmVmIH19CiAgY2FuY2VsLWluLXByb2dyZXNzOiB0cnVlCgpqb2JzOgogIHZlcmlmeToKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LW5vLXdvcmstcmVjb3Jkcy55bWxAbWFpbgo="
 
 # verify-release-notes.yml — fails release-bound PRs whose description (published
 # verbatim as the release notes) breaks the release-note contract

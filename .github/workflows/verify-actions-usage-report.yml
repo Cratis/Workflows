@@ -1,0 +1,36 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Actions Usage Report
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/actions-usage-report.yml
+      - .github/workflows/verify-actions-usage-report.yml
+      - .github/scripts/actions-usage-report.py
+      - .github/scripts/tests/actions-usage-report.test.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/actions-usage-report.yml
+      - .github/workflows/verify-actions-usage-report.yml
+      - .github/scripts/actions-usage-report.py
+      - .github/scripts/tests/actions-usage-report.test.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify job accounting and incomplete coverage reporting offline
+        run: python3 -B .github/scripts/tests/actions-usage-report.test.py
