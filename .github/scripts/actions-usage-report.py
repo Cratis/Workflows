@@ -3,6 +3,7 @@
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 """Report job execution, estimated hosted billing, and scale-set queue pressure."""
 import datetime as dt
+import heapq
 import json
 import math
 import os
@@ -34,7 +35,7 @@ class RequestBudget:
         self.lock = threading.Lock()
         self.reason = None
 
-    def __call__(self, endpoint):
+    def reserve(self):
         with self.lock:
             if time.monotonic() >= self.deadline:
                 self.reason = "Collection time budget exhausted"
@@ -43,6 +44,13 @@ class RequestBudget:
             if self.reason:
                 raise CollectionStopped(self.reason)
             self.remaining -= 1
+
+    def __call__(self, endpoint):
+        self.reserve()
+        return self.fetch(endpoint)
+
+    def fetch(self, endpoint):
+        """Fetch a request whose budget was already reserved."""
         try:
             return self.get(endpoint)
         except CollectionStopped as error:
@@ -147,7 +155,6 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                 cursor = window_start
         except CollectionStopped:
             inventory_errors.append(f"Run inventory stopped before completing {full}; older runs may be missing.")
-        candidates.sort(key=lambda entry: timestamp(entry[2].get("created_at")) or since, reverse=True)
         inventory_errors.extend(f"{kind} for {full}: {count} daily windows." for kind, count in failures.items())
         return runs, candidates, inventory_errors
 
@@ -157,10 +164,13 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
         try:
             # Each run is independent: a busy repository uses the entire bounded
             # pool instead of serializing thousands of job requests on one worker.
-            for job in pages(request, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
+            # The scheduler reserves page one in priority order before submission;
+            # workers reserve any additional pages from the same shared budget.
+            get_jobs = lambda endpoint: request.fetch(endpoint) if endpoint.endswith("&page=1") else request(endpoint)
+            for job in pages(get_jobs, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
                 found.append((full, visibility, run.get("name") or "Unnamed workflow", job))
         except CollectionStopped:
-            return found, "Job inventory stopped before completing repository (older private runs may be missing)"
+            return found, "Job inventory stopped before completing listed private runs"
         except (APIError, KeyError, ValueError, UnicodeError):
             return found, "Job or runner inventory incomplete"
         return found, None
@@ -168,24 +178,43 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
     active = [repo for repo in repos if not repo.get("archived")]
     active.sort(key=lambda repo: not (repo.get("private") or repo.get("visibility") == "private"))
     runs, jobs, seen_jobs, job_failures = [], [], set(), Counter()
-    remaining_repos, candidates, pending = deque(active), deque(), {}
+    private_repos = deque(repo for repo in active if repo.get("private") or repo.get("visibility") == "private")
+    public_repos = deque(repo for repo in active if not (repo.get("private") or repo.get("visibility") == "private"))
+    candidates, pending, private_inventories = [], {}, set()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        while remaining_repos or candidates or pending:
-            # Bound queued work as well as requests. Prioritize private jobs as soon
-            # as their repository listing finishes, without waiting for public listings.
-            while len(pending) < workers and (candidates or remaining_repos):
-                if candidates:
-                    candidate = candidates.popleft()
+        while private_repos or public_repos or candidates or pending:
+            # Inventory every private repository before jobs so a budget cut drops
+            # the globally oldest listed runs. Start public inventories next, but
+            # do not wait for them to finish before collecting private jobs.
+            while len(pending) < workers:
+                if private_repos:
+                    future = pool.submit(inventory, private_repos.popleft())
+                    private_inventories.add(future)
+                    pending[future] = None
+                elif private_inventories:
+                    break
+                elif public_repos:
+                    pending[pool.submit(inventory, public_repos.popleft())] = None
+                elif candidates:
+                    candidate = heapq.heappop(candidates)[3]
+                    try:
+                        request.reserve()
+                    except CollectionStopped:
+                        job_failures[(candidate[0], "Job inventory stopped before completing listed private runs")] += 1
+                        continue
                     pending[pool.submit(job_inventory, candidate)] = candidate
                 else:
-                    pending[pool.submit(inventory, remaining_repos.popleft())] = None
+                    break
             completed, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed:
                 candidate = pending.pop(future)
                 if candidate is None:
+                    private_inventories.discard(future)
                     repo_runs, repo_candidates, repo_errors = future.result()
                     runs.extend(repo_runs)
-                    candidates.extend(repo_candidates)
+                    for entry in repo_candidates:
+                        created = timestamp(entry[2].get("created_at")) or since
+                        heapq.heappush(candidates, (-created.timestamp(), entry[0], entry[2]["id"], entry))
                     errors.extend(repo_errors)
                     continue
                 found, failure = future.result()
@@ -289,7 +318,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
              f"Inventoried runs: **{len(runs)}**, jobs (all attempts): **{len(jobs)}**.", ""]
     dynamic_runs = sum(visibility != "private" and run.get("path", "").startswith("dynamic/")
                        for _, visibility, run in runs)
-    lines.extend([f"GitHub-managed dynamic runs (not inspected): **{dynamic_runs}**.", ""])
+    lines.extend([f"GitHub-managed dynamic runs (included in public run-level totals): **{dynamic_runs}**.", ""])
     if private_visible == 0:
         lines.append("**Private repository coverage unavailable:** PAT_WORKFLOWS exposes no private repositories. "
                      "This is not evidence of zero private usage. Give the reporting token read access to private "

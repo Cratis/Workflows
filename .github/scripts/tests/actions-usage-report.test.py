@@ -287,7 +287,7 @@ class UsageReportTests(unittest.TestCase):
         self.assertGreater(peak, 1)
         self.assertLessEqual(peak, 8)
 
-    def test_dynamic_workflows_skip_tree_lookup_and_do_not_mark_coverage_incomplete(self):
+    def test_dynamic_workflows_are_included_in_public_run_level_totals(self):
         calls = []
         def get(endpoint):
             calls.append(endpoint)
@@ -305,7 +305,7 @@ class UsageReportTests(unittest.TestCase):
         data = report.collect(get, "Cratis", SINCE, UNTIL)
         output = report.render(*data, SINCE, UNTIL)
         self.assertFalse(data[4])
-        self.assertIn("GitHub-managed dynamic runs (not inspected): **2**", output)
+        self.assertIn("GitHub-managed dynamic runs (included in public run-level totals): **2**", output)
         self.assertNotIn("Incomplete API coverage", output)
 
     def test_over_cap_window_is_recursively_split_and_inclusive_boundaries_are_deduplicated(self):
@@ -368,9 +368,9 @@ class UsageReportTests(unittest.TestCase):
         repos = [PUBLIC] + [{"full_name": f"Cratis/{name}", "private": True} for name in volumes]
         lock = threading.Lock()
         calls = active = peak = 0
-        # Compress 0.8-second API latency and the 480-second deadline by 80x.
-        # Studio alone would take >14 seconds serially, beyond this 6-second budget.
-        latency, budget = .01, 6
+        # Compress API latency, with extra deadline margin for shared runners.
+        # Studio alone would take >14 seconds serially, beyond this 10-second budget.
+        latency, budget = .01, 10
         def get(endpoint):
             nonlocal calls, active, peak
             with lock:
@@ -430,7 +430,7 @@ class UsageReportTests(unittest.TestCase):
         self.assertEqual(len(data[3]), 1)
         self.assertFalse(data[4])
 
-    def test_budget_cut_keeps_newest_private_days_and_names_missing_older_runs(self):
+    def test_budget_cut_keeps_newest_private_days_and_names_incomplete_listed_runs(self):
         listing_days, job_days = [], []
         def get(endpoint):
             if endpoint == "rate_limit":
@@ -450,7 +450,48 @@ class UsageReportTests(unittest.TestCase):
         self.assertEqual(listing_days, list(range(30, 23, -1)))
         self.assertEqual(job_days, [30, 29])
         self.assertEqual([entry[3]["id"] for entry in data[3]], [30, 29])
-        self.assertTrue(any("older private runs may be missing" in error and "5 runs" in error for error in data[4]))
+        self.assertIn("Job inventory stopped before completing listed private runs for Cratis/Private: 5 runs.", data[4])
+        self.assertNotIn("older private runs may be missing", "\n".join(data[4]))
+
+    def test_multi_repository_budget_cut_drops_globally_oldest_listed_private_runs(self):
+        repos = [{"full_name": f"Cratis/P{i}", "private": True} for i in range(9)]
+        for workers in (1, 8):
+            with self.subTest(workers=workers):
+                first_inventory_finished = threading.Event()
+                finished_inventories, collected = set(), []
+                lock = threading.Lock()
+                def get(endpoint):
+                    if endpoint == "rate_limit":
+                        # Org metadata, nine weekly inventories, then eighteen jobs.
+                        return {"resources": {"core": {"remaining": 100 + 2 + 9 * 7 + 18}}}
+                    if endpoint.startswith("orgs/Cratis/repos?"):
+                        return repos
+                    if endpoint == "orgs/Cratis":
+                        return {"total_private_repos": 9}
+                    full = endpoint.split("repos/")[1].split("/actions/")[0]
+                    if "/jobs?" in endpoint:
+                        identity = int(endpoint.split("/runs/")[1].split("/")[0])
+                        with lock:
+                            self.assertEqual(finished_inventories, {repo["full_name"] for repo in repos})
+                            collected.append((full, identity % 100))
+                        return {"jobs": [job(identity)]}
+                    day = int(endpoint.split("created=2026-09-")[1][:2])
+                    if full == "Cratis/P8":
+                        self.assertTrue(first_inventory_finished.wait(1))
+                    if day == 24:
+                        with lock:
+                            finished_inventories.add(full)
+                        if full == "Cratis/P0":
+                            first_inventory_finished.set()
+                    identity = int(full.rsplit("P", 1)[1]) * 100 + day
+                    return {"workflow_runs": [{"id": identity, "created_at": f"2026-09-{day}T12:00:00Z"}]}
+                data = report.collect(get, "Cratis", SINCE, UNTIL, workers=workers)
+                self.assertEqual(set(collected), {(repo["full_name"], day) for repo in repos for day in (30, 29)})
+                self.assertEqual(len(data[3]), 18)
+                self.assertEqual(len(data[2]), 63)
+                for repo in repos:
+                    self.assertIn("Job inventory stopped before completing listed private runs "
+                                  f"for {repo['full_name']}: 5 runs.", data[4])
 
     def test_run_inventory_stop_is_not_misreported_as_one_missing_run(self):
         def get(endpoint):
