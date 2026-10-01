@@ -12,6 +12,12 @@ Mix dependencies in the **calling repository**. Existing callers retain their
 runner, token fallback, ecosystem commands, and legacy direct-push/rebase behavior.
 Nothing opts a repository into PRs or a release policy automatically.
 
+NPM updates production, development, peer and optional dependencies together so
+peer ranges track their pins; `packageManager` pins are not auto-updated. After
+installation, Yarn 3.1+ dedupes compatible transitive resolutions so a bumped
+direct range does not leave a second older instance. Yarn 1/2 skip dedupe;
+Yarn 3.0 fails visibly because it lacks the command.
+
 | Optional input | Default | Contract |
 |---|---|---|
 | `post-update-command` | Empty (skipped) | Trusted Bash command in the caller root, after **all** ecosystem updates and before **any** build. Runs with `-euo pipefail`; a nonzero exit blocks both publication modes. |

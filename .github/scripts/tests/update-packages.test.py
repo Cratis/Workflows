@@ -142,6 +142,9 @@ else:
     command = " ".join([name, *args])
     if command == os.environ.get("FAIL_NATIVE"):
         sys.exit(23)
+    if name == "yarn" and args == ["--version"]:
+        print(os.environ.get("YARN_VERSION", "4.18.1"))
+        sys.exit(0)
     if name == "dotnet" and args[:2] == ["package", "list"]:
         key = ("DOTNET_PRERELEASE" if "--include-prerelease" in args else
                "DOTNET_OUTDATED" if "--outdated" in args else "DOTNET_INVENTORY")
@@ -150,7 +153,7 @@ else:
     if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_EXIT"):
         print(os.environ.get("UPDATE_OUTPUT", ""))
         sys.exit(int(os.environ["UPDATE_EXIT"]))
-    update = (name == "dotnet" and args[:2] == ["package", "update"]) or command in ("npx npm-check-updates -u -w -x typescript",
+    update = (name == "dotnet" and args[:2] == ["package", "update"]) or command in ("npx npm-check-updates -u -w --dep prod,dev,peer,optional -x typescript",
                          "gradle useLatestVersions --no-daemon", "mix deps.update --all")
     if update and os.environ.get("NO_UPDATES") != "1":
         with open("dependencies.txt", "a") as dependencies:
@@ -663,8 +666,50 @@ class UpdatePackagesTests(unittest.TestCase):
         value = 'typescript,$(touch injected);"quoted"'
         self.env["NPM_PACKAGE_EXCLUSIONS"] = value
         self.assert_step_ok("Update NPM packages")
-        self.assertIn(["npx", "npm-check-updates", "-u", "-w", "-x", value], self.calls())
+        self.assertIn(["npx", "npm-check-updates", "-u", "-w", "--dep", "prod,dev,peer,optional", "-x", value],
+                      self.calls())
         self.assertFalse((self.repo / "injected").exists())
+
+    def test_npm_updates_peers_then_installs_and_dedupes_supported_yarn(self):
+        for version in ("3.1.0", "4.18.1"):
+            with self.subTest(version=version):
+                self.log.unlink(missing_ok=True)
+                self.env["YARN_VERSION"] = version
+                self.assert_step_ok("Update NPM packages")
+                calls = self.calls()
+                self.assertEqual(self.calls("npx"), [["npx", "npm-check-updates", "-u", "-w", "--dep",
+                                                    "prod,dev,peer,optional", "-x", "typescript"]])
+                self.assertLess(calls.index(self.calls("npx")[0]), calls.index(["yarn", "install"]))
+                self.assertLess(calls.index(["yarn", "install"]), calls.index(["yarn", "dedupe"]))
+                self.assertEqual(self.calls("yarn").count(["yarn", "dedupe"]), 1)
+
+    def test_npm_legacy_yarn_installs_without_dedupe(self):
+        for version in ("1.22.22", "2.4.3"):
+            with self.subTest(version=version):
+                self.log.unlink(missing_ok=True)
+                self.env.update(YARN_VERSION=version, FAIL_NATIVE="yarn dedupe")
+                self.assert_step_ok("Update NPM packages")
+                self.assertIn(["yarn", "install"], self.calls("yarn"))
+                self.assertNotIn(["yarn", "dedupe"], self.calls("yarn"))
+
+    def test_npm_update_install_and_version_failures_stop_the_step(self):
+        for command, forbidden in (
+                ("npx npm-check-updates -u -w --dep prod,dev,peer,optional -x typescript", ["yarn", "install"]),
+                ("yarn install", ["yarn", "dedupe"]),
+                ("yarn --version", ["yarn", "dedupe"])):
+            with self.subTest(command=command):
+                self.log.unlink(missing_ok=True)
+                self.env["FAIL_NATIVE"] = command
+                self.assertEqual(self.run_step("Update NPM packages"), 23)
+                self.assertNotIn(forbidden, self.calls())
+
+    def test_npm_dedupe_failure_blocks_builds_and_publication(self):
+        self.env["FAIL_NATIVE"] = "yarn dedupe"
+        self.assertFalse(self.pipeline())
+        self.assertEqual(self.last_result.returncode, 23)
+        self.assertFalse(any(call[:2] in (["dotnet", "build"], ["yarn", "ci"])
+                             for call in self.calls()))
+        self.assert_not_published()
 
     def test_direct_hook_failure_also_stops_before_builds(self):
         self.env.update(PUBLICATION_MODE="direct", POST_UPDATE_COMMAND="false; true")

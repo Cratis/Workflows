@@ -380,7 +380,9 @@ jobs:
 
       - name: Update NPM packages
         if: steps.detect.outputs.update_npm == 'true'
+        shell: bash
         run: |
+          set -euo pipefail
           # typescript is excluded by default: 7.x restructured the published package's internal
           # layout and Yarn Berry's builtin compat/typescript patch hasn't been updated for it yet,
           # so `yarn install` crashes applying the patch. Callers can add repository-specific
@@ -393,8 +395,19 @@ jobs:
             file_exclusions=$(paste -sd, "$exclusions_file")
             exclusions="${exclusions:+${exclusions},}${file_exclusions}"
           fi
-          npx npm-check-updates -u -w -x "$exclusions"
+          # Peer ranges must move with the pins they describe. Package-manager pins are
+          # deliberately excluded: changing the toolchain is a reviewed choice.
+          npx npm-check-updates -u -w --dep prod,dev,peer,optional -x "$exclusions"
           yarn install
+          # New direct descriptors can leave older, still-satisfying transitive resolutions
+          # behind, creating duplicate private-state classes and TS2322/TS2345 errors.
+          # Dedupe merges compatible descriptors and is a no-op when nothing needs merging.
+          # It shipped in Yarn 3.1; Yarn 1/2 retain plain-install behavior (1 rejects dedupe).
+          yarn_version=$(yarn --version)
+          case "${yarn_version%%.*}" in
+            1 | 2) echo "Yarn $yarn_version has no dedupe command; skipping the transitive merge." ;;
+            *) yarn dedupe ;;
+          esac
         env:
           # GitHub Actions sets CI=true, which makes Yarn Berry default to immutable installs and
           # refuse to write the lockfile changes this step exists to produce.
