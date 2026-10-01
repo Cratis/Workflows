@@ -855,7 +855,9 @@ test("stacking, retargeting, merge and deploy instructions and draft status are 
         "This PR should be deployed separately.", "This should be deployed separately from the kernel.", "This pull request is for review rather than merge.",
         "Draft: opened so the change is not lost.", "**Draft:** still needs a green build", "Reviewers: please look at the projections first.",
         "Do not merge until the kernel ships.", "DNM: waiting on Chronicle", "Merge after #12.", "Depends on Cratis/Chronicle#2880.",
-        "Once merging this, bump the kernel.", "This branch needs #12 first.", "Should merge promptly: this should be released first."]) {
+        "Once merging this PR, bump the kernel.", "This branch needs #12 first.", "Should merge promptly: this should be released first.",
+        "Do not merge.", "Please do not merge yet.", "Do not merge this before the kernel ships.", "Merged first, then it should be deployed before the clients.",
+        "Retarget this PR to main once #12 merges.", "After deploying this change, bump the kernel."]) {
         const result = fails(`## Added\n\n- A thing (#1)\n\n${line}\n`, ["Reviewer instruction"]);
         assert.match(result.errors[0].message, /Stacking, retargeting, merge or deploy order and draft status are for reviewers: move them to a pull request comment\. If consumers must upgrade in a set order, write that as an upgrade bullet, for example `Upgrade the Chronicle kernel to 19\.25 before this client`\./, line);
     }
@@ -904,6 +906,12 @@ test("product wording near the new notes still passes", () => {
         "Runs are now retried 3 of 5 times by default (#28)",
         "Reviewers can now be assigned from the dashboard (#29)",
         "Do not merge projections with conflicting keys anymore: they are now rejected (#30)",
+        "Arrays in read models do not merge; they are replaced as a whole (#31)",
+        "`cratis deploy` now asks for confirmation before deploying this environment to production (#32)",
+        "The Chronicle kernel should be deployed before the clients when upgrading to 20.0 (#33)",
+        "The database migration should be deployed before the new kernel (#34)",
+        "Event types should be released together with the kernel that understands them (#35)",
+        "The dashboard shows 3 of 3 runs completed for each observer (#36)",
     ];
     for (const bullet of bullets)
         assert.equal(run(`## Added\n\n- ${bullet}\n`).status, 0, bullet);

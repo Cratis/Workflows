@@ -7,6 +7,9 @@ name: Bootstrap Common Workflows
 #   • auto-approve-publish-deployments.yml — approves npm/nuget trusted publishing deployments
 #   • verify-no-work-records.yml           — fails PRs that track AI session work records
 #   • verify-release-notes.yml             — fails release-bound PRs whose description breaks the release-note contract
+#   • verify-semver-label.yml              — requires one release-intent label; installed only where a release-intent
+#                                            check already exists or the repo uses Cratis/release-action (Arc.Kotlin
+#                                            keeps its own pinned copy and is skipped)
 #   • .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Handles both initial bootstrap (new repos) and ongoing updates:

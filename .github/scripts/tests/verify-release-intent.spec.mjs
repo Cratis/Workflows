@@ -134,15 +134,34 @@ test("the normalizer swaps Dependabot's major, minor and patch for no-release an
         "api repos/Cratis/Example/pulls/7",
         "api -X DELETE repos/Cratis/Example/issues/7/labels/major",
         "api -X POST repos/Cratis/Example/issues/7/labels -f labels[]=no-release",
+        "api repos/Cratis/Example/pulls/7 --jq [.labels[].name] | join(\", \")",
     ]);
     const already = run(NORMALIZE, { live: pull(["no-release", "minor"], "dependabot[bot]") });
-    assert.deepEqual(already.calls.slice(1), ["api -X DELETE repos/Cratis/Example/issues/7/labels/minor"]);
+    assert.deepEqual(already.calls.slice(1, 2), ["api -X DELETE repos/Cratis/Example/issues/7/labels/minor"]);
     assert.deepEqual(run(NORMALIZE, { live: pull(["no-release"], "dependabot[bot]") }).calls.slice(1), []);
     const human = run(NORMALIZE, { live: pull(["major"], "someone") });
     assert.equal(human.status, 0);
     assert.deepEqual(human.calls, ["api repos/Cratis/Example/pulls/7"]);
     assert.match(human.out, /not Dependabot; its labels are left alone/);
     assert.equal(script(NORMALIZE).includes("${{"), false, "no expression is interpolated into the script");
+});
+
+test("the normalizer never turns a run red: a token that cannot write, a failed read or a failed label call ends in a notice", () => {
+    for (const labels of [["major"], ["major", "no-release"], ["patch", "no-release", "dependencies"], [], ["dependencies"]]) {
+        const result = run(NORMALIZE, { live: pull(labels, "dependabot[bot]"), readOnly: true });
+        assert.equal(result.status, 0, `${JSON.stringify(labels)}: ${result.out}`);
+        assert.match(result.out, /::notice title=Dependabot labels not normalized::Could not (?:remove|add)/);
+        assert.equal(result.out.includes("::error"), false);
+        // The labels are read again at the end, whatever the writes did.
+        assert.equal(result.calls.at(-1).startsWith("api repos/Cratis/Example/pulls/7 --jq"), true, JSON.stringify(result.calls));
+    }
+    // A pull request that cannot be read is left alone.
+    const unreadable = run(NORMALIZE, { eventAuthor: "dependabot[bot]" });
+    assert.equal(unreadable.status, 0, unreadable.out);
+    assert.match(unreadable.out, /::notice title=Dependabot labels not normalized::Could not read pull request #7/);
+    assert.deepEqual(unreadable.calls, ["api repos/Cratis/Example/pulls/7"]);
+    // Not a pull request event: nothing to normalize.
+    assert.equal(run(NORMALIZE, { number: "" }).status, 0);
 });
 
 // The bootstrap installs the release-intent caller only where a repository releases. Its decision function is run

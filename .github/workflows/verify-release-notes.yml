@@ -252,15 +252,23 @@ jobs:
               // Scope notes: "Storybook only;", "Docs-only.", "Tests only (#3)".
               { kind: "verification", pattern: new RegExp(CLAUSE + String.raw`(?:storybook|docs?|documentation|specs?|tests?|ci|tooling)[- ]only(?:\s+(?:change|changes|pr|pull request|update))?\s*(?:[;.,:)]|\(#|$)`, "i") },
               // Result counts: "specs 492/492", "Integration 110/110", "9 of 9 runs", "518 specs passed", "12 passed, 0 failed".
-              { kind: "verification", pattern: /\b(?:specs?|tests?|runs?|checks?|jobs?|integration|unit|e2e|scenarios?)\s+(\d[\d,]*)\s*\/\s*\1\b|\b(\d[\d,]*)\s*\/\s*\2\s+(?:specs?|tests?|runs?|checks?|passed|passing|green)\b|\b(\d+)\s+of\s+\3\s+(?:runs|specs|tests|checks|scenarios)\b|\b\d[\d,]*\s+(?:tests?|specs?|scenarios?)\s+(?:passed|passing|green|failed|failing)\b|\b\d+\s+passed,\s*\d+\s+(?:failed|skipped)\b/i },
+              { kind: "verification", pattern: /\b(?:specs?|tests?|runs?|checks?|jobs?|integration|unit|e2e|scenarios?)\s+(\d[\d,]*)\s*\/\s*\1\b|\b(\d[\d,]*)\s*\/\s*\2\s+(?:specs?|tests?|runs?|checks?|passed|passing|green)\b|\b\d[\d,]*\s+(?:tests?|specs?|scenarios?)\s+(?:passed|passing|green|failed|failing)\b|\b\d+\s+passed,\s*\d+\s+(?:failed|skipped)\b/i },
+              // "3 of 3 runs" is a count in prose ("The dashboard shows 3 of 3 runs completed for each observer"): a result
+              // only when it starts a clause or is followed by verification wording.
+              { kind: "verification", pattern: new RegExp(CLAUSE + String.raw`(\d+)\s+of\s+\1\s+(?:runs|specs|tests|checks|scenarios)\b`, "i") },
+              { kind: "verification", pattern: /\b(\d+)\s+of\s+\1\s+(?:runs|specs|tests|checks|scenarios)\s+(?:(?:all|have|had)\s+)?(?:passed|passing|green|succeeded|successful|failed|failing|ok)\b/i },
               // Gate results: "Tier 1 PASS", "0 warnings, 0 errors".
               { kind: "verification", pattern: /\btier[ -]?[123]\b[^.\n]{0,20}?\b(?:pass(?:ed|es)?|green|ok|clean)\b|\b\d+\s+warnings?,\s*\d+\s+errors?\b/i },
               // Reviewer instructions: stacking, retargeting, merge and deploy order, draft status.
-              { kind: "instruction", pattern: new RegExp(String.raw`\bstacked\s+(?:on|onto)\s+(?:top of\s+)?(?:${PULL_REQUEST_REF}|(?:the\s+(?:other\s+)?|another\s+|this\s+)?(?:pr|pull request|branch)\b)|\bretarget(?:ed|ing)?\s+(?:it\s+|this\s+(?:pr\s+|pull request\s+)?)?(?:to|onto)\s+(?:main|master|the default branch)\b|\b(?:depends on|blocked by|merge (?:it\s+|this\s+)?(?:after|before)|land (?:it\s+|this\s+)?(?:after|before))\s+${PULL_REQUEST_REF}`, "i") },
+              { kind: "instruction", pattern: new RegExp(String.raw`\bstacked\s+(?:on|onto)\s+(?:top of\s+)?(?:${PULL_REQUEST_REF}|(?:the\s+(?:other\s+)?|another\s+|this\s+)?(?:pr|pull request|branch)\b)|${CLAUSE}retarget(?:ed|ing)?\s+(?:it\s+|this\s+(?:pr\s+|pull request\s+)?)?(?:to|onto)\s+(?:main|master|the default branch)\b|\b(?:depends on|blocked by|merge (?:it\s+|this\s+)?(?:after|before)|land (?:it\s+|this\s+)?(?:after|before))\s+${PULL_REQUEST_REF}`, "i") },
               // "This PR is ..." always speaks to reviewers; "this branch" only when it says what the branch needs, so
               // "The CLI now warns when this branch is behind main" stays product wording.
-              { kind: "instruction", pattern: /\bthis\s+(?:pr|pull request)\s+(?:is|was|should|must|needs|depends|requires|has to|can only|will need|replaces|supersedes|builds on|targets)\b|\bthis\s+branch\s+(?:should|must|needs|depends|requires|has to|can only|will need|replaces|supersedes|builds on|targets|is (?:stacked|based|built|part))\b/i },
-              { kind: "instruction", pattern: /\b(?:before|after|once)\s+(?:merging|deploying|releasing)\s+this\b|\b(?:do not|don['\u2019]t)\s+merge(?=\s*(?:$|[.,;:!)]|\s+(?:this|it|yet|until|before|after)\b))|\bshould be (?:deployed|merged|released) (?:separately|together|first|after|before|alongside)\b/i },
+              { kind: "instruction", pattern: /\bthis\s+(?:pr|pull request)\s+(?:is|was|should|must|needs|depends|requires|has to|can only|will need|replaces|supersedes|builds on|targets)\b/i },
+              { kind: "instruction", pattern: new RegExp(CLAUSE + String.raw`this\s+branch\s+(?:should|must|needs|depends|requires|has to|can only|will need|replaces|supersedes|builds on|targets|is (?:stacked|based|built|part))\b`, "i") },
+              // "Do not merge" is an instruction when it opens a clause ("Do not merge until the kernel ships.") or says what not
+              // to merge yet; "Arrays in read models do not merge" and "should be deployed before" about other subjects are
+              // product wording.
+              { kind: "instruction", pattern: new RegExp(String.raw`\b(?:before|after|once)\s+(?:merging|deploying|releasing)\s+this\s+(?:pr|pull request|branch|change)\b|${CLAUSE}(?:do not|don['\u2019]t)\s+merge(?=\s*(?:$|[.,;:!)]))|\b(?:do not|don['\u2019]t)\s+merge\s+(?:this|it|yet|until|before|after)\b|\b(?:this|it)\s+(?:pr\s+|pull request\s+)?should be (?:deployed|merged|released) (?:separately|together|first|after|before|alongside)\b`, "i") },
               { kind: "instruction", pattern: /^\s*(?:\*\*|__)?(?:draft|wip|dnm|reviewers?|for reviewers|note to reviewers)(?:\*\*|__)?\s*:/i },
           ];
           const PROCESS_FIX = {
