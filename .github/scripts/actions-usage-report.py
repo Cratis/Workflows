@@ -2,22 +2,59 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 """Report job execution, estimated hosted billing, and scale-set queue pressure."""
+import base64
 import datetime as dt
 import json
 import math
 import os
 import subprocess
-from collections import defaultdict
+import threading
+import time
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 
 class APIError(Exception):
     pass
 
 
+class CollectionStopped(APIError):
+    pass
+
+
+class RequestBudget:
+    """Reserve each request (including pagination) atomically across workers."""
+    def __init__(self, get, remaining, max_seconds):
+        self.get = get
+        self.remaining = max(0, remaining - 100)  # Leave capacity to publish the issue.
+        self.deadline = time.monotonic() + max_seconds
+        self.lock = threading.Lock()
+        self.reason = None
+
+    def __call__(self, endpoint):
+        with self.lock:
+            if time.monotonic() >= self.deadline:
+                self.reason = "Collection time budget exhausted"
+            if self.remaining <= 0:
+                self.reason = "API request budget exhausted (100 requests reserved for publication)"
+            if self.reason:
+                raise CollectionStopped(self.reason)
+            self.remaining -= 1
+        try:
+            return self.get(endpoint)
+        except CollectionStopped as error:
+            with self.lock:
+                self.reason = str(error)
+            raise
+
+
 def api(endpoint):
     try:
         result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, timeout=60)
         if result.returncode:
+            if "rate limit" in result.stderr.lower():
+                raise CollectionStopped("GitHub API rate limit reached")
             raise APIError("GitHub API request failed")
         return json.loads(result.stdout)
     except (subprocess.TimeoutExpired, ValueError) as error:
@@ -48,46 +85,98 @@ def timestamp(value):
         return None
 
 
-def collect(get, owner, since, until):
-    repos = [repo for repo in pages(get, f"orgs/{owner}/repos") if not repo.get("archived")]
-    # A token-filtered repository list alone cannot prove complete private coverage.
-    private_total = None
-    errors = []
+def collect(get, owner, since, until, workers=8, max_seconds=480):
+    # Do not start a collection whose request budget cannot be established.
     try:
-        private_total = get(f"orgs/{owner}").get("total_private_repos")
+        remaining = get("rate_limit")["resources"]["core"]["remaining"]
+    except (APIError, KeyError, TypeError):
+        return [], None, [], [], ["API rate budget unavailable; collection not started."]
+    request = RequestBudget(get, remaining, max_seconds)
+    repos, private_total, errors = [], None, []
+    try:
+        # Retain archived metadata for the visibility check, but never collect its usage.
+        repos = list(pages(request, f"orgs/{owner}/repos"))
+        private_total = request(f"orgs/{owner}").get("total_private_repos")
+    except CollectionStopped as error:
+        return repos, private_total, [], [], [str(error)]
     except APIError:
-        errors.append("Organization private-repository count unavailable; private coverage cannot be confirmed.")
-    runs, jobs, seen, seen_runs = [], [], set(), set()
-    for repo in repos:
+        errors.append("Repository visibility or organization private-repository count unavailable; coverage cannot be confirmed.")
+
+    def inventory(repo):
         full = repo["full_name"]
         visibility = repo.get("visibility", "private" if repo.get("private") else "public")
-        # Filtered run searches have a 1000-result cap. Daily windows keep busy
-        # repositories below it; a window over the cap is explicitly incomplete.
+        runs, jobs, seen, seen_runs, failures = [], [], set(), set(), Counter()
+        definitions, trees = {}, {}
         cursor = since
-        while cursor < until:
-            window_end = min(cursor + dt.timedelta(days=1), until)
-            try:
-                start_query = cursor.strftime("%Y-%m-%dT%H:%M:%SZ")
-                end_query = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
-                endpoint = f"repos/{full}/actions/runs?created={start_query}..{end_query}"
-                for run in pages(get, endpoint, "workflow_runs"):
-                    run_identity = (full, run["id"])
-                    if run_identity in seen_runs:
-                        continue  # GitHub's range endpoints are inclusive.
-                    seen_runs.add(run_identity)
-                    runs.append((full, visibility, run))
-                    try:
-                        # Include rerun attempts rather than silently dropping earlier jobs.
-                        for job in pages(get, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
-                            identity = (full, job["id"])
-                            if identity not in seen:
-                                seen.add(identity)
-                                jobs.append((full, visibility, run.get("name") or "Unnamed workflow", job))
-                    except APIError:
-                        errors.append(f"Job inventory incomplete for {full}, run {run['id']}.")
-            except APIError:
-                errors.append(f"Run inventory incomplete for {full}, {cursor.date()} to {window_end.date()}.")
-            cursor = window_end
+        try:
+            while cursor < until:
+                window_end = min(cursor + dt.timedelta(days=1), until)
+                try:
+                    start_query = cursor.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    end_query = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    endpoint = f"repos/{full}/actions/runs?created={start_query}..{end_query}"
+                    for run in pages(request, endpoint, "workflow_runs"):
+                        if run["id"] in seen_runs:
+                            continue  # GitHub's range endpoints are inclusive.
+                        seen_runs.add(run["id"])
+                        runs.append((full, visibility, run))
+                        try:
+                            if visibility != "private":
+                                # Public ranking needs no jobs. Resolve the historical workflow
+                                # blob via one tree per commit, then cache by content SHA: most
+                                # commits do not change workflows, so no per-run contents call.
+                                path, sha = run.get("path", "").split("@")[0], run.get("head_sha")
+                                if sha not in trees:
+                                    trees[sha] = {}
+                                    if sha:
+                                        tree = request(f"repos/{full}/git/trees/{quote(sha)}?recursive=1")
+                                        if not tree.get("truncated"):
+                                            trees[sha] = {entry["path"]: entry["sha"] for entry in tree["tree"]
+                                                          if entry["type"] == "blob"}
+                                blob = trees[sha].get(path)
+                                if not blob:
+                                    failures["Public runner discovery incomplete"] += 1
+                                    continue
+                                if blob not in definitions:
+                                    definitions[blob] = None
+                                    content = request(f"repos/{full}/git/blobs/{quote(blob)}")
+                                    definitions[blob] = "cratis-arc" in base64.b64decode(content["content"]).decode()
+                                if definitions[blob] is None:
+                                    failures["Public runner discovery incomplete"] += 1
+                                    continue
+                                if not definitions[blob]:
+                                    continue
+                            # Include rerun attempts rather than silently dropping earlier jobs.
+                            for job in pages(request, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
+                                if visibility != "private" and "cratis-arc" not in (job.get("labels") or []):
+                                    continue
+                                if job["id"] not in seen:
+                                    seen.add(job["id"])
+                                    jobs.append((full, visibility, run.get("name") or "Unnamed workflow", job))
+                        except CollectionStopped:
+                            raise
+                        except (APIError, KeyError, ValueError, UnicodeError):
+                            failures["Job or runner inventory incomplete"] += 1
+                except CollectionStopped:
+                    raise
+                except APIError:
+                    failures["Run inventory incomplete"] += 1
+                cursor = window_end
+        except CollectionStopped:
+            failures["Collection stopped before completing repository"] += 1
+        return runs, jobs, [f"{kind} for {full}: {count} {'daily windows' if kind == 'Run inventory incomplete' else 'runs'}."
+                            for kind, count in failures.items()]
+
+    active = [repo for repo in repos if not repo.get("archived")]
+    active.sort(key=lambda repo: not (repo.get("private") or repo.get("visibility") == "private"))
+    runs, jobs = [], []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for repo_runs, repo_jobs, repo_errors in pool.map(inventory, active):
+            runs.extend(repo_runs)
+            jobs.extend(repo_jobs)
+            errors.extend(repo_errors)
+    if request.reason:
+        errors.append(request.reason + "; remaining repositories/runs were not collected. Missing usage is unknown.")
     return repos, private_total, runs, jobs, errors
 
 
@@ -108,12 +197,28 @@ def percentile95(values):
 
 def render(repos, private_total, runs, jobs, errors, since, until):
     private_visible = sum(repo.get("visibility") == "private" or repo.get("private", False) for repo in repos)
+    repos = [repo for repo in repos if not repo.get("archived")]
+    private_active = sum(repo.get("visibility") == "private" or repo.get("private", False) for repo in repos)
     private = defaultdict(lambda: [0, 0.0, 0.0, 0])
     workflows = defaultdict(lambda: [0, 0.0, 0])
+    public_workflows = defaultdict(lambda: [0, 0.0])
+    for full, visibility, run in runs:
+        if visibility != "public" or run.get("status") != "completed":
+            continue
+        start, end = timestamp(run.get("run_started_at")), timestamp(run.get("updated_at"))
+        if start is None or end is None or end < start or not since <= start < until:
+            continue
+        row = public_workflows[f"{full} / {run.get('name') or 'Unnamed workflow'}"]
+        row[0] += 1
+        row[1] += (end - start).total_seconds() / 60
     arc_queue, arc_jobs, arc_short, queue_unknown, duration_unknown = [], 0, 0, 0, 0
     unknown_runner = 0
     hosted_private = 0
+    excluded = 0
     for full, visibility, workflow, job in jobs:
+        if job.get("conclusion") == "skipped" or not job.get("runner_name") or not job.get("runner_id"):
+            excluded += 1
+            continue
         start, end = timestamp(job.get("started_at")), timestamp(job.get("completed_at"))
         if start is None or end is None or end < start:
             # In-progress/never-started jobs have no final execution or billing verdict.
@@ -123,10 +228,11 @@ def render(repos, private_total, runs, jobs, errors, since, until):
             continue
         seconds = (end - start).total_seconds()
         minutes = seconds / 60
-        row = workflows[f"{full} / {workflow}"]
-        row[0] += 1
-        row[1] += minutes
-        row[2] += seconds < 60
+        if visibility == "private":
+            row = workflows[f"{full} / {workflow}"]
+            row[0] += 1
+            row[1] += minutes
+            row[2] += seconds < 60
         hosted = job.get("runner_group_name") == "GitHub Actions"
         labels = job.get("labels") or []
         arc = not hosted and "cratis-arc" in labels
@@ -157,7 +263,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
              "then multiplied by Linux 1×, Windows 2× or macOS 10×. Public hosted jobs are free. "
              "Self-hosted execution is not billed by GitHub; this is not an invoice. "
              "The inventory covers runs created in the period and their completed jobs that started in the period.", "",
-             f"Visible non-archived repositories: **{len(repos)}**, private: **{private_visible}**. "
+             f"Visible non-archived repositories: **{len(repos)}**, private: **{private_active}**. "
              f"Inventoried runs: **{len(runs)}**, jobs (all attempts): **{len(jobs)}**.", ""]
     if private_visible == 0:
         lines.append("**Private repository coverage unavailable:** PAT_WORKFLOWS exposes no private repositories. "
@@ -168,7 +274,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
         lines.append("**Private coverage unconfirmed:** the token-filtered repository list may omit private "
                      "repositories. The organization private-repository count is unavailable.")
     elif private_visible < private_total:
-        lines.append(f"**Partial private coverage:** {private_visible} non-archived private repositories visible "
+        lines.append(f"**Partial private coverage:** {private_visible} private repositories visible (including archived) "
                      f"out of {private_total} organization private repositories (including archived repositories). "
                      "Check PAT_WORKFLOWS repository access; missing usage is not zero.")
     else:
@@ -180,7 +286,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
                        key=lambda name: -private[name][1]):
         n, billed, self_hosted, unknown = private[repo]
         lines.append(f"| {repo} | {n} | {billed:,.0f} | {self_hosted:,.1f} | {unknown} |")
-    if not private_visible:
+    if not private_active:
         lines.append("| Not observable with PAT_WORKFLOWS | — | unknown | unknown | — |")
     if hosted_private > 300:
         lines.extend(["", f"**Alert: observed private hosted usage is {hosted_private:,.0f} weighted minutes, "
@@ -191,12 +297,20 @@ def render(repos, private_total, runs, jobs, errors, since, until):
     lines.append(f"Job queue p95: **{p95:.1f} minutes** ({len(arc_queue)} samples)." if p95 is not None
                  else "Job queue p95: **unavailable** (no valid job creation/start timestamps).")
     lines.append(f"Missing queue timestamps: **{queue_unknown}**. Run creation is not substituted for job creation.")
-    lines.extend(["", "### Top 20 workflows by job execution minutes", "",
+    lines.extend(["", "### Top 20 private workflows by job execution minutes", "",
                   "| Workflow | completed jobs | execution minutes | jobs under 1 minute |",
                   "|---|---:|---:|---:|"])
     for name, (n, minutes, short) in sorted(workflows.items(), key=lambda item: -item[1][1])[:20]:
         lines.append(f"| {name.replace('|', '/')} | {n} | {minutes:,.1f} | {short} |")
-    lines.extend(["", f"Jobs with unavailable final duration: **{duration_unknown}**. "
+    lines.extend(["", "### Top 20 public workflows by run elapsed minutes", "",
+                  "Run-level elapsed time includes dependency waits and is not job execution or billing. "
+                  "Public job inventory is limited to workflows with literal cratis-arc labels in their historical definitions; "
+                  "indirect runner selection is not observable.", "",
+                  "| Workflow | completed runs | elapsed minutes |", "|---|---:|---:|"])
+    for name, (n, minutes) in sorted(public_workflows.items(), key=lambda item: -item[1][1])[:20]:
+        lines.append(f"| {name.replace('|', '/')} | {n} | {minutes:,.1f} |")
+    lines.extend(["", f"Skipped or never-assigned jobs excluded from execution and queue statistics: **{excluded}**.",
+                  f"Jobs with unavailable final duration: **{duration_unknown}**. "
                   f"Private jobs with unknown runner group or OS: **{unknown_runner}**; these are not counted as zero billing."])
     if errors:
         lines.extend(["", "### Incomplete API coverage", "", "Missing data must not be treated as zero usage.", ""])
