@@ -1,0 +1,5 @@
+{
+    "name": "workspace-peer-fixture",
+    "devDependencies": { "caret-tracking": "1.1.0" },
+    "peerDependencies": { "caret-tracking": "^1.0.0", "production-pin": "^1.2.3" }
+}

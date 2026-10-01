@@ -12,11 +12,13 @@ Mix dependencies in the **calling repository**. Existing callers retain their
 runner, token fallback, ecosystem commands, and legacy direct-push/rebase behavior.
 Nothing opts a repository into PRs or a release policy automatically.
 
-NPM updates production, development, peer and optional dependencies together so
-peer ranges track their pins; `packageManager` pins are not auto-updated. After
-installation, Yarn 3.1+ dedupes compatible transitive resolutions so a bumped
-direct range does not leave a second older instance. Yarn 1/2 skip dedupe;
-Yarn 3.0 fails visibly because it lacks the command.
+NPM retains ncu's production, development, optional and `packageManager` updates.
+Peer compatibility ranges are not passed to ncu: only an existing `^<pin>` or
+`~<pin>` that exactly matched a production/development pin in the same manifest
+before the update follows that pin to its new exact version. Unions, lower bounds,
+bounded ranges, wildcards and unmatched peers remain unchanged. After installation,
+Yarn 2.2+ dedupes compatible transitive resolutions so a bumped direct range does
+not leave a second older instance. Yarn 1 and Yarn 2.0/2.1 skip dedupe.
 
 | Optional input | Default | Contract |
 |---|---|---|
