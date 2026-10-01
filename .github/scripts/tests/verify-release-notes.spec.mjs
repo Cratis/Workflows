@@ -5,10 +5,10 @@
 // a separate node process fed only through the environment. Never contacts GitHub.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf8");
@@ -20,16 +20,27 @@ const BOOTSTRAP_WORKFLOW = readFileSync(".github/workflows/bootstrap-common-work
 const RELEASES = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/releases.json", "utf8"));
 const VERBATIM = "This pull request description is published verbatim as the release notes; editing the description re-runs this check.";
 
-const RUN_BLOCK = WORKFLOW.split("        run: |\n")[1];
-const PROGRAM = RUN_BLOCK.split("node - <<'JS'\n")[1].split("\n          JS\n")[0]
-    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+// Every inline program, by the `// cratis:program <name>` marker on its second line.
+const PROGRAMS = Object.fromEntries(WORKFLOW.split("node - <<'JS'\n").slice(1).map(block => {
+    const program = block.split("\n          JS\n")[0].split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+    return [/^\/\/ cratis:program ([\w-]+)$/m.exec(program)[1], program];
+}));
+const PROGRAM = PROGRAMS["release-notes"];
 const directory = mkdtempSync(join(tmpdir(), "verify-release-notes-"));
 const PROGRAM_FILE = join(directory, "program.cjs");
 writeFileSync(PROGRAM_FILE, PROGRAM);
+const DRIFT_FILE = join(directory, "drift.cjs");
+writeFileSync(DRIFT_FILE, PROGRAMS["release-notes-drift"]);
 
-function run(body, { labels = ["minor"], author = "someone", base = "main", defaultBranch = "main" } = {}) {
+function run(body, { labels = ["minor"], author = "someone", base = "main", defaultBranch = "main", live } = {}) {
     const summaryFile = join(directory, `summary-${Math.random().toString(16).slice(2)}.md`);
     writeFileSync(summaryFile, "");
+    // `live` is what the "Read the pull request as it is now" step wrote: a pull request object, or raw file text.
+    let liveFile;
+    if (live !== undefined) {
+        liveFile = join(directory, `pull-request-${Math.random().toString(16).slice(2)}.json`);
+        writeFileSync(liveFile, typeof live === "string" ? live : JSON.stringify(live));
+    }
     const result = spawnSync(process.execPath, [PROGRAM_FILE], {
         encoding: "utf8",
         env: {
@@ -41,6 +52,7 @@ function run(body, { labels = ["minor"], author = "someone", base = "main", defa
             DEFAULT_BRANCH: defaultBranch,
             GITHUB_REPOSITORY: "Cratis/Example",
             GITHUB_STEP_SUMMARY: summaryFile,
+            ...(liveFile ? { PR_JSON: liveFile } : {}),
         },
     });
     const lines = result.stdout.split("\n");
@@ -50,8 +62,12 @@ function run(body, { labels = ["minor"], author = "someone", base = "main", defa
         return { rule: decode(title).replace(/^Release notes: /, ""), message: decode(message) };
     });
     const notices = lines.filter(line => line.startsWith("::notice ")).map(decode);
+    const warnings = lines.filter(line => line.startsWith("::warning ")).map(line => {
+        const [, title, message] = /^::warning title=([^:]*)::(.*)$/.exec(line);
+        return { rule: decode(title).replace(/^Release notes: /, ""), message: decode(message) };
+    });
     return { status: result.status, stderr: result.stderr, errors, rules: errors.map(error => error.rule), notices,
-        summary: readFileSync(summaryFile, "utf8") };
+        warnings, warned: warnings.map(warning => warning.rule), summary: readFileSync(summaryFile, "utf8") };
 }
 
 const passes = (body, options) => {
@@ -68,18 +84,25 @@ const fails = (body, rules, options) => {
 
 const GOOD = "Theme across the bullets.\n\n## Added\n\n- A new thing (#12)\n\n## Fixed\n\n- A fixed thing (#13)\n";
 
-test("the program reaches the runner only through the environment", () => {
-    const run = WORKFLOW.split("        run: |\n")[1];
-    assert.equal(run.includes("${{"), false, "no expression may be interpolated into the program");
-    for (const variable of ["PR_BODY: ${{ github.event.pull_request.body }}",
+test("the programs reach the runner only through the environment", () => {
+    const runs = WORKFLOW.split(/\n {8}run: \|\n/).slice(1).map(block => block.split(/\n {6}- |\n {2}[\w-]+:\n/)[0]);
+    assert.equal(runs.length, 3, "the live read, the gate and the drift comparison");
+    for (const block of runs)
+        assert.equal(block.includes("${{"), false, "no expression may be interpolated into a program");
+    assert.deepEqual(Object.keys(PROGRAMS).sort(), ["read-pull-request", "release-notes", "release-notes-drift"]);
+    for (const variable of ["PR_JSON: ${{ runner.temp }}/pull-request.json",
+        "PR_BODY: ${{ github.event.pull_request.body }}",
         "PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}",
         "PR_AUTHOR: ${{ github.event.pull_request.user.login }}",
         "PR_BASE: ${{ github.event.pull_request.base.ref }}",
         "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+        "GH_TOKEN: ${{ github.token }}",
+        "NUMBER: ${{ github.event.pull_request.number }}",
         "workflow_call:",
-        "runs-on: ${{ inputs.runs-on }}",
-        "contents: read"])
+        "runs-on: ${{ inputs.runs-on }}"])
         assert(WORKFLOW.includes(variable), variable);
+    // A called workflow can only narrow its caller's grant: a cap here would take away pull-requests: read.
+    assert.equal(/^\s*permissions:/m.test(WORKFLOW), false, "the reusable workflow sets no permissions of its own");
 });
 
 test("node is set up with the pinned setup-node before the program runs", () => {
@@ -385,27 +408,74 @@ test("Windows line endings are read like Unix ones", () => {
     fails("## Fixed\r\n\r\n- A fix\r\n\r\nRefs #9\r\n", ["Closing or linking keyword"]);
 });
 
-test("only a release-bound pull request is checked; every other is skipped with a notice", () => {
+test("Dependabot pull requests and pull requests into another base are skipped with a notice", () => {
     const bad = "## Overview\n\nRefs #1\n";
     for (const [options, reason] of [
-        [{ labels: [] }, /carries none of major, minor or patch/],
-        [{ labels: ["bug", "documentation"] }, /carries none of major, minor or patch/],
-        [{ labels: ["no-release"] }, /labelled no-release/],
-        [{ labels: ["major", "minor"] }, /carries major, minor; release intent must be exactly one/],
         [{ author: "dependabot[bot]" }, /Dependabot/],
         [{ base: "feature/x", defaultBranch: "main" }, /targets feature\/x, not the default branch main/],
         [{ base: "" }, /not triggered by a pull request/],
     ]) {
         const result = run(bad, options);
         assert.equal(result.status, 0, JSON.stringify(options));
-        assert.equal(result.errors.length, 0);
+        assert.equal(result.errors.length + result.warnings.length, 0);
         assert.match(result.notices.join("\n"), reason);
-        assert.match(result.notices.join("\n"), /the check re-runs when a release label is added/);
+        assert.match(result.notices.join("\n"), /the check re-runs when the description or a label changes/);
         assert.match(result.summary, /Not checked/);
     }
     for (const label of ["major", "minor", "patch"])
         fails(bad, ["Heading not allowed", "Closing or linking keyword", "No release notes"], { labels: [label] });
     fails(bad, ["Heading not allowed", "Closing or linking keyword", "No release notes"], { labels: ["bug", "minor"], base: "develop", defaultBranch: "develop" });
+});
+
+test("a no-release or unlabelled pull request is checked too, with warnings that never fail it", () => {
+    const bad = "## Overview\n\nRefs #1\n\nStacked on #207.\n";
+    for (const [labels, said] of [[[], /Not labelled yet/], [["bug", "documentation"], /Not labelled yet/], [["no-release"], /Labelled no-release/]]) {
+        const result = run(bad, { labels });
+        assert.equal(result.status, 0, JSON.stringify(labels));
+        assert.equal(result.errors.length, 0);
+        assert.deepEqual([...new Set(result.warned)].sort(), labels.includes("no-release")
+            ? ["Closing or linking keyword", "Heading not allowed", "Reviewer instruction"]
+            : ["Closing or linking keyword", "Heading not allowed", "No release notes", "Reviewer instruction"]);
+        for (const warning of result.warnings) {
+            assert.match(warning.message, said);
+            assert.match(warning.message, /it fails once the pull request is labelled major, minor or patch/);
+        }
+        assert.match(result.summary, /warning\(s\)/);
+    }
+    // A no-release pull request may describe itself without a change list; a clean description reports no warning.
+    const plain = run("Moves the CI cache to a shared volume.\n", { labels: ["no-release"] });
+    assert.equal(plain.status, 0);
+    assert.equal(plain.warnings.length, 0);
+    const clean = run(GOOD, { labels: [] });
+    assert.equal(clean.warnings.length + clean.errors.length, 0);
+    assert.match(clean.summary, /none of major, minor or patch yet/);
+});
+
+test("more than one intent label is checked as release-bound whenever major, minor or patch is among them", () => {
+    const bad = "## Overview\n\nRefs #1\n";
+    for (const labels of [["major", "minor"], ["minor", "no-release"], ["patch", "no-release", "major"]])
+        fails(bad, ["Heading not allowed", "Closing or linking keyword", "No release notes"], { labels });
+    passes(GOOD, { labels: ["minor", "no-release"] });
+});
+
+test("labels, description, author and base come from the pull request as it is now, falling back to the event", () => {
+    const pull = (overrides = {}) => ({ number: 7, body: GOOD, labels: [{ name: "patch" }], user: { login: "someone" }, base: { ref: "main" }, ...overrides });
+    // The event said no-release with a bad body; the pull request now says patch with a good one.
+    passes("## Overview\n", { labels: ["no-release"], live: pull() });
+    // The event said patch with a good body; the label was since swapped for minor and the body broken.
+    fails(GOOD, ["Closing or linking keyword"], { labels: ["patch"], live: pull({ body: `${GOOD}\nRefs #9\n`, labels: [{ name: "minor" }] }) });
+    // Labels removed since the event: warnings only.
+    const unlabelled = run(GOOD, { labels: ["patch"], live: pull({ body: "## Overview\n", labels: [] }) });
+    assert.equal(unlabelled.status, 0);
+    assert(unlabelled.warned.includes("Heading not allowed"));
+    // Author and base are read live too.
+    assert.match(run("## Overview\n", { live: pull({ body: "## Overview\n", user: { login: "dependabot[bot]" } }) }).notices.join(), /Dependabot/);
+    assert.match(run("## Overview\n", { live: pull({ body: "## Overview\n", base: { ref: "release/1" } }) }).notices.join(), /targets release\/1/);
+    // A null body is an empty description.
+    fails(GOOD, ["No release notes"], { live: pull({ body: null }) });
+    // A failed read (`{}`), an unreadable file or an API error object falls back to the event payload.
+    for (const live of ["{}", "not json", JSON.stringify({ message: "Resource not accessible by integration" })])
+        fails("## Overview\n", ["Heading not allowed", "No release notes"], { labels: ["minor"], live });
 });
 
 test("a (#n) inside an HTML comment still closes the issue, so it fails; comments stay ignored for everything else", () => {
@@ -712,6 +782,7 @@ test("the bootstrap installs the canonical thin caller", () => {
         "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
         "types: [opened, edited, reopened, synchronize, labeled, unlabeled, ready_for_review]",
         "permissions:\n  contents: read",
+        "permissions:\n  contents: read\n  pull-requests: read\n",
         "jobs:\n  release-notes:\n    uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main",
         // RUNNER_GATE is an outage escape hatch, normally unset: the default stays the hosted runner of a public repository.
         "    with:\n      runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}\n",
@@ -747,4 +818,263 @@ test("the bootstrap leaves private and deliberately customized repositories to t
     assert.equal(ignored.includes("Workflows"), true);
     // The ignore list is what keeps the overwrite semantics untouched: no repository-visibility branch is added.
     assert.equal(/visibility|isPrivate/i.test(BOOTSTRAP_SCRIPT), false);
+});
+
+test("how, where and whether a change was checked is a note, wherever it stands", () => {
+    for (const line of ["Verified by building the sample against the local packages.", "Storybook only; verified in Storybook.",
+        "Tested locally with `yarn test`.", "Verified locally: route specs pass", "not yet verified", "**Not verified against a real kernel**",
+        "Not tested on Windows.", "Docs-only change.", "The rest was verified against a real running sandbox.",
+        "Reproduced end-to-end with the Kotlin client.", "Checked locally:", "Checked locally: `./gradlew build` passes.",
+        "Local: route specs 492/492", "Tier 1 PASS", "Local: Tier 1 PASS, Integration 110/110", "Testing.Specs 518/518",
+        "9 of 9 runs green", "`dotnet build` - 0 warnings, 0 errors", "`dotnet test`: 1526/1526 passing", "12 passed, 0 failed",
+        "`Cli.Specs`: 1,111 tests passing.", "CI: all green", "Checks: 4 of 4", "Gates: green", "Note for reviewers: 356 of 408 specs fail on macOS"]) {
+        const result = fails(`## Added\n\n- A thing (#1)\n\n${line}\n`, ["Review, verification or provenance note"]);
+        assert.match(result.errors[0].message, /pull request comment/, line);
+    }
+    // The same inside a product bullet, a `## Summary` and the lead paragraph.
+    for (const body of ["## Fixed\n\n- A fix (#1)\n- Verified locally with the sample app.\n",
+        "## Fixed\n\n- Registration no longer drops entries. Reproduced end-to-end with the Kotlin client (#1)\n",
+        "## Summary\n\nFaster appends; specs 518/518.\n\n## Fixed\n\n- A fix (#1)\n",
+        "Faster appends, not yet verified against a real kernel.\n\n## Fixed\n\n- A fix (#1)\n".replace(", not", ". Not")])
+        fails(body, ["Review, verification or provenance note"]);
+    const verification = fails("## Added\n\n- A thing (#1)\n\nTested locally.\n", ["Review, verification or provenance note"]);
+    assert.match(verification.errors[0].message, /How or where the change was checked, what was not checked, and test or CI results are for reviewers: move them to a pull request comment\./);
+});
+
+test("provenance of a check is a note that asks for compatibility as a fact", () => {
+    for (const line of ["Verified against Arc.TypeScript main (v0.34.0).", "Tested against the default branch.", "Tested against a real kernel.",
+        "- Verified with Chronicle main.", "Verified end to end against a live server.", "Checked on main."]) {
+        const result = fails(`## Added\n\n- A thing (#1)\n\n${line}\n`, ["Review, verification or provenance note"]);
+        assert.match(result.errors[0].message, /checked against is for reviewers: move it to a pull request comment\. If compatibility matters to the reader, state it as a fact, for example `Requires @cratis\/arc 0\.34 or later`\./, line);
+    }
+});
+
+test("stacking, retargeting, merge and deploy instructions and draft status are reviewer instructions", () => {
+    for (const line of ["Stacked on #207.", "Stacked on Cratis/Arc#12; retarget to main once it merges.", "Retarget to main once #207 merges.",
+        "Part of the consolidation. Stacked on #330.", "> Stacked on #46 \u2014 that PR carries the discovery", "Stacked on top of the other pull request.",
+        "This PR should be deployed separately.", "This should be deployed separately from the kernel.", "This pull request is for review rather than merge.",
+        "Draft: opened so the change is not lost.", "**Draft:** still needs a green build", "Reviewers: please look at the projections first.",
+        "Do not merge until the kernel ships.", "DNM: waiting on Chronicle", "Merge after #12.", "Depends on Cratis/Chronicle#2880.",
+        "Once merging this, bump the kernel.", "This branch needs #12 first.", "Should merge promptly: this should be released first."]) {
+        const result = fails(`## Added\n\n- A thing (#1)\n\n${line}\n`, ["Reviewer instruction"]);
+        assert.match(result.errors[0].message, /Stacking, retargeting, merge or deploy order and draft status are for reviewers: move them to a pull request comment\. If consumers must upgrade in a set order, write that as an upgrade bullet, for example `Upgrade the Chronicle kernel to 19\.25 before this client`\./, line);
+    }
+});
+
+test("headings and labels that report local checks or results fail; a bare CI sub-heading groups bullets", () => {
+    for (const heading of ["Checks (local)", "Checks (local, mirroring dotnet-build.yml)", "Local checks", "CI results", "Checked locally",
+        "Out of scope", "Not verified", "Not tested", "Draft"]) {
+        const result = fails(`## Added\n\n- A thing (#1)\n\n### ${heading}\n\n- More\n`, ["Heading not allowed"]);
+        assert.match(result.errors[0].message, /pull request comment/, heading);
+        fails(`## Added\n\n- A thing (#1)\n\n**${heading}**\n\n- More\n`, ["Heading not allowed"]);
+    }
+    passes("## Changed\n\n### CI\n\n- Publishing now uses Node 24 (#1)\n");
+    passes("## Changed\n\n- CI: builds now cache packages (#3)\n- Checks: a new command lists failing projections (#4)\n- Local: a new flag runs the kernel in-process (#5)\n- Gates: release gates now run in parallel (#6)\n");
+});
+
+test("product wording near the new notes still passes", () => {
+    const bullets = [
+        "Tokens are signed, verified against the issuer JWKS (#1)",
+        "Toasts are stacked on top of each other (#2)",
+        "Accounts that are not yet verified receive a reminder (#3)",
+        "Not verified events are rejected (#4)",
+        "Docs-only builds no longer publish packages (#5)",
+        "Commands are validated on the server before they are handled (#6)",
+        "Events are now verified against their schema before append (#7)",
+        "Release notes are now checked on main as well (#8)",
+        "Forms are submitted, validated in the browser and then saved (#9)",
+        "Validated locally stored tokens before use (#10)",
+        "Tested components now render in Storybook (#11)",
+        "Retargets projections to the new event store (#12)",
+        "Pull requests stacked on top of each other are now merged in order (#13)",
+        "Draft releases are no longer published (#14)",
+        "Draft: events can now be saved as drafts (#15)",
+        "The CLI now warns when this branch is behind main (#16)",
+        "Shows 3/3 steps completed in the wizard (#17)",
+        "Builds tested against .NET 10 now run in CI (#18)",
+        "Verified publishers are now shown with a badge (#19)",
+        "Checked exceptions are now reported by the analyzer (#20)",
+        "Commits checked against main are now labelled (#21)",
+        "Supports `main` as the default branch (#22)",
+        "Bare names select values, checked against what the event declares (#23)",
+        "Merge conflicts are now reported before deploying (#24)",
+        "Deployments that depend on another service now wait for it (#25)",
+        "The kernel now verifies locally signed tokens (#26)",
+        "Tier 1 storage now supports compaction (#27)",
+        "Runs are now retried 3 of 5 times by default (#28)",
+        "Reviewers can now be assigned from the dashboard (#29)",
+        "Do not merge projections with conflicting keys anymore: they are now rejected (#30)",
+    ];
+    for (const bullet of bullets)
+        assert.equal(run(`## Added\n\n- ${bullet}\n`).status, 0, bullet);
+    passes("## Summary\n\nTokens are verified against the issuer and toasts are stacked on top of each other.\n\n## Added\n\n- A thing (#1)\n");
+});
+
+// The regression corpus: published Cratis release bodies (fixtures/release-notes/corpus.json), each with the rules the
+// program reports for it as release-bound. A rule change that alters any of them shows up here, and the new rules'
+// false positives were measured against it.
+const CORPUS = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/corpus.json", "utf8"));
+
+function runAsync(body) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [PROGRAM_FILE], {
+            env: { PATH: process.env.PATH, PR_BODY: body, PR_LABELS: "[\"minor\"]", PR_AUTHOR: "someone", PR_BASE: "main",
+                DEFAULT_BRANCH: "main", GITHUB_REPOSITORY: "Cratis/Example" },
+        });
+        let stdout = "";
+        child.stdout.on("data", chunk => stdout += chunk);
+        child.on("error", reject);
+        child.on("close", status => resolve({ status, rules: [...new Set(stdout.split("\n")
+            .filter(line => line.startsWith("::error "))
+            .map(line => decodeURIComponent(/^::error title=([^:]*)::/.exec(line)[1]).replace(/^Release notes: /, "")))].sort() }));
+    });
+}
+
+test("published release bodies keep exactly the rules recorded for them", { timeout: 240_000 }, async () => {
+    assert(CORPUS.releases.length >= 500, "a corpus of several hundred real bodies");
+    const results = new Array(CORPUS.releases.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.max(2, availableParallelism()) }, async () => {
+        while (next < CORPUS.releases.length) {
+            const index = next++;
+            results[index] = await runAsync(CORPUS.releases[index].body);
+        }
+    }));
+    const changed = CORPUS.releases.map((release, index) => ({ release, result: results[index] }))
+        .filter(({ release, result }) => JSON.stringify(result.rules) !== JSON.stringify(release.rules) || (result.status === 0) !== (release.rules.length === 0))
+        .map(({ release, result }) => `${release.repo} ${release.tag}: recorded ${JSON.stringify(release.rules)}, now ${JSON.stringify(result.rules)}`);
+    assert.deepEqual(changed, []);
+});
+
+// A throwaway repository with a `main` and a pull request branch, `origin/main` standing in for the fetched base.
+function repository() {
+    const root = mkdtempSync(join(tmpdir(), "drift-"));
+    const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", env: { ...process.env,
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).stdout.trim();
+    const write = (file, text) => {
+        mkdirSync(dirname(join(root, file)), { recursive: true });
+        writeFileSync(join(root, file), text);
+    };
+    const commit = (message, files) => {
+        for (const [file, text] of Object.entries(files))
+            write(file, text);
+        git("add", "-A");
+        git("commit", "-q", "-m", message);
+        return git("rev-parse", "HEAD");
+    };
+    git("init", "-q", "-b", "main");
+    git("config", "commit.gpgsign", "false");
+    commit("base", { "Source/Store.cs": "class Store {}\n", "Directory.Build.props": "<Version>1.2.3</Version>\n",
+        ".github/workflows/publish.yml": "steps:\n  - run: dotnet nuget push\n" });
+    git("checkout", "-q", "-b", "feature");
+    return { root, git, commit, publish: () => git("update-ref", "refs/remotes/origin/main", "main") };
+}
+
+function drift(root, body, { action = "synchronize", before = "" } = {}) {
+    const result = spawnSync(process.execPath, [DRIFT_FILE], { cwd: root, encoding: "utf8",
+        env: { PATH: process.env.PATH, PR_BODY: body, BASE: "main", BEFORE: before, ACTION: action } });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.split("\n").filter(line => line.startsWith("::warning ")).map(line => decodeURIComponent(line.split("::")[2]));
+}
+
+test("the drift comparison warns about bullets, versions and registries the diff does not back, and never fails", () => {
+    const repo = repository();
+    repo.commit("feature", { "Source/Projections.cs": "class ProjectionReplayer {}\n", "Directory.Build.props": "<Version>1.3.0</Version>\n" });
+    repo.publish();
+    const warnings = drift(repo.root, [
+        "## Added",
+        "",
+        "- Adds `ProjectionReplayer` (#1)",
+        "- Adds `ObserverSnapshots` to `Source/Observers.cs` (#2)",
+        "- Mentions `v2.0.0` and `12` only (#3)",
+        "",
+        "## Changed",
+        "",
+        "- Upgrades from 1.2.3 to 1.3.0 (#4)",
+        "- Requires Chronicle 1.2.3 (#5)",
+        "- Packages are now published to NuGet and PyPI (#6)",
+        "",
+    ].join("\n"));
+    assert.equal(warnings.length, 3, warnings.join("\n"));
+    assert.match(warnings[0], /The bullet `Adds 'ObserverSnapshots' to 'Source\/Observers\.cs' \(#2\)` names `ObserverSnapshots`, `Source\/Observers\.cs`, which this pull request's diff no longer touches; the change may already be on main or was dropped in conflict resolution/);
+    assert.match(warnings[1], /names 1\.2\.3, which the diff only removes: it is the version this pull request replaces/);
+    assert.match(warnings[2], /names PyPI, but no workflow in \.github\/workflows publishes there/);
+    // A description that matches the diff, or a run that cannot compare, warns about nothing and still exits 0.
+    assert.deepEqual(drift(repo.root, "## Added\n\n- Adds `ProjectionReplayer` (#1)\n- Version 1.3.0 is published to NuGet (#2)\n"), []);
+    const elsewhere = mkdtempSync(join(tmpdir(), "drift-empty-"));
+    const result = spawnSync(process.execPath, [DRIFT_FILE], { cwd: elsewhere, encoding: "utf8", env: { PATH: process.env.PATH, PR_BODY: "## Added\n\n- `X` (#1)\n", BASE: "main" } });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /::notice title=Release notes drift not checked::/);
+});
+
+test("the drift comparison warns when a merge from the base branch changed what the pull request contains", () => {
+    const repo = repository();
+    const before = repo.commit("feature", { "Source/Store.cs": "class Store { int Count; }\n", "Source/Reader.cs": "class Reader {}\n" });
+    repo.git("checkout", "-q", "main");
+    // The same change lands on main through another pull request.
+    repo.commit("other pull request", { "Source/Store.cs": "class Store { int Count; }\n" });
+    repo.git("checkout", "-q", "feature");
+    repo.git("merge", "-q", "--no-edit", "main");
+    repo.publish();
+    const body = "## Added\n\n- Adds `Reader` (#1)\n";
+    const warnings = drift(repo.root, body, { before });
+    assert.equal(warnings.length, 1, warnings.join("\n"));
+    assert.match(warnings[0], /The merge from main changed what this pull request contains: it no longer changes `Source\/Store\.cs`\. Re-read the notes against `git diff origin\/main\.\.\.HEAD`\./);
+    // Only a synchronize that brought in the base branch is compared.
+    assert.deepEqual(drift(repo.root, body, { before, action: "edited" }), []);
+    assert.deepEqual(drift(repo.root, body, { before: "" }), []);
+});
+
+test("the drift job only warns, reads the pull request head with history, and skips label changes and Dependabot", () => {
+    const job = WORKFLOW.split("\n  drift:\n")[1];
+    assert(job, "a drift job");
+    for (const required of ["github.event.pull_request.user.login != 'dependabot[bot]'", "github.event.action != 'labeled'",
+        "github.event.action != 'unlabeled'", "runs-on: ${{ inputs.runs-on }}", "ref: ${{ github.event.pull_request.head.sha }}",
+        "fetch-depth: 0", "filter: blob:none", "continue-on-error: true", "BEFORE: ${{ github.event.before }}", "ACTION: ${{ github.event.action }}"])
+        assert(job.includes(required), required);
+    assert(/actions\/checkout@[0-9a-f]{40} # v7\.0\.1/.test(job), "checkout is pinned to a SHA");
+    assert(PROGRAMS["release-notes-drift"].includes("process.exit(0);"));
+    assert.equal(/process\.exit\([^0]/.test(PROGRAMS["release-notes-drift"]), false, "the drift program never exits non-zero");
+});
+
+test("the bootstrap installs the release-intent caller, which corrects Dependabot's labels before the gate", () => {
+    const encoded = /BOOTSTRAPPED_FILES\["\.github\/workflows\/verify-semver-label\.yml"\]="([^"]+)"/.exec(BOOTSTRAP_SCRIPT);
+    assert(encoded, "caller registered in bootstrap-common-workflows.sh");
+    const caller = Buffer.from(encoded[1], "base64").toString("utf8");
+    for (const required of [
+        "name: Verify Semver Label",
+        "types: [opened, reopened, synchronize, labeled, unlabeled]",
+        "    branches:\n      - main\n",
+        "permissions:\n  contents: read\n\njobs:",
+        "  dependabot-labels:\n    if: github.event.pull_request.user.login == 'dependabot[bot]'\n    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main\n    permissions:\n      pull-requests: write\n",
+        // Named release-intent, so the check reads `release-intent / verify`, not `verify / verify` like verify-no-work-records.
+        "  release-intent:\n    needs: dependabot-labels\n    # Also after a failed or skipped correction: the gate then reports the labels as they are.\n    if: ${{ !cancelled() }}\n    uses: Cratis/Workflows/.github/workflows/verify-release-intent.yml@main\n    permissions:\n      contents: read\n      pull-requests: read\n",
+    ])
+        assert(caller.includes(required), required);
+    assert.equal(/^\s*(?:run|steps):/m.test(caller), false, "the caller carries no logic");
+    assert.equal(/^  verify:/m.test(caller), false, "no job named verify");
+    const documented = caller.trimEnd().split("\n").map(line => `#   ${line}`.trimEnd()).join("\n");
+    assert(BOOTSTRAP_SCRIPT.includes(documented), "the decoded comment matches the encoded caller");
+    assert(readFileSync(".github/workflows/normalize-dependabot-labels.yml", "utf8").includes("workflow_call:"));
+});
+
+test("the bootstrap skips a file only for the repositories that keep their own copy of it", () => {
+    assert(/^SKIP_FILE_REPOS\["\.github\/workflows\/verify-semver-label\.yml"\]="Arc\.Kotlin"$/m.test(BOOTSTRAP_SCRIPT));
+    assert(/^#\s+Arc\.Kotlin - /m.test(BOOTSTRAP_SCRIPT), "the reason is documented");
+    // The loop consults the skip list before it creates a blob for the file.
+    assert(/for file_path in "\$\{!BOOTSTRAPPED_FILES\[@\]\}"; do\n    if skips_file "\$file_path" "\$repo"; then\n[^\n]*\n      continue\n    fi\n/.test(BOOTSTRAP_SCRIPT));
+    const definitions = BOOTSTRAP_SCRIPT.split("declare -A SKIP_FILE_REPOS\n")[1].split("\n# ====")[0];
+    const probe = `set -euo pipefail\ndeclare -A SKIP_FILE_REPOS\n${definitions}
+for pair in ".github/workflows/verify-semver-label.yml Arc.Kotlin" ".github/workflows/verify-semver-label.yml Arc" ".github/workflows/verify-release-notes.yml Arc.Kotlin" ".github/workflows/verify-semver-label.yml Arc.Kotlin.Extra"; do
+  set -- $pair
+  if skips_file "$1" "$2"; then echo "skip $1 $2"; else echo "install $1 $2"; fi
+done`;
+    const result = spawnSync("bash", ["-c", probe], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split("\n"), [
+        "skip .github/workflows/verify-semver-label.yml Arc.Kotlin",
+        "install .github/workflows/verify-semver-label.yml Arc",
+        "install .github/workflows/verify-release-notes.yml Arc.Kotlin",
+        "install .github/workflows/verify-semver-label.yml Arc.Kotlin.Extra",
+    ]);
 });

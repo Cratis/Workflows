@@ -1,0 +1,54 @@
+name: Normalize Dependabot Labels
+
+# Gives a Dependabot pull request the one release intent it can have: `no-release`.
+#
+# Dependabot adds `major`, `minor` or `patch` on its own whenever a repository has
+# labels with those names, matching the dependency's version bump, and
+# dependabot.yml cannot turn that off: `labels: [dependencies, no-release]` only
+# adds to it. Those labels describe the dependency, not this product, and
+# release-action never releases a Dependabot pull request, so they are always
+# wrong. This job removes them and adds `no-release`.
+#
+# Called from the release-intent caller (verify-semver-label.yml) ahead of
+# verify-release-intent.yml in the same workflow run. Label changes made with
+# GITHUB_TOKEN start no new workflow runs, so the gate has to run after this job
+# rather than on the `labeled` event; it reads the labels as they are now.
+#
+# The caller grants `pull-requests: write` to this job only. It acts only on a pull
+# request whose author is dependabot[bot], read from the pull request itself, so a
+# caller that runs it for every pull request changes nothing else.
+
+on:
+  workflow_call: {}
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Replace major, minor and patch with no-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NUMBER" ]; then
+            echo "Not a pull request event; nothing to normalize."
+            exit 0
+          fi
+          pull=$(gh api "repos/$REPOSITORY/pulls/$NUMBER")
+          author=$(printf '%s' "$pull" | jq -r '.user.login')
+          if [ "$author" != "dependabot[bot]" ]; then
+            echo "Pull request #$NUMBER is by $author, not Dependabot; its labels are left alone."
+            exit 0
+          fi
+          for label in $(printf '%s' "$pull" | jq -r '.labels[].name | select(. == "major" or . == "minor" or . == "patch")'); do
+            gh api -X DELETE "repos/$REPOSITORY/issues/$NUMBER/labels/$label" > /dev/null
+            echo "Removed $label: it describes the dependency's version bump, not a release of this repository."
+          done
+          if ! printf '%s' "$pull" | jq -e '.labels | any(.name == "no-release")' > /dev/null; then
+            gh api -X POST "repos/$REPOSITORY/issues/$NUMBER/labels" -f "labels[]=no-release" > /dev/null
+            echo "Added no-release: release-action never releases a Dependabot pull request."
+          fi

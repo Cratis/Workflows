@@ -15,11 +15,23 @@ name: Verify Release Intent
 # configuration-only pull requests to carry `patch` - cutting four unintended
 # releases. Policy changes to the gate are now one pull request, here.
 
+#
+# Dependabot pull requests carry only `no-release`: release-action never releases
+# them, and the major/minor/patch label Dependabot adds on its own describes the
+# dependency's version bump, not this product's. normalize-dependabot-labels.yml
+# corrects the labels before this gate runs in the same caller.
+#
+# The labels are read from the pull request as it is now, not from the event
+# payload: "Re-run" replays the event that started the run, so a payload read
+# keeps failing on the labels of that moment. If the read fails (a caller that does
+# not grant `pull-requests: read`), the payload is used.
+
 on:
   workflow_call: {}
 
-permissions:
-  contents: read
+# No `permissions` key on purpose: a called workflow can only narrow what its caller grants, so a cap here would take
+# away the `pull-requests: read` the live read needs, and asking for more than a caller grants fails the run before it
+# starts. The canonical caller grants `contents: read` and `pull-requests: read`.
 
 jobs:
   verify:
@@ -29,12 +41,36 @@ jobs:
     steps:
       - name: Require exactly one release-intent label
         env:
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          EVENT_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+          LABELS="$EVENT_LABELS"
+          AUTHOR="$EVENT_AUTHOR"
+          if [ -n "$NUMBER" ] && pull=$(gh api "repos/$REPOSITORY/pulls/$NUMBER" 2>/dev/null) \
+            && live_labels=$(printf '%s' "$pull" | jq -ce '[.labels[].name]' 2>/dev/null); then
+            LABELS="$live_labels"
+            AUTHOR=$(printf '%s' "$pull" | jq -r '.user.login // empty')
+          else
+            echo "::notice title=Release intent read from the event::Could not read the pull request as it is now; using the labels of the event that started this run. Grant the caller pull-requests: read."
+          fi
+          echo "Labels: $LABELS"
+
           version=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "major" or . == "minor" or . == "patch")] | length')
           none=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "no-release")] | length')
           count=$((version + none))
+
+          if [ "$AUTHOR" = "dependabot[bot]" ]; then
+            if [ "$version" -eq 0 ] && [ "$none" -eq 1 ]; then
+              echo "Dependabot pull request labelled no-release only."
+              exit 0
+            fi
+            echo "::error::Dependabot pull requests carry only no-release, with none of major, minor or patch. Dependabot applies major/minor/patch from the dependency's own version; release-action never releases Dependabot PRs. Remove major, minor and patch and add no-release; the normalize-dependabot-labels job in verify-semver-label.yml does this automatically."
+            exit 1
+          fi
 
           if [ "$count" -eq 1 ]; then
             if [ "$none" -eq 1 ]; then
