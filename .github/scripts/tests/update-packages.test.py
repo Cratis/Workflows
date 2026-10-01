@@ -169,6 +169,13 @@ else:
 
 
 class UpdatePackagesTests(unittest.TestCase):
+    def test_setup_installs_caller_sdk_pin_without_changing_selection_policy(self):
+        setup = STEPS["Setup .NET"]
+        self.assertIn("dotnet-version: ${{ env.DOTNET_VERSION }}", setup)
+        self.assertIn("global-json-file: ${{ hashFiles('global.json') != '' && 'global.json' || '' }}", setup)
+        self.assertIn("DOTNET_INSTALL_DIR:", setup)
+        self.assertNotRegex(SOURCE, r"(?:rm|mv|sed|jq) .*global[.]json")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="update-packages-")
         self.addCleanup(self.temp.cleanup)

@@ -186,6 +186,10 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.environment == 'self-hosted' && format('{0}/dotnet', runner.temp) || '' }}
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+          # setup-dotnet installs both versions when both inputs are present. The
+          # latest SDK alone cannot satisfy an exact pin or an older feature band.
+          # Keep the caller's roll-forward policy; never rewrite global.json.
+          global-json-file: ${{ hashFiles('global.json') != '' && 'global.json' || '' }}
 
       - name: Setup Node.js
         if: steps.detect.outputs.update_npm == 'true'
