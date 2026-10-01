@@ -8,10 +8,23 @@ name: Verify Release Notes
 # therefore becomes a broken release page. On 2026-09 a scan found 1138 of 3897
 # Cratis releases violating the release-note contract.
 #
-# Only release-bound pull requests are checked: those into the default branch that
-# carry exactly one of `major`, `minor` or `patch`. Every other pull request (no
-# label yet, `no-release`, Dependabot, another base) passes with a notice; the
-# caller re-runs the check when a label is added.
+# Every pull request into the default branch is checked, except Dependabot's. One
+# that carries any of `major`, `minor` or `patch` is release-bound and fails on a
+# violation, also when it carries a second intent label by mistake. One labelled
+# `no-release`, or not labelled yet, may still become releasable: its violations
+# are reported as warnings and the check passes. Pull requests into another base
+# pass with a notice; the caller re-runs the check when a label is added.
+#
+# The labels, description, author and base are read from the pull request as it is
+# now, not from the event payload: "Re-run" replays the event that started the run,
+# so a payload read would keep reporting the labels and description of that moment.
+# If the read fails, the payload is used.
+#
+# The `drift` job compares the notes with the diff and only ever warns: a bullet
+# whose code spans the diff no longer touches (the change landed on main another way
+# or was dropped in conflict resolution), a version the diff only removes, a registry
+# the publish workflows never push to, and a merge from the base branch that changed
+# which files the pull request touches.
 #
 # The contract enforced here - no stricter, no looser - is:
 #   - an optional summary, first: either a short `## Summary` section of prose or
@@ -84,8 +97,10 @@ on:
         required: false
         default: ubuntu-latest
 
-permissions:
-  contents: read
+# No `permissions` key on purpose: a called workflow can only narrow what its caller grants, so a cap here would
+# take away the `pull-requests: read` the live read below needs, and asking for more than a caller grants fails
+# the whole run before it starts. The callers grant `contents: read` and `pull-requests: read`; an older caller
+# that grants only `contents: read` still works, from the event payload.
 
 jobs:
   verify:
@@ -98,8 +113,39 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      # Node rather than `gh`: self-hosted runner images do not ship the GitHub CLI.
+      - name: Read the pull request as it is now
+        if: github.event.pull_request.number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          node - <<'JS'
+          "use strict";
+          // cratis:program read-pull-request
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const target = path.join(process.env.RUNNER_TEMP, "pull-request.json");
+          const api = process.env.GITHUB_API_URL || "https://api.github.com";
+          (async () => {
+              try {
+                  const response = await fetch(`${api}/repos/${process.env.REPOSITORY}/pulls/${process.env.NUMBER}`, {
+                      headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json" },
+                  });
+                  if (!response.ok) {
+                      throw new Error(`HTTP ${response.status}`);
+                  }
+                  fs.writeFileSync(target, JSON.stringify(await response.json()));
+              } catch (error) {
+                  fs.writeFileSync(target, "{}");
+                  console.log(`::notice title=Release notes read from the event::Could not read the pull request as it is now (${error.message}); using the labels and description of the event that started this run. Grant the caller pull-requests: read.`);
+              }
+          })();
+          JS
       - name: Require the description to be publishable release notes
         env:
+          PR_JSON: ${{ runner.temp }}/pull-request.json
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
@@ -108,15 +154,22 @@ jobs:
         run: |
           node - <<'JS'
           "use strict";
+          // cratis:program release-notes
           const fs = require("node:fs");
 
           const ALLOWED = ["Added", "Changed", "Fixed", "Removed", "Security", "Deprecated"];
           const ALLOWED_LIST = ALLOWED.map(name => `## ${name}`).join(", ");
           const REVIEWER_HEADINGS = ["test plan", "testing", "tests", "verification", "verified", "validation",
-              "quality", "review", "notes", "notes for reviewers", "limitations", "known follow-up", "acceptance"];
+              "quality", "review", "notes", "notes for reviewers", "limitations", "known follow-up", "acceptance",
+              "checked locally", "out of scope", "not verified", "not tested", "draft"];
+          // Result headings with a qualifier: "Checks (local)", "Checks (local, mirroring dotnet-build.yml)", "Local
+          // checks", "CI results". A bare `### CI` stays allowed: it can group CI changes inside a section.
+          const REVIEWER_HEADING = /^(?:(?:checks?|ci|tests?|local)\s*\(.*\)|(?:local|ci)\s+(?:checks?|results?|status|runs?|gates?)|(?:checks?|gates?)\s+run)$/;
+          const isReviewerHeading = name => REVIEWER_HEADINGS.includes(name) || REVIEWER_HEADING.test(name);
           const NARRATIVE_HEADINGS = ["overview", "description", "what", "why", "how", "context", "details"];
           const CHANGE_HEADINGS = ["changes", "what changed"];
           const FORBIDDEN_HEADINGS = [...REVIEWER_HEADINGS, ...NARRATIVE_HEADINGS, ...CHANGE_HEADINGS];
+          const isForbiddenHeading = name => FORBIDDEN_HEADINGS.includes(name) || REVIEWER_HEADING.test(name);
           const PLACEHOLDERS = [
               "Describe a new user-facing capability",
               "Describe a user-facing behavior change",
@@ -148,14 +201,14 @@ jobs:
           // `(#56, #57)` closes nothing: release-action only recognises a `(#n)` of its own.
           const GROUPED_ISSUES = /\(#\d+(?:\s*[, ]\s*#\d+)+\)/g;
           // Labels that only ever introduce process notes, bullet or not.
-          const PROCESS_LABEL = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:test plan|notes for reviewers|reviewer notes|known follow-up)(?:\s*:|(?:\*\*|__|\*|_)\s*:)/i;
+          const PROCESS_LABEL = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:test plan|notes? (?:for|to) reviewers?|reviewer notes?|known follow-up)(?:\s*:|(?:\*\*|__|\*|_)\s*:)/i;
           // "Reviewed by ..." opens a note only outside a bullet or prose section: "- Reviewed by status is now shown
           // on the dashboard (#4)" is a product bullet, and "Reviewed by Claude" is caught by the provenance rules.
           const REVIEWED_BY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?reviewed by\b/i;
           // Labels that can also open a product bullet ("- Validation: rules now apply to commands (#3)", "- Review:
           // requests are now sent when a pull request is ready (#4)"): they are notes when standalone, when not a
           // bullet under a section, or when what follows reports a test, CI or review result.
-          const RESULT_LABEL = /^\s*(?<bullet>(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:validation|testing|verification|tests?|test results?|review|reviewed|tested|verified)(?:\s*:|(?:\*\*|__|\*|_)\s*:)(?<rest>.*)$/i;
+          const RESULT_LABEL = /^\s*(?<bullet>(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)?(?:validation|testing|verification|tests?|test results?|review|reviewed|tested|verified|local|locally|checked locally|local checks|checks|ci|ci results|gates?)(?:\s*:|(?:\*\*|__|\*|_)\s*:)(?<rest>.*)$/i;
           // A result is reported, not described: the result word ends the clause ("all green", "12 specs passed"),
           // so "failed commands now return a 400" and "green-field templates" stay product wording.
           const END = String.raw`\s*(?=[.,;!:(]|$)`;
@@ -173,6 +226,61 @@ jobs:
               String.raw`all\s+(?:(?:the|unit|integration)\s+)*tests?\s+(?:now\s+)?(?:pass|passed|passing)(?:${END}|\s+(?:locally|in\s+ci|again)\b)`,
               String.raw`ci\s+(?:is\s+|was\s+|has\s+been\s+)?(?:green|passing|passed)(?:${END}|\s+(?:locally|again|and)\b)`,
           ].join("|") + ")", "i");
+          // Notes about the pull request rather than the change, recognised by their phrasing, wherever they stand: a
+          // bullet, the summary, the lead paragraph or a line of their own. Each pattern names how the note is
+          // worded, not its topic, so "Events are now verified against their schema" and "Toasts are stacked on top
+          // of each other" stay product wording.
+          // A clause opens a line (after list markers, a quote and emphasis) or follows sentence punctuation. Not a
+          // comma: "Forms are submitted, validated in the browser and saved" is product wording.
+          const CLAUSE = String.raw`(?:^\s*(?:(?:[-*+>]|\d{1,9}[.)])\s+)*(?:\*\*|__|\*|_)?|[;:.!(\u2014]\s*(?:\*\*|__|\*|_)?)`;
+          const CHECKED = String.raw`(?:verified|tested|checked|validated|confirmed|reproduced|exercised|smoke[- ]tested)`;
+          const CHECKED_BY = String.raw`(?:(?:this|it|everything(?: else)?|the rest|the (?:change|changes|fix|feature|branch|pr|pull request))\s+(?:was|were|has been|is)\s+)?(?:also\s+|only\s+|manually\s+|locally\s+)?${CHECKED}`;
+          // "locally", "manually" and "visually" end the note or lead into how ("Tested locally with ..."), so
+          // "- Validated locally stored tokens before use" stays product wording.
+          const HOW_CHECKED = String.raw`(?:(?:locally|manually|visually|by hand|end[- ]to[- ]end)(?=\s*(?:$|[.,;:)(*_\u2014-]|\s(?:with|and|on|in|by|against|using|via|before|after|first|too|only|as well|across|for|through)\b))|in (?:ci|storybook|the browser|a browser|a sandbox|the sandbox)\b|on (?:my|a local)\b|by (?:building|running|rebuilding|deploying|opening|installing|executing|starting|comparing)\b)`;
+          const PULL_REQUEST_REF = String.raw`(?:#\d+|[\w.-]+\/[\w.-]+#\d+|https:\/\/github\.com\/\S+\/pull\/\d+)`;
+          // The first match decides the message, so provenance comes before how a change was checked.
+          const PROCESS_NOTES = [
+              // Provenance: which branch or build it was checked against ("Verified against Arc.TypeScript main (v0.34.0)").
+              { kind: "provenance", pattern: new RegExp(CLAUSE + CHECKED_BY + String.raw`\s+(?:[\w-]+\s+){0,2}?(?:against|on|with|from)\s+(?:the\s+)?(?:[\w@/.-]+\s+){0,2}?(?:(?:main|master|HEAD)(?:\s+branch)?(?=\s*(?:\(|[.,;:)]|$))|the default branch\b)`, "i") },
+              // ... or which kind of environment, where the note opens the clause ("Tested against a real kernel").
+              { kind: "provenance", pattern: new RegExp(`${CLAUSE}${CHECKED_BY}\\s+(?:[\\w-]+\\s+){0,3}?(?:against|on|with)\\s+(?:a|the)\\s+(?:real|local|live|running)\\s+\\w`, "i") },
+              // How or where it was checked: "Verified by building the sample", "verified in Storybook", "Tested locally".
+              { kind: "verification", pattern: new RegExp(`${CLAUSE}${CHECKED_BY}\\s+(?:[\\w-]+\\s+){0,2}?${HOW_CHECKED}`, "i") },
+              // What was not checked; the lookahead keeps "- Not verified events are rejected" product wording.
+              { kind: "verification", pattern: new RegExp(CLAUSE + String.raw`(?:(?:this|it)\s+(?:is|was|has)\s+)?(?:not|never)\s+(?:yet\s+)?(?:been\s+)?(?:verified|tested|validated|exercised)(?=\s*(?:$|[.,;:)*_]|\s(?:against|on|with|in|here|yet|locally|end|by|manually|visually)\b))`, "i") },
+              // Scope notes: "Storybook only;", "Docs-only.", "Tests only (#3)".
+              { kind: "verification", pattern: new RegExp(CLAUSE + String.raw`(?:storybook|docs?|documentation|specs?|tests?|ci|tooling)[- ]only(?:\s+(?:change|changes|pr|pull request|update))?\s*(?:[;.,:)]|\(#|$)`, "i") },
+              // Result counts: "specs 492/492", "Integration 110/110", "9 of 9 runs", "518 specs passed", "12 passed, 0 failed".
+              { kind: "verification", pattern: /\b(?:specs?|tests?|runs?|checks?|jobs?|integration|unit|e2e|scenarios?)\s+(\d[\d,]*)\s*\/\s*\1\b|\b(\d[\d,]*)\s*\/\s*\2\s+(?:specs?|tests?|runs?|checks?|passed|passing|green)\b|\b\d[\d,]*\s+(?:tests?|specs?|scenarios?)\s+(?:passed|passing|green|failed|failing)\b|\b\d+\s+passed,\s*\d+\s+(?:failed|skipped)\b/i },
+              // "3 of 3 runs" is a count in prose ("The dashboard shows 3 of 3 runs completed for each observer"): a result
+              // only when it starts a clause or is followed by verification wording.
+              { kind: "verification", pattern: new RegExp(CLAUSE + String.raw`(\d+)\s+of\s+\1\s+(?:runs|specs|tests|checks|scenarios)\b`, "i") },
+              { kind: "verification", pattern: /\b(\d+)\s+of\s+\1\s+(?:runs|specs|tests|checks|scenarios)\s+(?:(?:all|have|had)\s+)?(?:passed|passing|green|succeeded|successful|failed|failing|ok)\b/i },
+              // Gate results: "Tier 1 PASS", "0 warnings, 0 errors".
+              { kind: "verification", pattern: /\btier[ -]?[123]\b[^.\n]{0,20}?\b(?:pass(?:ed|es)?|green|ok|clean)\b|\b\d+\s+warnings?,\s*\d+\s+errors?\b/i },
+              // Reviewer instructions: stacking, retargeting, merge and deploy order, draft status.
+              { kind: "instruction", pattern: new RegExp(String.raw`\bstacked\s+(?:on|onto)\s+(?:top of\s+)?(?:${PULL_REQUEST_REF}|(?:the\s+(?:other\s+)?|another\s+|this\s+)?(?:pr|pull request|branch)\b)|${CLAUSE}retarget(?:ed|ing)?\s+(?:it\s+|this\s+(?:pr\s+|pull request\s+)?)?(?:to|onto)\s+(?:main|master|the default branch)\b|\b(?:depends on|blocked by|merge (?:it\s+|this\s+)?(?:after|before)|land (?:it\s+|this\s+)?(?:after|before))\s+${PULL_REQUEST_REF}`, "i") },
+              // "This PR is ..." always speaks to reviewers; "this branch" only when it says what the branch needs, so
+              // "The CLI now warns when this branch is behind main" stays product wording.
+              { kind: "instruction", pattern: /\bthis\s+(?:pr|pull request)\s+(?:is|was|should|must|needs|depends|requires|has to|can only|will need|replaces|supersedes|builds on|targets)\b/i },
+              { kind: "instruction", pattern: new RegExp(CLAUSE + String.raw`this\s+branch\s+(?:should|must|needs|depends|requires|has to|can only|will need|replaces|supersedes|builds on|targets|is (?:stacked|based|built|part))\b`, "i") },
+              // "Do not merge" is an instruction when it opens a clause ("Do not merge until the kernel ships.") or says what not
+              // to merge yet; "Arrays in read models do not merge" and "should be deployed before" about other subjects are
+              // product wording.
+              { kind: "instruction", pattern: new RegExp(String.raw`\b(?:before|after|once)\s+(?:merging|deploying|releasing)\s+this\s+(?:pr|pull request|branch|change)\b|${CLAUSE}(?:do not|don['\u2019]t)\s+merge(?=\s*(?:$|[.,;:!)]))|\b(?:do not|don['\u2019]t)\s+merge\s+(?:this|it|yet|until|before|after)\b|\b(?:this|it)\s+(?:pr\s+|pull request\s+)?should be (?:deployed|merged|released) (?:separately|together|first|after|before|alongside)\b`, "i") },
+              { kind: "instruction", pattern: /^\s*(?:\*\*|__)?(?:draft|wip|dnm|reviewers?|for reviewers|note to reviewers)(?:\*\*|__)?\s*:/i },
+          ];
+          const PROCESS_FIX = {
+              verification: "How or where the change was checked, what was not checked, and test or CI results are for reviewers: move them to a pull request comment. The release notes say only what changed for the reader.",
+              provenance: "Which branch, commit or build the change was checked against is for reviewers: move it to a pull request comment. If compatibility matters to the reader, state it as a fact, for example `Requires @cratis/arc 0.34 or later`.",
+              instruction: "Stacking, retargeting, merge or deploy order and draft status are for reviewers: move them to a pull request comment. If consumers must upgrade in a set order, write that as an upgrade bullet, for example `Upgrade the Chronicle kernel to 19.25 before this client`.",
+          };
+          const PROCESS_RULE = {
+              verification: "Review, verification or provenance note",
+              provenance: "Review, verification or provenance note",
+              instruction: "Reviewer instruction",
+          };
           const BOLD_ONLY = /^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\*\*|__|\*|_)(.+?)(?:\*\*|__|\*|_)\s*:?\s*$/;
           const AGENT = "(?:claude|copilot|codex|chatgpt|gpt|cursor|gemini|opus|sonnet|haiku|openai|anthropic|an? ai\\b|llm)";
           // Authorship of the description itself starts the line ("Generated with Claude Code"); a bullet about a
@@ -323,7 +431,7 @@ jobs:
               const setext = heading.setext
                   ? " A line directly above `---` or `===` renders as a heading; put a blank line before a `---` rule."
                   : "";
-              if (REVIEWER_HEADINGS.includes(name)) {
+              if (isReviewerHeading(name)) {
                   return `${PR_COMMENT}${setext}`;
               }
               if (NARRATIVE_HEADINGS.includes(name)) {
@@ -489,7 +597,7 @@ jobs:
                               report("Heading not allowed", index, headingFix(heading));
                               section = null;
                           }
-                      } else if (FORBIDDEN_HEADINGS.includes(name) || name === "summary") {
+                      } else if (isForbiddenHeading(name) || name === "summary") {
                           report("Heading not allowed", index, headingFix(heading));
                       } else if (section && section.prose) {
                           proseOnly(index);
@@ -559,12 +667,16 @@ jobs:
                   // Product wording: a bullet, a `## Summary` or the lead paragraph. Only a stand-alone line outside them
                   // is checked loosely for provenance and "Reviewed by".
                   const productText = inBullet || (section ? section.prose : preamble);
-                  if (boldName !== null && FORBIDDEN_HEADINGS.includes(normalize(boldName))) {
+                  const processNote = PROCESS_NOTES.find(note => note.pattern.test(noted));
+                  if (boldName !== null && isForbiddenHeading(normalize(boldName))) {
                       // A bold line or a <summary> naming a forbidden heading is that heading, not a note.
                       report("Heading not allowed", index, headingFix({ name: boldName, setext: false }));
                   } else if (PROCESS_LABEL.test(noted) || (!productText && REVIEWED_BY.test(noted)) || AUTHORED.test(noted) || provenance(noted, productText) || RESULT_CLAIM.test(noted)
                       || (labelled && (!underAllowedSection || RESULT_WORDING.test(labelled.groups.rest)))) {
                       report("Review, verification or provenance note", index, PR_COMMENT);
+                  } else if (processNote && !(heading && isForbiddenHeading(normalize(heading.name)))) {
+                      // A forbidden heading ("### Not verified") is already reported as the heading it is.
+                      report(PROCESS_RULE[processNote.kind], index, PROCESS_FIX[processNote.kind]);
                   }
                   for (const match of prose[index].matchAll(GROUPED_ISSUES)) {
                       const numbers = [...match[0].matchAll(/\d+/g)].map(number => number[0]);
@@ -629,70 +741,315 @@ jobs:
                   fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${markdown}\n`);
               }
           };
-          const RERUN = "Only a pull request into the default branch with exactly one of major, minor or patch is checked; the check re-runs when a release label is added.";
+          const RERUN = "Only a pull request into the default branch is checked; the check re-runs when the description or a label changes.";
           const skip = reason => {
               console.log(`::notice title=Release notes not checked::${escapeData(`${reason} ${RERUN}`)}`);
               summary(`### Release notes\n\nNot checked: ${reason} ${RERUN}`);
               process.exit(0);
           };
 
+          // The pull request as it is now (see "Read the pull request as it is now"); the event payload when that read
+          // failed or did not run.
+          let live = null;
+          try {
+              const parsed = process.env.PR_JSON ? JSON.parse(fs.readFileSync(process.env.PR_JSON, "utf8")) : null;
+              live = parsed && typeof parsed === "object" && Number.isInteger(parsed.number) ? parsed : null;
+          } catch {
+              live = null;
+          }
           let labels = [];
           try {
-              const parsed = JSON.parse(process.env.PR_LABELS || "[]");
+              const parsed = live ? (live.labels || []).map(label => label && label.name) : JSON.parse(process.env.PR_LABELS || "[]");
               labels = Array.isArray(parsed) ? parsed.filter(label => typeof label === "string") : [];
           } catch {
               labels = [];
           }
-          const base = process.env.PR_BASE || "";
+          const body = live ? (typeof live.body === "string" ? live.body : "") : (process.env.PR_BODY || "");
+          const author = live ? (live.user && live.user.login) || "" : (process.env.PR_AUTHOR || "");
+          const base = live ? (live.base && live.base.ref) || "" : (process.env.PR_BASE || "");
           const defaultBranch = process.env.DEFAULT_BRANCH || "";
 
           if (!base) {
               skip("this run was not triggered by a pull request.");
           }
-          if (process.env.PR_AUTHOR === "dependabot[bot]") {
+          if (author === "dependabot[bot]") {
               skip("Dependabot pull requests carry Dependabot's generated description.");
           }
           if (base !== defaultBranch) {
               skip(`the pull request targets ${base}, not the default branch ${defaultBranch}, so merging it releases nothing.`);
           }
 
-          // Only a release-bound pull request has its description published as release notes.
+          // A pull request carrying any of major, minor or patch is release-bound, also next to a second intent label
+          // (verify-release-intent rejects that combination on its own). Every other pull request may still become
+          // release-bound, so its violations are reported as warnings.
           const releaseLabels = [...new Set(labels.filter(label => ["major", "minor", "patch"].includes(label)))];
-          if (releaseLabels.length === 0) {
-              skip(labels.includes("no-release")
-                  ? "the pull request is labelled no-release, so merging it publishes nothing."
-                  : "the pull request carries none of major, minor or patch, so it is not release-bound yet.");
-          }
-          if (releaseLabels.length > 1) {
-              skip(`the pull request carries ${releaseLabels.join(", ")}; release intent must be exactly one of major, minor or patch.`);
-          }
-
+          const noRelease = labels.includes("no-release");
+          const releaseBound = releaseLabels.length > 0;
           const violations = check({
-              body: process.env.PR_BODY || "",
+              body,
               repository: process.env.GITHUB_REPOSITORY || "Cratis/<Repository>",
               defaultBranch,
-          });
+          // A no-release pull request publishes nothing, so having no change list is not a mistake there.
+          }).filter(violation => releaseBound || !noRelease || violation.rule !== "No release notes");
 
+          const status = releaseBound ? ""
+              : noRelease ? "The pull request is labelled no-release, so this description is not published now. "
+              : "The pull request carries none of major, minor or patch yet. ";
           if (violations.length === 0) {
-              console.log("The pull request description follows the release-note contract.");
-              summary("### Release notes\n\nThe pull request description follows the release-note contract and can be published as the release notes.");
+              console.log(`${status}The pull request description follows the release-note contract.`);
+              summary(`### Release notes\n\n${status}The pull request description follows the release-note contract and can be published as the release notes.`);
               process.exit(0);
           }
 
+          const level = releaseBound ? "error" : "warning";
+          const consequence = releaseBound ? VERBATIM
+              : `${noRelease ? "Labelled no-release, so this is a warning" : "Not labelled yet, so this is a warning"}: it fails once the pull request is labelled major, minor or patch. ${VERBATIM}`;
           for (const violation of violations) {
               const where = violation.line === null ? "The description" : `Line ${violation.line} \`${violation.text}\``;
-              console.log(`::error title=${escapeProperty(`Release notes: ${violation.rule}`)}::${escapeData(`${violation.rule}: ${where}. ${violation.fix} ${VERBATIM}`)}`);
+              console.log(`::${level} title=${escapeProperty(`Release notes: ${violation.rule}`)}::${escapeData(`${violation.rule}: ${where}. ${violation.fix} ${consequence}`)}`);
           }
           const rows = violations.map(violation =>
               `| ${violation.line ?? ""} | ${violation.rule} | ${(violation.text ?? "").replace(/\|/g, "\\|").replace(/`/g, "'")} |`);
           summary([
               "### Release notes",
               "",
-              `${violations.length} release-note violation(s). ${VERBATIM}`,
+              `${violations.length} release-note ${releaseBound ? "violation(s)" : "warning(s)"}. ${consequence}`,
               "",
               "| Line | Rule | Text |",
               "| --- | --- | --- |",
               ...rows,
           ].join("\n"));
-          process.exit(1);
+          process.exit(releaseBound ? 1 : 0);
+          JS
+
+  # Warnings only: whether a bullet still describes this pull request cannot be decided from text alone, so this
+  # job points at the likely drift and never fails. It reads the pull request as it is now, like the gate.
+  # It runs on `labeled` and `unlabeled` too: the caller's concurrency group cancels the whole run when a label changes,
+  # so a job that skipped those events would leave the check cancelled with no run to replace it.
+  drift:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # The pull request head, not the merge commit, so a merge from the base branch can be recognised. Every branch
+      # with history is needed for merge bases; blobs are fetched only for the files the diff reads. The
+      # credentials stay for those on-demand blob fetches in private repositories; nothing from the pull request
+      # is executed, only git reads it.
+      # A checkout that fails (a fork's head that cannot be fetched) leaves the comparison to report that it was
+      # skipped, rather than failing a job that only ever warns.
+      - name: Check out the pull request
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          filter: blob:none
+      - name: Compare the release notes with the diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          BEFORE: ${{ github.event.before }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          node - <<'JS'
+          "use strict";
+          // cratis:program release-notes-drift
+          const fs = require("node:fs");
+          const { execFileSync } = require("node:child_process");
+
+          const ALLOWED = ["added", "changed", "fixed", "removed", "security", "deprecated"];
+          const REGISTRIES = [
+              { name: "PyPI", mention: /\bpypi\b/i, publish: /pypi|twine|pypa\/gh-action-pypi-publish|uv publish|poetry publish/i },
+              { name: "npm", mention: /\bnpm(?:js)?\b(?!\s+(?:install|ci|run|scripts?|dependenc))/i, publish: /npm publish|yarn npm publish|npm-publish|registry\.npmjs\.org|NPM_TOKEN|environment:\s*npm\b/i },
+              { name: "NuGet", mention: /\bnuget(?:\.org)?\b/i, publish: /nuget push|dotnet nuget|NUGET_API_KEY|nuget\.org|environment:\s*nuget\b/i },
+              { name: "Maven Central", mention: /\bmaven central\b|\bsonatype\b/i, publish: /maven|sonatype|central\.sonatype|publishToMavenCentral|gradle.*publish/i },
+              { name: "Docker Hub", mention: /\bdocker hub\b|\bdockerhub\b/i, publish: /docker\/login-action|docker\.io|dockerhub|DOCKER_USERNAME|docker push/i },
+              { name: "GHCR", mention: /\bghcr(?:\.io)?\b|\bgithub container registry\b/i, publish: /ghcr\.io/i },
+          ];
+          const PUBLISH_CLAIM = /\b(?:publish(?:ed|es|ing)?|available|install(?:able)?|ships?|shipped|pushed|released|now on|from)\b/i;
+          const VERSION = /(?<![\w.-])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?![\w.-]*\w)/g;
+
+          const warnings = [];
+          const warn = (title, message) => warnings.push({ title, message });
+          const git = (...args) => execFileSync("git", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+          const tryGit = (...args) => {
+              try {
+                  return git(...args);
+              } catch {
+                  return null;
+              }
+          };
+          const escapeData = value => value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+          const escapeProperty = value => escapeData(value).replace(/:/g, "%3A").replace(/,/g, "%2C");
+          const quote = text => (text.length > 100 ? `${text.slice(0, 97)}...` : text).replace(/`/g, "'");
+
+          // The bullets under the allowed sections, each with its continuation lines joined; code fences dropped.
+          function bullets(body) {
+              const lines = body.replace(/\r\n?/g, "\n").replace(/^[ \t]*(`{3,}|~{3,})[\s\S]*?^[ \t]*\1[ \t]*$/gm, "").replace(/<!--[\s\S]*?-->/g, "").split("\n");
+              const found = [];
+              let section = null;
+              let current = null;
+              for (const line of lines) {
+                  const heading = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+                  if (heading) {
+                      current = null;
+                      if (heading[1].length <= 2) {
+                          section = heading[2].replace(/[*_`]/g, "").trim().toLowerCase();
+                      }
+                      continue;
+                  }
+                  if (!ALLOWED.includes(section)) {
+                      continue;
+                  }
+                  const item = /^(\s*)(?:[-*+]|\d{1,9}[.)])\s+(.*)$/.exec(line);
+                  if (item) {
+                      current = { text: item[2] };
+                      found.push(current);
+                  } else if (current && /^\s+\S/.test(line)) {
+                      current.text += ` ${line.trim()}`;
+                  } else if (!line.trim()) {
+                      continue;
+                  } else {
+                      current = null;
+                  }
+              }
+              return found;
+          }
+
+          async function readBody() {
+              const api = process.env.GITHUB_API_URL || "https://api.github.com";
+              if (process.env.GH_TOKEN && process.env.REPOSITORY && process.env.NUMBER) {
+                  try {
+                      const response = await fetch(`${api}/repos/${process.env.REPOSITORY}/pulls/${process.env.NUMBER}`, {
+                          headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json" },
+                      });
+                      if (response.ok) {
+                          const pull = await response.json();
+                          return { body: typeof pull.body === "string" ? pull.body : "", base: (pull.base && pull.base.ref) || process.env.BASE || "" };
+                      }
+                  } catch {
+                      // Falls back to the event payload below.
+                  }
+              }
+              return { body: process.env.PR_BODY || "", base: process.env.BASE || "" };
+          }
+
+          function compare({ body, base, before, action }) {
+              const upstream = `origin/${base}`;
+              const mergeBase = tryGit("merge-base", upstream, "HEAD");
+              if (!mergeBase) {
+                  return { skipped: `could not find where this pull request branched from ${upstream}` };
+              }
+              const mb = mergeBase.trim();
+              const names = git("diff", "--name-only", "--no-renames", mb, "HEAD").split("\n").filter(Boolean);
+              const patch = tryGit("diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", mb, "HEAD");
+              const added = [];
+              const removed = [];
+              for (const line of (patch || "").split("\n")) {
+                  if (line.startsWith("+") && !line.startsWith("+++")) {
+                      added.push(line);
+                  } else if (line.startsWith("-") && !line.startsWith("---")) {
+                      removed.push(line);
+                  }
+              }
+              const changedText = `${names.join("\n")}\n${added.join("\n")}\n${removed.join("\n")}`;
+              const addedText = added.join("\n");
+              const removedText = removed.join("\n");
+
+              // 1. A bullet naming code the diff no longer touches.
+              if (patch !== null) {
+                  for (const bullet of bullets(body)) {
+                      const spans = [...bullet.text.matchAll(/(`+)([^`\n]+?)\1/g)].map(match => match[2].trim())
+                          .filter(span => /^[\w.@/-]{3,}$/.test(span) && !/^v?[\d.]+$/.test(span) && /[A-Za-z]{2}/.test(span));
+                      if (spans.length > 0 && !spans.some(span => changedText.includes(span)
+                          || changedText.includes(span.replace(/^\.?\//, "")) || changedText.includes(span.split("/").pop()))) {
+                          warn("Release notes drift: bullet not in the diff",
+                              `The bullet \`${quote(bullet.text)}\` names ${spans.map(span => `\`${span}\``).join(", ")}, which this pull request's diff no longer touches; the change may already be on ${base} or was dropped in conflict resolution. Re-read the bullet against \`git diff origin/${base}...HEAD\`.`);
+                      }
+                  }
+
+                  // 2. A version the diff only removes.
+                  const seen = new Set();
+                  for (const match of body.matchAll(VERSION)) {
+                      const version = match[1];
+                      const before = body.slice(Math.max(0, match.index - 12), match.index);
+                      if (seen.has(version) || /\bfrom\s+$|\bwas\s+$/i.test(before)) {
+                          continue;
+                      }
+                      seen.add(version);
+                      if (removedText.includes(version) && !addedText.includes(version)) {
+                          warn("Release notes drift: replaced version",
+                              `The description names ${version}, which the diff only removes: it is the version this pull request replaces. Name the version it moves to.`);
+                      }
+                  }
+              }
+
+              // 3. A registry the publish workflows never push to.
+              const workflows = tryGit("grep", "-h", "-i", "-e", ".", "HEAD", "--", ".github/workflows") || "";
+              for (const bullet of bullets(body)) {
+                  for (const registry of REGISTRIES) {
+                      if (registry.mention.test(bullet.text) && PUBLISH_CLAIM.test(bullet.text) && !registry.publish.test(workflows)) {
+                          warn("Release notes drift: publish claim",
+                              `The bullet \`${quote(bullet.text)}\` names ${registry.name}, but no workflow in .github/workflows publishes there. State only where the release is actually published.`);
+                      }
+                  }
+              }
+
+              // 4. A merge from the base branch that changed what the pull request contains.
+              const parents = (tryGit("rev-list", "--parents", "-n", "1", "HEAD") || "").trim().split(/\s+/).slice(1);
+              if (action === "synchronize" && before && !/^0+$/.test(before) && parents.length === 2
+                  && tryGit("merge-base", "--is-ancestor", parents[1], upstream) !== null
+                  && tryGit("cat-file", "-e", `${before}^{commit}`) !== null) {
+                  const oldBase = tryGit("merge-base", before, upstream);
+                  if (oldBase) {
+                      const was = new Set(git("diff", "--name-only", "--no-renames", oldBase.trim(), before).split("\n").filter(Boolean));
+                      const now = new Set(names);
+                      const dropped = [...was].filter(name => !now.has(name));
+                      const gained = [...now].filter(name => !was.has(name));
+                      const changed = dropped.length + gained.length;
+                      if (dropped.length > 0 || changed >= Math.max(3, Math.ceil(was.size * 0.25))) {
+                          const list = files => files.slice(0, 5).map(name => `\`${name}\``).join(", ") + (files.length > 5 ? ` and ${files.length - 5} more` : "");
+                          warn("Release notes drift: merge from the base branch",
+                              `The merge from ${base} changed what this pull request contains${dropped.length ? `: it no longer changes ${list(dropped)}` : ""}${gained.length ? `${dropped.length ? ", and" : ":"} it now changes ${list(gained)}` : ""}. Re-read the notes against \`git diff origin/${base}...HEAD\`.`);
+                      }
+                  }
+              }
+              return { skipped: null };
+          }
+
+          (async () => {
+              let outcome;
+              try {
+                  const { body, base } = await readBody();
+                  outcome = compare({ body, base, before: process.env.BEFORE || "", action: process.env.ACTION || "" });
+              } catch (error) {
+                  outcome = { skipped: `the comparison failed: ${error.message.split("\n")[0]}` };
+              }
+              const summary = [];
+              if (outcome.skipped) {
+                  console.log(`::notice title=Release notes drift not checked::${escapeData(`Not compared with the diff: ${outcome.skipped}.`)}`);
+                  summary.push(`Not compared with the diff: ${outcome.skipped}.`);
+              } else if (warnings.length === 0) {
+                  console.log("The release notes match the diff as far as this job can tell.");
+                  summary.push("The release notes match the diff as far as this job can tell.");
+              }
+              for (const warning of warnings) {
+                  console.log(`::warning title=${escapeProperty(warning.title)}::${escapeData(warning.message)}`);
+                  summary.push(`- **${warning.title.replace(/^Release notes drift: /, "")}**: ${warning.message}`);
+              }
+              if (process.env.GITHUB_STEP_SUMMARY) {
+                  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Release notes and the diff\n\n${summary.join("\n")}\n`);
+              }
+              process.exit(0);
+          })();
           JS

@@ -12,6 +12,9 @@ on:
       - .github/pull_request_template.md
       - .github/scripts/bootstrap-common-workflows.sh
       - .github/workflows/bootstrap-common-workflows.yml
+      - .github/workflows/verify-release-intent.yml
+      - .github/workflows/normalize-dependabot-labels.yml
+      - .github/scripts/tests/verify-release-intent.spec.mjs
   push:
     branches: [main]
     paths:
@@ -22,6 +25,9 @@ on:
       - .github/pull_request_template.md
       - .github/scripts/bootstrap-common-workflows.sh
       - .github/workflows/bootstrap-common-workflows.yml
+      - .github/workflows/verify-release-intent.yml
+      - .github/workflows/normalize-dependabot-labels.yml
+      - .github/scripts/tests/verify-release-intent.spec.mjs
 
 permissions:
   contents: read
@@ -29,7 +35,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out workflow and offline tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,3 +48,6 @@ jobs:
       - name: Exercise the actual inline program against real release bodies
         # No token, no GitHub API calls, no dependency installation.
         run: node --test .github/scripts/tests/verify-release-notes.spec.mjs
+      - name: Exercise the release-intent gate and the Dependabot label normalizer
+        # bash, jq and a stub gh; no token and no GitHub API calls.
+        run: node --test .github/scripts/tests/verify-release-intent.spec.mjs

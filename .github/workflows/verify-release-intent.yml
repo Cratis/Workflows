@@ -15,11 +15,26 @@ name: Verify Release Intent
 # configuration-only pull requests to carry `patch` - cutting four unintended
 # releases. Policy changes to the gate are now one pull request, here.
 
+#
+# Dependabot pull requests carry only `no-release`: release-action never releases
+# them, and the major/minor/patch label Dependabot adds on its own describes the
+# dependency's version bump, not this product's. This gate never fails a Dependabot
+# pull request for its labels: it replaces major/minor/patch with no-release itself
+# when the token can write, and passes with a notice when it cannot, which keeps
+# callers that predate the normalizer working. normalize-dependabot-labels.yml does
+# the same in the current caller, whose gate job only has `pull-requests: read`.
+#
+# The labels are read from the pull request as it is now, not from the event
+# payload: "Re-run" replays the event that started the run, so a payload read
+# keeps failing on the labels of that moment. If the read fails (a caller that does
+# not grant `pull-requests: read`), the payload is used.
+
 on:
   workflow_call: {}
 
-permissions:
-  contents: read
+# No `permissions` key on purpose: a called workflow can only narrow what its caller grants, so a cap here would take
+# away the `pull-requests: read` the live read needs, and asking for more than a caller grants fails the run before it
+# starts. The canonical caller grants `contents: read` and `pull-requests: read`.
 
 jobs:
   verify:
@@ -29,12 +44,54 @@ jobs:
     steps:
       - name: Require exactly one release-intent label
         env:
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          EVENT_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+          LABELS="$EVENT_LABELS"
+          AUTHOR="$EVENT_AUTHOR"
+          if [ -n "$NUMBER" ] && pull=$(gh api "repos/$REPOSITORY/pulls/$NUMBER" 2>/dev/null) \
+            && live_labels=$(printf '%s' "$pull" | jq -ce '[.labels[].name]' 2>/dev/null); then
+            LABELS="$live_labels"
+            AUTHOR=$(printf '%s' "$pull" | jq -r '.user.login // empty')
+          else
+            echo "::notice title=Release intent read from the event::Could not read the pull request as it is now; using the labels of the event that started this run. Grant the caller pull-requests: read."
+          fi
+          echo "Labels: $LABELS"
+
           version=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "major" or . == "minor" or . == "patch")] | length')
           none=$(printf '%s' "$LABELS" | jq '[.[] | select(. == "no-release")] | length')
           count=$((version + none))
+
+          # A Dependabot pull request is never failed for its labels. Callers that predate normalize-dependabot-labels.yml
+          # (the repositories the bootstrap ignores) have no job to correct them, so the gate corrects them itself when the
+          # token can write, and passes with a notice when it cannot.
+          if [ "$AUTHOR" = "dependabot[bot]" ]; then
+            if [ "$version" -eq 0 ] && [ "$none" -eq 1 ]; then
+              echo "Dependabot pull request labelled no-release only."
+              exit 0
+            fi
+            corrected=true
+            if [ -z "$NUMBER" ]; then
+              corrected=false
+            else
+              for label in $(printf '%s' "$LABELS" | jq -r '.[] | select(. == "major" or . == "minor" or . == "patch")'); do
+                gh api -X DELETE "repos/$REPOSITORY/issues/$NUMBER/labels/$label" > /dev/null 2>&1 || corrected=false
+              done
+              if [ "$none" -eq 0 ]; then
+                gh api -X POST "repos/$REPOSITORY/issues/$NUMBER/labels" -f "labels[]=no-release" > /dev/null 2>&1 || corrected=false
+              fi
+            fi
+            if [ "$corrected" = true ]; then
+              echo "Dependabot pull request: replaced major, minor and patch with no-release. Dependabot applies those from the dependency's own version; release-action never releases Dependabot PRs."
+            else
+              echo "::notice title=Dependabot labels not corrected::Dependabot pull requests carry only no-release, but this one does not, for example because Dependabot added major, minor or patch from the dependency's own version, and this token cannot change labels. release-action never releases Dependabot PRs, so this passes; grant the caller pull-requests: write or add the normalize-dependabot-labels job to verify-semver-label.yml."
+            fi
+            exit 0
+          fi
 
           if [ "$count" -eq 1 ]; then
             if [ "$none" -eq 1 ]; then
