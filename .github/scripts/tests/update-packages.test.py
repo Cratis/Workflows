@@ -159,7 +159,7 @@ else:
         manifest = json.loads(path.read_text())
         manifest["devDependencies"]["ms"] = os.environ["NPM_NEW_PIN"]
         path.write_text(json.dumps(manifest, indent=2) + "\n")
-    update = (name == "dotnet" and args[:2] == ["package", "update"]) or command in ("npx npm-check-updates -u -w --dep prod,dev,optional,packageManager -x typescript",
+    update = (name == "dotnet" and args[:2] == ["package", "update"]) or command in ("npx npm-check-updates -u -w -x typescript",
                          "gradle useLatestVersions --no-daemon", "mix deps.update --all")
     if update and os.environ.get("NO_UPDATES") != "1":
         with open("dependencies.txt", "a") as dependencies:
@@ -683,8 +683,7 @@ class UpdatePackagesTests(unittest.TestCase):
         value = 'typescript,$(touch injected);"quoted"'
         self.env["NPM_PACKAGE_EXCLUSIONS"] = value
         self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
-        self.assertIn(["npx", "npm-check-updates", "-u", "-w", "--dep", "prod,dev,optional,packageManager", "-x", value],
-                      self.calls())
+        self.assertIn(["npx", "npm-check-updates", "-u", "-w", "-x", value], self.calls())
         self.assertFalse((self.repo / "injected").exists())
 
     def test_npm_updates_then_installs_and_dedupes_supported_yarn(self):
@@ -694,8 +693,7 @@ class UpdatePackagesTests(unittest.TestCase):
                 self.env["YARN_VERSION"] = version
                 self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
                 calls = self.calls()
-                self.assertEqual(self.calls("npx"), [["npx", "npm-check-updates", "-u", "-w", "--dep",
-                                                    "prod,dev,optional,packageManager", "-x", "typescript"]])
+                self.assertEqual(self.calls("npx"), [["npx", "npm-check-updates", "-u", "-w", "-x", "typescript"]])
                 self.assertLess(calls.index(self.calls("npx")[0]), calls.index(["yarn", "install"]))
                 self.assertLess(calls.index(["yarn", "install"]), calls.index(["yarn", "dedupe"]))
                 self.assertEqual(self.calls("yarn").count(["yarn", "dedupe"]), 1)
@@ -711,7 +709,7 @@ class UpdatePackagesTests(unittest.TestCase):
 
     def test_npm_update_install_and_version_failures_stop_the_step(self):
         for command, forbidden in (
-                ("npx npm-check-updates -u -w --dep prod,dev,optional,packageManager -x typescript", ["yarn", "install"]),
+                ("npx npm-check-updates -u -w -x typescript", ["yarn", "install"]),
                 ("yarn install", ["yarn", "dedupe"]),
                 ("yarn --version", ["yarn", "dedupe"])):
             with self.subTest(command=command):
@@ -732,6 +730,29 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
         after = json.loads((self.repo / "package.json").read_text())
         self.assertEqual(after["peerDependencies"], {"ms": "^2.1.3", "react": "^18.0.0 || ^19.0.0"})
+
+    def test_npm_command_does_not_override_caller_dependency_section_configuration(self):
+        for config in ({"dep": ["dev"]}, {"dep": ["prod", "dev", "peer", "optional"]},
+                       {"mergeConfig": True, "dep": ["peer"]}):
+            with self.subTest(config=config):
+                self.log.unlink(missing_ok=True)
+                path = self.repo / ".ncurc.json"
+                contents = json.dumps(config)
+                path.write_text(contents)
+                self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+                self.assertEqual(self.calls("npx"), [["npx", "npm-check-updates", "-u", "-w", "-x", "typescript"]])
+                self.assertEqual(path.read_text(), contents)
+
+    def test_npm_out_of_range_pin_warns_without_blocking_install_or_dedupe(self):
+        manifest = {"devDependencies": {"ms": "1.2.3"}, "peerDependencies": {"ms": "^1.2.3"}}
+        (self.repo / "package.json").write_text(json.dumps(manifest))
+        self.env["NPM_NEW_PIN"] = "2.0.0"
+        self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+        after = json.loads((self.repo / "package.json").read_text())
+        self.assertEqual(after["peerDependencies"], {"ms": "^1.2.3"})
+        self.assertIn("::warning::package.json: ms peer ^1.2.3 unchanged; new pin 2.0.0", self.last_result.stdout)
+        self.assertIn(["yarn", "install"], self.calls("yarn"))
+        self.assertIn(["yarn", "dedupe"], self.calls("yarn"))
 
     def test_npm_sync_failure_blocks_install_builds_and_publication(self):
         self.assert_step_ok("Snapshot NPM peer pins")
