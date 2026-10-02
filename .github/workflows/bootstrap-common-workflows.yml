@@ -67,10 +67,11 @@ env:
   #   bootstrapped (the bootstrap has failed since 2026-08-25), so a run would also install every standard
   #   wrapper there for the first time; held back until that is decided, and they install
   #   verify-release-notes.yml through their own reviewed change meanwhile
+  # Chronicle.Go, Arc.Go - Go language ports with their own Go build, release and module-proxy workflows
   # The ignored private and customized repositories install verify-release-notes.yml through their own
   #   reviewed change, copying the caller with their own runner fallback in its `runs-on` input (RUNNER_GATE is
   #   only an outage escape hatch, normally unset; Ensemble uses vars.ENSEMBLE_RUNNER)
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin","Chronicle.Go","Arc.Go"]'
 
 jobs:
   bootstrap:
