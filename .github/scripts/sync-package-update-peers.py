@@ -123,7 +123,9 @@ def snapshot(destination):
                 directory = Path(name)
                 if {"node_modules", ".pnpm-store"}.intersection(directory.parts):
                     continue
-                if not directory.is_dir() or directory.is_symlink():
+                if (directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents)
+                        or not directory.is_dir()):
+                    annotation("notice", f"Skipping symlinked or non-directory workspace match: {directory}")
                     continue
                 path = directory / "package.json"
                 if path.exists() or path.is_symlink():
