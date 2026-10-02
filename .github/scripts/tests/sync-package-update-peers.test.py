@@ -244,7 +244,7 @@ class PeerUpdateTests(unittest.TestCase):
         manifest["workspaces"] = ["packages/**/*"]
         (self.repo / "package.json").write_text(json.dumps(manifest))
         result = self.run_script("snapshot")
-        self.assertIn("::notice::Skipping symlinked or non-directory workspace match: packages/client/README.md",
+        self.assertIn("::notice::Skipping symlinked workspace match: packages/client/README.md",
                       result.stdout)
         self.assertEqual(set(json.loads(self.snapshot.read_text())),
                          {"package.json", "packages/client/package.json"})
@@ -289,7 +289,7 @@ class PeerUpdateTests(unittest.TestCase):
                 manifest["workspaces"] = ["packages/client", pattern]
                 (self.repo / "package.json").write_text(json.dumps(manifest))
                 result = self.run_script("snapshot")
-                self.assertIn("::notice::Skipping symlinked or non-directory workspace match: packages/link",
+                self.assertIn("::notice::Skipping symlinked workspace match: packages/link",
                               result.stdout)
                 self.assertEqual(set(json.loads(self.snapshot.read_text())),
                                  {"package.json", "packages/client/package.json"})
@@ -307,21 +307,20 @@ class PeerUpdateTests(unittest.TestCase):
                 manifest["workspaces"] = ["packages/client", pattern]
                 (self.repo / "package.json").write_text(json.dumps(manifest))
                 result = self.run_script("snapshot")
-                self.assertIn("::notice::Skipping symlinked or non-directory workspace match: linked/pkg",
+                self.assertIn("::notice::Skipping symlinked workspace match: linked/pkg",
                               result.stdout)
                 self.assertEqual(set(json.loads(self.snapshot.read_text())),
                                  {"package.json", "packages/client/package.json"})
         self.assertEqual(path.read_text(), "not json")
 
-    def test_non_directory_workspace_match_is_skipped_with_escaped_notice(self):
+    def test_non_directory_workspace_match_is_skipped_without_notice(self):
         path = self.repo / "packages/client/README%.md"
         path.write_text("not a workspace")
         manifest = self.manifest()
         manifest["workspaces"] = ["packages/**/*"]
         (self.repo / "package.json").write_text(json.dumps(manifest))
         result = self.run_script("snapshot")
-        self.assertIn("::notice::Skipping symlinked or non-directory workspace match: packages/client/README%25.md",
-                      result.stdout)
+        self.assertNotIn("::notice::", result.stdout)
         self.assertEqual(set(json.loads(self.snapshot.read_text())),
                          {"package.json", "packages/client/package.json"})
         self.assertEqual(path.read_text(), "not a workspace")
