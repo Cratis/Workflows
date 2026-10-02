@@ -236,15 +236,70 @@ class PeerUpdateTests(unittest.TestCase):
         expected = before.replace(b'"^2.1.2"', b'"^2.1.3"').replace(b'"~1.4.5"', b'"~1.4.6"')
         self.assertEqual(path.read_bytes(), expected)
 
-    def test_symlinked_workspace_directory_is_refused(self):
+    def test_symlinked_non_manifest_file_under_recursive_workspace_glob_is_skipped(self):
+        outside = Path(self.temp.name) / "README.md"
+        outside.write_text("outside documentation")
+        (self.repo / "packages/client/README.md").symlink_to(outside)
+        manifest = self.manifest()
+        manifest["workspaces"] = ["packages/**/*"]
+        (self.repo / "package.json").write_text(json.dumps(manifest))
+        self.run_script("snapshot")
+        self.assertEqual(set(json.loads(self.snapshot.read_text())),
+                         {"package.json", "packages/client/package.json"})
+        self.assertEqual(outside.read_text(), "outside documentation")
+
+    def test_negated_workspace_pattern_over_symlink_is_only_an_exclusion(self):
+        outside = Path(self.temp.name) / "corpus"
+        outside.mkdir()
+        (outside / "package.json").write_text("not json")
+        (self.repo / "packages/client/corpus").symlink_to(outside, target_is_directory=True)
+        manifest = self.manifest()
+        for exclusion in ("!packages/client/corpus", "!packages/client/corpus/**"):
+            with self.subTest(exclusion=exclusion):
+                manifest["workspaces"] = ["packages/**/*", exclusion]
+                (self.repo / "package.json").write_text(json.dumps(manifest))
+                self.run_script("snapshot")
+                self.assertEqual(set(json.loads(self.snapshot.read_text())),
+                                 {"package.json", "packages/client/package.json"})
+        self.assertEqual((outside / "package.json").read_text(), "not json")
+
+    def test_symlinked_workspace_manifest_is_still_refused(self):
+        outside = Path(self.temp.name) / "outside.json"
+        outside.write_text('{"name":"outside"}\n')
+        path = self.repo / "packages/client/package.json"
+        path.unlink()
+        path.symlink_to(outside)
+        for operation in ("snapshot", "sync"):
+            with self.subTest(operation=operation):
+                result = self.run_script(operation, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Refusing symlinked manifest: packages/client/package.json", result.stderr)
+        self.assertEqual(outside.read_text(), '{"name":"outside"}\n')
+
+    def test_symlinked_workspace_directory_is_skipped(self):
         outside = Path(self.temp.name) / "outside"
         outside.mkdir()
         (outside / "package.json").write_text('{"name":"outside"}')
         (self.repo / "packages/link").symlink_to(outside, target_is_directory=True)
-        result = self.run_script("snapshot", check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Refusing symlinked manifest", result.stderr)
+        manifest = self.manifest()
+        for pattern in ("packages/*", "packages/**/*", "packages/link"):
+            with self.subTest(pattern=pattern):
+                manifest["workspaces"] = ["packages/client", pattern]
+                (self.repo / "package.json").write_text(json.dumps(manifest))
+                self.run_script("snapshot")
+                self.assertEqual(set(json.loads(self.snapshot.read_text())),
+                                 {"package.json", "packages/client/package.json"})
         self.assertEqual((outside / "package.json").read_text(), '{"name":"outside"}')
+
+    def test_positive_workspace_patterns_outside_checkout_are_still_refused(self):
+        manifest = self.manifest()
+        for pattern in ("../outside/*", str(self.repo / "packages/*")):
+            with self.subTest(pattern=pattern):
+                manifest["workspaces"] = [pattern]
+                (self.repo / "package.json").write_text(json.dumps(manifest))
+                result = self.run_script("snapshot", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Refusing manifest outside checkout", result.stderr)
 
     def test_invalid_manifest_and_missing_snapshot_fail_visibly(self):
         (self.repo / "package.json").write_text("not json")

@@ -718,6 +718,12 @@ class UpdatePackagesTests(unittest.TestCase):
                 self.assertEqual(self.run_npm(), 23)
                 self.assertNotIn(forbidden, self.calls())
 
+    def test_npm_update_and_install_steps_disable_immutable_yarn_installs(self):
+        for name in ("Update NPM packages", "Synchronize NPM peers and install"):
+            with self.subTest(step=name):
+                env = STEPS[name].split("        env:\n", 1)[1]
+                self.assertRegex(env, r"(?m)^          YARN_ENABLE_IMMUTABLE_INSTALLS: false$")
+
     def test_npm_embedded_helper_matches_script(self):
         embedded = shell(NPM_UPDATES[0]).split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0] + "\n"
         self.assertEqual(embedded, (ROOT / ".github/scripts/sync-package-update-peers.py").read_text())

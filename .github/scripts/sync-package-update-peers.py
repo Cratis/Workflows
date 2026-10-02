@@ -105,12 +105,13 @@ def snapshot(destination):
             if not isinstance(workspace, str):
                 continue
             pattern = Path(workspace.removeprefix("!"))
-            check_path(pattern)
+            if not workspace.startswith("!") and (pattern.is_absolute() or ".." in pattern.parts):
+                raise ValueError("Refusing manifest outside checkout: " + str(pattern))
             patterns.append(("!" if workspace.startswith("!") else "") + str(pattern))
         if patterns:
             # Node 22 is already installed by the workflow. Its native glob handles
             # npm-style braces/extglobs; Python glob would silently miss workspaces.
-            # Match directories first so glob cannot silently hide a symlinked workspace.
+            # Match directories first so only workspace manifests receive path checks.
             names = json.loads(subprocess.check_output(["node", "-e", """
                 const { globSync } = require('node:fs');
                 const patterns = JSON.parse(process.argv[1]);
@@ -122,9 +123,10 @@ def snapshot(destination):
                 directory = Path(name)
                 if {"node_modules", ".pnpm-store"}.intersection(directory.parts):
                     continue
-                check_path(directory)
-                if directory.is_dir():
-                    path = directory / "package.json"
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                path = directory / "package.json"
+                if path.exists() or path.is_symlink():
                     check_path(path)
                     if path.is_file():
                         capture(path)
