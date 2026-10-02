@@ -54,7 +54,7 @@ env:
   # .github/ISSUE_TEMPLATE/**; change their issue templates in their own repositories.
   # .github is Cratis/.github, the organization default template shown in repositories without their own;
   # keep it in step with this template by a pull request there.
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio","Arc","Arc.Kotlin","Arc.TypeScript","Chronicle","Chronicle.Dapr","Chronicle.Kotlin","Chronicle.Python","Chronicle.Wolverine","Prompter","Scene","Screenplay","Screenplay.CritterStack","Screenplay.Generation","Strategy","Studio","Synopsis","AI.Distribution"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio","Arc","Arc.Kotlin","Arc.TypeScript","Chronicle","Chronicle.Dapr","Chronicle.Kotlin","Chronicle.Python","Chronicle.Wolverine","Prompter","Scene","Screenplay","Screenplay.CritterStack","Screenplay.Generation","Strategy","Studio","Synopsis","AI.Distribution","Chronicle.Go","Arc.Go"]'
 
 permissions:
   contents: read

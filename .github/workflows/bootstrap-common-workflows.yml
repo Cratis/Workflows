@@ -70,7 +70,7 @@ env:
   # The ignored private and customized repositories install verify-release-notes.yml through their own
   #   reviewed change, copying the caller with their own runner fallback in its `runs-on` input (RUNNER_GATE is
   #   only an outage escape hatch, normally unset; Ensemble uses vars.ENSEMBLE_RUNNER)
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin","Chronicle.Go","Arc.Go"]'
 
 jobs:
   bootstrap:
