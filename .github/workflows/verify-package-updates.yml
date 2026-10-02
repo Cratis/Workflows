@@ -10,6 +10,9 @@ on:
       - .github/workflows/verify-package-updates.yml
       - .github/scripts/tests/update-packages.test.py
       - .github/scripts/tests/bootstrap-package-update-safety.test.py
+      - .github/scripts/sync-package-update-peers.py
+      - .github/scripts/tests/sync-package-update-peers.test.py
+      - .github/scripts/tests/fixtures/package-update-peers/**
   push:
     branches: [main]
     paths:
@@ -18,6 +21,9 @@ on:
       - .github/workflows/verify-package-updates.yml
       - .github/scripts/tests/update-packages.test.py
       - .github/scripts/tests/bootstrap-package-update-safety.test.py
+      - .github/scripts/sync-package-update-peers.py
+      - .github/scripts/tests/sync-package-update-peers.test.py
+      - .github/scripts/tests/fixtures/package-update-peers/**
 
 permissions:
   contents: read
@@ -43,3 +49,10 @@ jobs:
       - name: Exercise inline shell with local Git and stub toolchains
         # No live package updates, GitHub token, gh calls, or dependency installation.
         run: python3 .github/scripts/tests/update-packages.test.py
+      - name: Set up the same Node.js version as package updates
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify peer compatibility ranges on real manifests
+        run: python3 .github/scripts/tests/sync-package-update-peers.test.py

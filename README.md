@@ -12,6 +12,29 @@ Mix dependencies in the **calling repository**. Existing callers retain their
 runner, token fallback, ecosystem commands, and legacy direct-push/rebase behavior.
 Nothing opts a repository into PRs or a release policy automatically.
 
+NPM keeps the existing `npx npm-check-updates -u -w -x "$exclusions"` command,
+without a `--dep` override. ncu's default sections (which exclude peers) and each
+caller's `.ncurc` remain authoritative, including opt-in peer updates and exclusions
+of production or `packageManager` updates. ncu's peer-range behavior is unchanged.
+
+After ncu, an unchanged `^<pin>` or `~<pin>` peer that exactly matched a local
+production/development pin before the update follows its new exact pin **only if
+the old peer range still admits it**. Carets stay within the same major for 1.x+,
+the same minor for 0.x, and the identical version tuple for 0.0.x; tildes stay
+within the same major/minor. SemVer lower bounds and prerelease restrictions also
+apply. An out-of-range pin leaves the peer unchanged and emits a warning naming
+the manifest, package, old range and new pin; it does not fail the update. Such
+compatibility changes require manual review. Unions, lower bounds, bounded ranges,
+wildcards, unmatched peers and peers already changed by ncu are not synchronized.
+The snapshot covers the root and declared workspaces (`workspaces` or
+`workspaces.packages`), not unrelated fixtures or templates; non-object manifests
+are skipped with a notice and null/non-object dependency sections are treated as
+empty. Symlinked manifests remain refused.
+
+After installation, Yarn 2.2+ dedupes compatible transitive resolutions so a bumped
+direct range does not leave a second older instance. Yarn 1 and Yarn 2.0/2.1 skip
+dedupe.
+
 | Optional input | Default | Contract |
 |---|---|---|
 | `post-update-command` | Empty (skipped) | Trusted Bash command in the caller root, after **all** ecosystem updates and before **any** build. Runs with `-euo pipefail`; a nonzero exit blocks both publication modes. |

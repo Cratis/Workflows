@@ -20,7 +20,8 @@ HOOK = "Run post-update command"
 FREEZE = "Freeze pull request candidate before builds"
 PUBLISH = "Publish validated pull request"
 LEGACY = "Commit and push changes"
-UPDATES = ["Update NuGet packages", "Update NPM packages", "Update Gradle packages", "Update Mix packages"]
+NPM_UPDATES = ["Snapshot NPM peer pins", "Update NPM packages", "Synchronize NPM peers and install"]
+UPDATES = ["Update NuGet packages", *NPM_UPDATES, "Update Gradle packages", "Update Mix packages"]
 BUILDS = ["Build .NET", "Build NPM", "Build Gradle", "Build Mix"]
 REAL_GIT = shutil.which("git")
 NUGET_FIXTURES = Path(__file__).parent / "fixtures/nuget-sdk-10.0.401"
@@ -142,6 +143,9 @@ else:
     command = " ".join([name, *args])
     if command == os.environ.get("FAIL_NATIVE"):
         sys.exit(23)
+    if name == "yarn" and args == ["--version"]:
+        print(os.environ.get("YARN_VERSION", "4.18.1"))
+        sys.exit(0)
     if name == "dotnet" and args[:2] == ["package", "list"]:
         key = ("DOTNET_PRERELEASE" if "--include-prerelease" in args else
                "DOTNET_OUTDATED" if "--outdated" in args else "DOTNET_INVENTORY")
@@ -150,6 +154,11 @@ else:
     if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_EXIT"):
         print(os.environ.get("UPDATE_OUTPUT", ""))
         sys.exit(int(os.environ["UPDATE_EXIT"]))
+    if name == "npx" and os.environ.get("NPM_NEW_PIN"):
+        path = Path("package.json")
+        manifest = json.loads(path.read_text())
+        manifest["devDependencies"]["ms"] = os.environ["NPM_NEW_PIN"]
+        path.write_text(json.dumps(manifest, indent=2) + "\n")
     update = (name == "dotnet" and args[:2] == ["package", "update"]) or command in ("npx npm-check-updates -u -w -x typescript",
                          "gradle useLatestVersions --no-daemon", "mix deps.update --all")
     if update and os.environ.get("NO_UPDATES") != "1":
@@ -195,7 +204,7 @@ class UpdatePackagesTests(unittest.TestCase):
             "REMOTE": str(self.remote), "GH_TOKEN": "offline-placeholder",
             "CALLER_REPOSITORY": "Cratis/Fixture", "PUBLICATION_MODE": "pull-request", "PR_LABEL": "",
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "NPM_PACKAGE_EXCLUSIONS": "typescript",
-            "NUGET_PACKAGE_EXCLUSIONS": "",
+            "NUGET_PACKAGE_EXCLUSIONS": "", "RUNNER_TEMP": str(self.root),
         }
         for name in ["git", "gh", "dotnet", "yarn", "npx", "gradle", "mix"]:
             path = self.bin / name
@@ -230,6 +239,8 @@ class UpdatePackagesTests(unittest.TestCase):
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
         if name == PREFLIGHT:
             self.env.update(EXPECTED_BASE=values.get("base", ""), BASE_BRANCH=values.get("base_branch", ""))
+        if name == "Snapshot NPM peer pins":
+            self.env["PEER_UPDATE_DIR"] = values.get("directory", "")
         if name == FREEZE:
             self.changed = values.get("changed") == "true"
             self.env.update(CANDIDATE_COMMIT=values.get("commit", ""), CANDIDATE_TREE=values.get("tree", ""))
@@ -238,6 +249,13 @@ class UpdatePackagesTests(unittest.TestCase):
     def assert_step_ok(self, name):
         status = self.run_step(name)
         self.assertEqual(status, 0, self.last_result.stdout + self.last_result.stderr)
+
+    def run_npm(self):
+        for name in NPM_UPDATES:
+            status = self.run_step(name)
+            if status:
+                return status
+        return 0
 
     def prepare(self, hook="printf 'updated image\\n' > Dockerfile", builds=True):
         # Model Actions' default success() gate; structural tests below protect that gate.
@@ -276,6 +294,8 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertLess(names.index(PREFLIGHT), names.index(UPDATES[0]))
         for name in UPDATES:
             self.assertLess(names.index(name), names.index(HOOK))
+        for before, after in zip(NPM_UPDATES, NPM_UPDATES[1:]):
+            self.assertLess(names.index(before), names.index(after))
         self.assertLess(names.index(HOOK), names.index(FREEZE))
         for name in BUILDS:
             self.assertLess(names.index(FREEZE), names.index(name))
@@ -288,7 +308,7 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertIn("if: inputs.publication-mode == 'direct'", STEPS[LEGACY])
         self.assertNotIn("continue-on-error:", SOURCE)
         self.assertNotIn("always()", SOURCE)
-        for name in [PREFLIGHT, HOOK, FREEZE, PUBLISH, "Update NPM packages"]:
+        for name in [PREFLIGHT, HOOK, FREEZE, PUBLISH, *NPM_UPDATES]:
             self.assertNotIn("${{", shell(name))
         inputs = SOURCE.split("    inputs:\n", 1)[1].split("    secrets:", 1)[0]
         for name, default in [("publication-mode", "direct"), ("post-update-command", "''"),
@@ -303,7 +323,7 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertIsNone(re.search(r"^\s*permissions:", SOURCE, re.M))
 
     def test_shell_syntax(self):
-        for name in [PREFLIGHT, HOOK, FREEZE, PUBLISH]:
+        for name in [PREFLIGHT, HOOK, FREEZE, PUBLISH, *NPM_UPDATES]:
             with self.subTest(step=name):
                 result = subprocess.run(["/bin/bash", "-n"], input=shell(name), text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -662,9 +682,104 @@ class UpdatePackagesTests(unittest.TestCase):
     def test_npm_exclusions_are_data_not_shell_source(self):
         value = 'typescript,$(touch injected);"quoted"'
         self.env["NPM_PACKAGE_EXCLUSIONS"] = value
-        self.assert_step_ok("Update NPM packages")
+        self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
         self.assertIn(["npx", "npm-check-updates", "-u", "-w", "-x", value], self.calls())
         self.assertFalse((self.repo / "injected").exists())
+
+    def test_npm_updates_then_installs_and_dedupes_supported_yarn(self):
+        for version in ("2.2.0", "2.4.3", "3.0.0", "4.18.1"):
+            with self.subTest(version=version):
+                self.log.unlink(missing_ok=True)
+                self.env["YARN_VERSION"] = version
+                self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+                calls = self.calls()
+                self.assertEqual(self.calls("npx"), [["npx", "npm-check-updates", "-u", "-w", "-x", "typescript"]])
+                self.assertLess(calls.index(self.calls("npx")[0]), calls.index(["yarn", "install"]))
+                self.assertLess(calls.index(["yarn", "install"]), calls.index(["yarn", "dedupe"]))
+                self.assertEqual(self.calls("yarn").count(["yarn", "dedupe"]), 1)
+
+    def test_npm_legacy_yarn_installs_without_dedupe(self):
+        for version in ("1.22.22", "2.0.0", "2.1.1"):
+            with self.subTest(version=version):
+                self.log.unlink(missing_ok=True)
+                self.env.update(YARN_VERSION=version, FAIL_NATIVE="yarn dedupe")
+                self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+                self.assertIn(["yarn", "install"], self.calls("yarn"))
+                self.assertNotIn(["yarn", "dedupe"], self.calls("yarn"))
+
+    def test_npm_update_install_and_version_failures_stop_the_step(self):
+        for command, forbidden in (
+                ("npx npm-check-updates -u -w -x typescript", ["yarn", "install"]),
+                ("yarn install", ["yarn", "dedupe"]),
+                ("yarn --version", ["yarn", "dedupe"])):
+            with self.subTest(command=command):
+                self.log.unlink(missing_ok=True)
+                self.env["FAIL_NATIVE"] = command
+                self.assertEqual(self.run_npm(), 23)
+                self.assertNotIn(forbidden, self.calls())
+
+    def test_npm_update_and_install_steps_disable_immutable_yarn_installs(self):
+        for name in ("Update NPM packages", "Synchronize NPM peers and install"):
+            with self.subTest(step=name):
+                env = STEPS[name].split("        env:\n", 1)[1]
+                self.assertRegex(env, r"(?m)^          YARN_ENABLE_IMMUTABLE_INSTALLS: false$")
+
+    def test_npm_embedded_helper_matches_script(self):
+        embedded = shell(NPM_UPDATES[0]).split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0] + "\n"
+        self.assertEqual(embedded, (ROOT / ".github/scripts/sync-package-update-peers.py").read_text())
+
+    def test_npm_synchronizes_only_tracking_peers_before_install(self):
+        manifest = {"devDependencies": {"ms": "2.1.2"},
+                    "peerDependencies": {"ms": "^2.1.2", "react": "^18.0.0 || ^19.0.0"}}
+        (self.repo / "package.json").write_text(json.dumps(manifest))
+        self.env["NPM_NEW_PIN"] = "2.1.3"
+        self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+        after = json.loads((self.repo / "package.json").read_text())
+        self.assertEqual(after["peerDependencies"], {"ms": "^2.1.3", "react": "^18.0.0 || ^19.0.0"})
+
+    def test_npm_command_does_not_override_caller_dependency_section_configuration(self):
+        for config in ({"dep": ["dev"]}, {"dep": ["prod", "dev", "peer", "optional"]},
+                       {"mergeConfig": True, "dep": ["peer"]}):
+            with self.subTest(config=config):
+                self.log.unlink(missing_ok=True)
+                path = self.repo / ".ncurc.json"
+                contents = json.dumps(config)
+                path.write_text(contents)
+                self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+                self.assertEqual(self.calls("npx"), [["npx", "npm-check-updates", "-u", "-w", "-x", "typescript"]])
+                self.assertEqual(path.read_text(), contents)
+
+    def test_npm_out_of_range_pin_warns_without_blocking_install_or_dedupe(self):
+        manifest = {"devDependencies": {"ms": "1.2.3"}, "peerDependencies": {"ms": "^1.2.3"}}
+        (self.repo / "package.json").write_text(json.dumps(manifest))
+        self.env["NPM_NEW_PIN"] = "2.0.0"
+        self.assertEqual(self.run_npm(), 0, self.last_result.stderr)
+        after = json.loads((self.repo / "package.json").read_text())
+        self.assertEqual(after["peerDependencies"], {"ms": "^1.2.3"})
+        self.assertIn("::warning::package.json: ms peer ^1.2.3 unchanged; new pin 2.0.0", self.last_result.stdout)
+        self.assertIn(["yarn", "install"], self.calls("yarn"))
+        self.assertIn(["yarn", "dedupe"], self.calls("yarn"))
+
+    def test_npm_sync_failure_blocks_install_builds_and_publication(self):
+        self.assert_step_ok("Snapshot NPM peer pins")
+        self.assert_step_ok("Update NPM packages")
+        (Path(self.env["PEER_UPDATE_DIR"]) / "manifests.json").write_text("invalid json")
+        self.assertNotEqual(self.run_step("Synchronize NPM peers and install"), 0)
+        self.assertEqual(self.calls("yarn"), [])
+        self.assert_not_published()
+
+    def test_npm_invalid_yarn_version_fails_closed(self):
+        self.env["YARN_VERSION"] = "unknown"
+        self.assertNotEqual(self.run_npm(), 0)
+        self.assertNotIn(["yarn", "dedupe"], self.calls("yarn"))
+
+    def test_npm_dedupe_failure_blocks_builds_and_publication(self):
+        self.env["FAIL_NATIVE"] = "yarn dedupe"
+        self.assertFalse(self.pipeline())
+        self.assertEqual(self.last_result.returncode, 23)
+        self.assertFalse(any(call[:2] in (["dotnet", "build"], ["yarn", "ci"])
+                             for call in self.calls()))
+        self.assert_not_published()
 
     def test_direct_hook_failure_also_stops_before_builds(self):
         self.env.update(PUBLICATION_MODE="direct", POST_UPDATE_COMMAND="false; true")

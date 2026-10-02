@@ -1,0 +1,40 @@
+{
+  "name": "peer-compatibility-fixture",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "packageManager": "npm@9.0.0",
+  "dependencies": {
+    "production-pin": "1.2.3",
+    "@cratis/arc": "20.3.1"
+  },
+  "devDependencies": {
+    "react": "19.1.0",
+    "eslint": "9.0.0",
+    "primereact": "10.9.9",
+    "wildcard": "1.0.0",
+    "zero-unmatched": "0.2.1",
+    "zero-tracking": "0.2.1",
+    "tilde-tracking": "1.4.5",
+    "caret-tracking": "2.1.2",
+    "unchanged": "1.2.3",
+    "ranged-pin": "^1.0.0",
+    "unmatched": "1.1.0"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "eslint": ">=9",
+    "primereact": ">=10.9.9 <11",
+    "@cratis/arc": ">=20.3.1 <23",
+    "wildcard": "*",
+    "unbounded": ">=18",
+    "zero-unmatched": "^0.2.0",
+    "zero-tracking": "^0.2.1",
+    "production-pin": "^1.2.3",
+    "tilde-tracking": "~1.4.5",
+    "caret-tracking": "^2.1.2",
+    "unchanged": "^1.2.3",
+    "ranged-pin": "^1.0.0",
+    "unmatched": "^1.0.0",
+    "peer-only": "^3.0.0"
+  }
+}
