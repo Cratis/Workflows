@@ -267,7 +267,7 @@ jobs:
                       "Manual apply requires the exact pull request to be closed")
 
           def main():
-              token = os.environ.get("PACKAGE_CLEANUP_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+              token = os.environ.get("PACKAGE_CLEANUP_TOKEN", "").strip() or os.environ.get("GH_TOKEN", "").strip()
               require(bool(token.strip()), "PACKAGE_CLEANUP_TOKEN or PAT_WORKFLOWS is required")
               caller = os.environ.get("CALLER_REPO", "")
               manual = os.environ.get("EVENT_NAME") == "workflow_dispatch"

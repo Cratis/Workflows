@@ -418,7 +418,7 @@ class CleanupTests(unittest.TestCase):
                 self.assertEqual(len(result[3].deletes), 1)
 
     def test_absent_or_empty_cleanup_token_falls_back_to_pat_workflows(self):
-        for environment in [{}, {"PACKAGE_CLEANUP_TOKEN": ""}]:
+        for environment in [{}, {"PACKAGE_CLEANUP_TOKEN": ""}, {"PACKAGE_CLEANUP_TOKEN": "  \t\n"}]:
             with self.subTest(environment=environment):
                 result = self.run_cleanup(**environment)
                 self.assertEqual(result[0], 0, result[2])
