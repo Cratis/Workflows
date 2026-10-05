@@ -55,6 +55,13 @@ on:
         type: string
         required: false
         default: ''
+      node-version:
+        description: >-
+          Node.js version used for NPM updates. Defaults to 24 to match the
+          Cratis JavaScript repositories (engines.node >=23).
+        type: string
+        required: false
+        default: '24'
       post-update-command:
         description: >-
           Optional trusted Bash command in the caller repository root, after all
@@ -195,7 +202,7 @@ jobs:
         if: steps.detect.outputs.update_npm == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: ${{ inputs.node-version }}
           # setup-node v5+ auto-enables caching when package.json declares npm as its
           # packageManager. This workflow installs with Yarn and must always resolve
           # the latest packages, so keep the v4 behavior of no automatic cache.
