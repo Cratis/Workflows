@@ -514,8 +514,14 @@ The check's program is inline in the reusable workflow, so the rules that run ar
 for an explicitly targeted manual dry run or approved retry.
 
 Deletes only exactly matching, repository-associated container/NuGet versions after
-complete preflight, and verifies their absence. The reusable contract remains the
-required numeric `pull_request` input and `PAT_WORKFLOWS` secret. See
+complete preflight, and verifies their absence. HTTP 401/403 from the organization
+package inventory instead reports **could not run: package inventory not authorized**
+in the job summary and a warning, exits successfully, and deletes nothing. This is
+not a completed cleanup: provide a classic PAT with `read:packages` and
+`delete:packages`, package-admin rights, and organization SSO authorization if
+required. All other errors, including authorization failures during version
+inventory, preflight, deletion, or readback, still fail closed. The reusable contract
+remains the required numeric `pull_request` input and `PAT_WORKFLOWS` secret. See
 [Cleaning up PR artifacts](#cleaning-up-pr-artifacts) for matching rules, permissions,
 manual approval inputs, recovery limitations, and offline verification.
 

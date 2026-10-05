@@ -110,7 +110,7 @@ class FakeAPI:
 
 
 class CleanupTests(unittest.TestCase):
-    def run_cleanup(self, api=None, manual=False, **environment):
+    def run_cleanup(self, api=None, manual=False, expected_summary=None, **environment):
         api = api or FakeAPI()
         env = {"GH_TOKEN": TOKEN, "CALLER_REPO": REPOSITORY, "PR_NUMBER": "42",
                "EVENT_NAME": "pull_request", "WORKFLOW_REF": "refs/heads/main"}
@@ -132,7 +132,12 @@ class CleanupTests(unittest.TestCase):
                     status = error.code
             path = Path(env["PLAN_PATH"])
             plan = json.loads(path.read_text()) if path.exists() else None
+            summary_path = Path(env["GITHUB_STEP_SUMMARY"])
+            summary = summary_path.read_text() if summary_path.exists() else ""
             self.assertNotIn(TOKEN, output.getvalue())
+            self.assertNotIn(TOKEN, summary)
+            if expected_summary is not None:
+                self.assertIn(expected_summary, summary)
             return status, plan, output.getvalue(), api
 
     def assert_failed_without_deletes(self, result):
@@ -243,9 +248,46 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(plan["targets"], [])
         self.assertEqual(api.deletes, [])
 
+    def test_package_inventory_not_authorized_is_neutral_without_deletion(self):
+        message = "Could not run: package inventory not authorized. No versions deleted."
+        for status in [401, 403]:
+            for mode in ["reusable", "dry-run", "apply"]:
+                for failing in ["package_type=container", "package_type=nuget"]:
+                    with self.subTest(status=status, mode=mode, failing=failing):
+                        api = FakeAPI()
+                        # The second family can fail after a matching target was already inventoried.
+                        api.packages["container"] = [package("container", "image")]
+                        api.versions[("container", "image")] = [version(tags=["pr42"])]
+                        api.hook = lambda m, e: Response(status=status, raw=TOKEN.encode()) if failing in e else None
+                        env = self.approved() if mode == "apply" else {}
+                        result = self.run_cleanup(api, manual=mode != "reusable", expected_summary=message, **env)
+                        self.assert_neutral_without_deletes(result)
+
+    def assert_neutral_without_deletes(self, result):
+        status, plan, output, api = result
+        self.assertEqual(status, 0, output)
+        self.assertIsNone(plan)
+        self.assertEqual(api.deletes, [])
+        self.assertIn("::warning::Could not run: package inventory not authorized", output)
+        for requirement in ["classic PAT", "fine-grained PATs", "read:packages", "delete:packages",
+                            "package-admin", "SSO authorization"]:
+            self.assertIn(requirement, output)
+        self.assertNotIn("::error::", output)
+        self.assertNotIn("Cleanup verified:", output)
+
+    def test_package_inventory_later_page_not_authorized_discards_partial_inventory(self):
+        for status in [401, 403]:
+            with self.subTest(status=status):
+                api = FakeAPI()
+                api.packages["nuget"] = [package(name=f"Package{i}", identity=i) for i in range(1, 102)]
+                api.versions[("nuget", "Package1")] = [version()]
+                api.hook = lambda m, e: Response(status=status) if "package_type=nuget" in e and "page=2" in e else None
+                self.assert_neutral_without_deletes(self.run_cleanup(api))
+
     def test_listing_failures_in_each_family_and_level(self):
         for failing in ["package_type=container", "package_type=nuget", "container/image/versions?", "nuget/Cratis.Test/versions?"]:
-            for status in [401, 403, 404, 429, 500]:
+            statuses = [404, 429, 500] if failing.startswith("package_type=") else [401, 403, 404, 429, 500]
+            for status in statuses:
                 with self.subTest(failing=failing, status=status):
                     api = FakeAPI()
                     api.packages["container"] = [package("container", "image")]
@@ -437,13 +479,17 @@ class CleanupTests(unittest.TestCase):
         self.assert_failed_without_deletes(self.run_cleanup(api))
 
     def test_http_error_body_headers_and_redirect_are_not_logged(self):
-        for status in [302, 403]:
+        for status in [302, 401, 403, 500]:
             api = FakeAPI()
             def fail(method, endpoint):
                 raise urllib.error.HTTPError("https://api.github.com/" + TOKEN, status, TOKEN,
                                              {"Location": "https://evil.example/" + TOKEN}, io.BytesIO(TOKEN.encode()))
             api.hook = fail
-            self.assert_failed_without_deletes(self.run_cleanup(api))
+            result = self.run_cleanup(api)
+            if status in (401, 403):
+                self.assert_neutral_without_deletes(result)
+            else:
+                self.assert_failed_without_deletes(result)
 
     def test_untrusted_plan_cannot_print_token(self):
         api = FakeAPI()

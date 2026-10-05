@@ -74,6 +74,9 @@ jobs:
           class CleanupError(Exception):
               pass
 
+          class InventoryNotAuthorized(CleanupError):
+              pass
+
           def require(condition, message):
               if not condition:
                   raise CleanupError(message)
@@ -115,6 +118,9 @@ jobs:
                       raise CleanupError("API transport failed; no automatic retry") from None
                   with response:
                       status = response.code
+                      if (method == "GET" and endpoint.split("?", 1)[0] == "orgs/Cratis/packages"
+                              and status in (401, 403)):
+                          raise InventoryNotAuthorized("Package inventory not authorized")
                       require(status in allowed, f"API {method} failed (HTTP {status})")
                       # Never log API bodies, headers, URLs from errors, or exception text.
                       data = parse_json(response.read()) if status == 200 else None
@@ -283,7 +289,18 @@ jobs:
               api = API(token)
               if manual and not dry_run:
                   verify_closed(api, repository, pr)
-              plan = inventory(api, repository, pr)
+              try:
+                  plan = inventory(api, repository, pr)
+              except InventoryNotAuthorized:
+                  message = ("Could not run: package inventory not authorized. No versions deleted. "
+                             "Organization package inventory requires a classic PAT (fine-grained PATs "
+                             "are not supported) with read:packages and delete:packages scopes, "
+                             "package-admin rights, and organization SSO authorization if enforced.")
+                  print(f"::warning::{message}")
+                  if os.environ.get("GITHUB_STEP_SUMMARY"):
+                      with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                          summary.write(f"### PR package cleanup\n\n{message}\n")
+                  return
               if expected is not None:
                   # Comparing canonical JSON also distinguishes booleans from numeric IDs.
                   require(json.dumps(expected, sort_keys=True) == json.dumps(plan, sort_keys=True),
