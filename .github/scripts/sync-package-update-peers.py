@@ -109,7 +109,7 @@ def snapshot(destination):
                 raise ValueError("Refusing manifest outside checkout: " + str(pattern))
             patterns.append(("!" if workspace.startswith("!") else "") + str(pattern))
         if patterns:
-            # Node 22 is already installed by the workflow. Its native glob handles
+            # Node (24 by default) is already installed by the workflow. Its native glob handles
             # npm-style braces/extglobs; Python glob would silently miss workspaces.
             # Match directories first so only workspace manifests receive path checks.
             names = json.loads(subprocess.check_output(["node", "-e", """

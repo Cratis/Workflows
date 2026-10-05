@@ -55,6 +55,14 @@ on:
         type: string
         required: false
         default: ''
+      node-version:
+        description: >-
+          Node.js version used for NPM updates. Defaults to 24, which satisfies
+          the Cratis JavaScript repositories' engine floors. Minimum is Node 22
+          (the peer sync script needs fs.globSync with array exclude, 22.14/23.7+).
+        type: string
+        required: false
+        default: '24'
       post-update-command:
         description: >-
           Optional trusted Bash command in the caller repository root, after all
@@ -195,11 +203,23 @@ jobs:
         if: steps.detect.outputs.update_npm == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: ${{ inputs.node-version }}
           # setup-node v5+ auto-enables caching when package.json declares npm as its
           # packageManager. This workflow installs with Yarn and must always resolve
           # the latest packages, so keep the v4 behavior of no automatic cache.
           package-manager-cache: false
+
+      - name: Validate Node.js version
+        if: steps.detect.outputs.update_npm == 'true'
+        env:
+          NODE_VERSION: ${{ inputs.node-version }}
+        run: |
+          major="${NODE_VERSION#v}"
+          major="${major%%.*}"
+          if ! [[ "$major" =~ ^[0-9]+$ ]] || [ "$major" -lt 22 ]; then
+            echo "::error::node-version '$NODE_VERSION' is not supported; Node 22 or newer is required."
+            exit 1
+          fi
 
       - name: Install NPM dependencies
         if: steps.detect.outputs.update_npm == 'true'
@@ -499,7 +519,7 @@ jobs:
                           raise ValueError("Refusing manifest outside checkout: " + str(pattern))
                       patterns.append(("!" if workspace.startswith("!") else "") + str(pattern))
                   if patterns:
-                      # Node 22 is already installed by the workflow. Its native glob handles
+                      # Node (24 by default) is already installed by the workflow. Its native glob handles
                       # npm-style braces/extglobs; Python glob would silently miss workspaces.
                       # Match directories first so only workspace manifests receive path checks.
                       names = json.loads(subprocess.check_output(["node", "-e", """
