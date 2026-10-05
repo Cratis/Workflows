@@ -421,7 +421,7 @@ This workflow is distributed to all Cratis repositories via the common bootstrap
 This workflow is included in the common workflow bootstrap process and is automatically propagated to all Cratis repositories alongside other default workflows.
 
 > [!NOTE]
-> See [publish.template.yml](/.github/workflows/publish.template.yml) for an example of a publish workflow that this auto-approve workflow will watch.
+> See [publish.template.yml](/.github/templates/publish.template.yml) for an example of a publish workflow that this auto-approve workflow will watch. Copy it to `.github/workflows/publish.yml` in the consuming repository and replace the placeholder package-publishing steps. It lives outside `.github/workflows` here because it is an incomplete example, not an executable workflow.
 
 ---
 
