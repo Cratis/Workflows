@@ -7,10 +7,15 @@ applyTo: "**/*"
 | Path | Holds |
 | --- | --- |
 | `.github/workflows/` | the reusable (`workflow_call`) and organization-wide workflows |
+| `.github/templates/` | incomplete workflow examples to copy and customize in consuming repositories |
 | `.github/scripts/` | the scripts those workflows run, plus `update-ai-profile-subscription.mjs` (the subscription update controller) |
 | `.github/scripts/tests/` | script tests wired into `verify-*` workflows |
 
-Key workflows: `publish.template.yml` (publish template), `cleanup-pr-artifacts`,
+The publish example lives at `.github/templates/publish.template.yml`, outside the
+executable workflow directory. Neither bootstrap nor PR-template propagation
+consumes it; repositories copy and customize it manually.
+
+Key workflows: `cleanup-pr-artifacts`,
 `auto-approve-publish-deployments`, `bootstrap-common-workflows` (installs the
 common wrappers organization-wide), `propagate-pr-templates`, `verify-*` gates,
 and `update-ai-profile-subscription.yml` (reviewed Cratis AI profile updates —
