@@ -17,8 +17,9 @@ consumes it; repositories copy and customize it manually.
 
 Key workflows: `cleanup-pr-artifacts`,
 `auto-approve-publish-deployments`, `bootstrap-common-workflows` (installs the
-common wrappers organization-wide), `propagate-pr-templates`, `verify-*` gates,
-and `update-ai-profile-subscription.yml` (reviewed Cratis AI profile updates —
+common wrappers organization-wide), `propagate-pr-templates`, `verify-*` gates
+(including `verify-bootstrap-schedules.yml` for deterministic weekly package-update
+schedules), and `update-ai-profile-subscription.yml` (reviewed Cratis AI profile updates —
 see README's *Reviewed Cratis AI profile updates*).
 
 The legacy Copilot synchronization system (all-to-all propagation,
