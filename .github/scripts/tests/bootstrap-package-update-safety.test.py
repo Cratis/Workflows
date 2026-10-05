@@ -64,7 +64,7 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
             "Studio", "Direct", "Ensemble", "Infrastructure", "Experiments", "Strategy", "Identity",
             "Ante", "Chronicle.Elixir", "Components", "Orleans", "AI.Distribution",
             "Arc.TypeScript", "Chronicle.Python", "Eventmodelers-Build-Kit-Java", "Eventmodelers-Build-Kit-Kotlin",
-            "Chronicle.Go", "Arc.Go",
+            "Chronicle.Go", "Arc.Go", "Fundamentals.Go",
         ])
         self.assertIn("# Stage - owns its reviewed package-update/kernel guard workflow and pin;", BOOTSTRAP)
         self.assertIn("#   bootstrap must not overwrite it", BOOTSTRAP)
