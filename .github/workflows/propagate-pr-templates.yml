@@ -49,13 +49,13 @@ env:
   #   classification
   # Prompter, Synopsis - their own layout: a Summary with `###` sections (Prompter), a shortened preamble
   #   and bullets without issue references (Synopsis)
-  # Chronicle.Go, Arc.Go - Go language ports with their own issue labels and a lint-clean pull request template
+  # Chronicle.Go, Arc.Go, Fundamentals.Go - Go language ports with their own issue labels and a lint-clean pull request template
   # AI.Distribution - no longer in use; its branch protection also rejects direct pushes
   # Ignoring a repository skips it entirely, so the repositories above also stop receiving updates to
   # .github/ISSUE_TEMPLATE/**; change their issue templates in their own repositories.
   # .github is Cratis/.github, the organization default template shown in repositories without their own;
   # keep it in step with this template by a pull request there.
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio","Arc","Arc.Kotlin","Arc.TypeScript","Chronicle","Chronicle.Dapr","Chronicle.Kotlin","Chronicle.Python","Chronicle.Wolverine","Prompter","Scene","Screenplay","Screenplay.CritterStack","Screenplay.Generation","Strategy","Studio","Synopsis","AI.Distribution","Chronicle.Go","Arc.Go"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Dockerfiles",".github","StudioIssues","cratis.studio","Arc","Arc.Kotlin","Arc.TypeScript","Chronicle","Chronicle.Dapr","Chronicle.Kotlin","Chronicle.Python","Chronicle.Wolverine","Prompter","Scene","Screenplay","Screenplay.CritterStack","Screenplay.Generation","Strategy","Studio","Synopsis","AI.Distribution","Chronicle.Go","Arc.Go","Fundamentals.Go"]'
 
 permissions:
   contents: read
