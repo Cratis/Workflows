@@ -136,6 +136,7 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
         runs, candidates, seen_runs, failures = [], [], set(), Counter()
         inventory_errors = []
         cursor = until
+        completed_window = False
         try:
             while cursor > since:
                 window_start = max(cursor - dt.timedelta(days=1), since)
@@ -148,32 +149,42 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                         # Public repositories use hosted runners and need run-level data only.
                         if visibility == "private":
                             candidates.append((full, visibility, run))
+                    completed_window = True
                 except CollectionStopped:
                     raise
                 except APIError:
                     failures["Run inventory incomplete"] += 1
                 cursor = window_start
         except CollectionStopped:
-            inventory_errors.append(f"Run inventory stopped before completing {full}; older runs may be missing.")
+            if not completed_window:
+                inventory_errors.append(f"Run inventory not started for {full}; all runs are missing.")
+            else:
+                inventory_errors.append(f"Run inventory stopped before completing {full}; "
+                                        f"runs created before {cursor.strftime('%Y-%m-%dT%H:%M:%SZ')} are missing.")
         inventory_errors.extend(f"{kind} for {full}: {count} daily windows." for kind, count in failures.items())
         return runs, candidates, inventory_errors
 
-    def job_inventory(candidate):
+    def job_inventory(candidate, page):
         full, visibility, run = candidate
         found = []
         try:
-            # Each run is independent: a busy repository uses the entire bounded
-            # pool instead of serializing thousands of job requests on one worker.
-            # The scheduler reserves page one in priority order before submission;
-            # workers reserve any additional pages from the same shared budget.
-            get_jobs = lambda endpoint: request.fetch(endpoint) if endpoint.endswith("&page=1") else request(endpoint)
-            for job in pages(get_jobs, f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all", "jobs"):
+            # Fetch only the page reserved by the scheduler; continuation pages
+            # compete with other runs for the same newest-first request budget.
+            response = request.fetch(f"repos/{full}/actions/runs/{run['id']}/jobs?filter=all&per_page=100&page={page}")
+            items = response["jobs"]
+            if not isinstance(items, list):
+                raise APIError("Invalid API listing")
+            for job in items:
                 found.append((full, visibility, run.get("name") or "Unnamed workflow", job))
+            if len(items) >= 100:
+                if page == 1000:
+                    raise APIError("API pagination limit exceeded")
+                return found, None, page + 1
         except CollectionStopped:
-            return found, "Job inventory stopped before completing listed private runs"
+            return found, "Job inventory stopped before completing listed private runs", None
         except (APIError, KeyError, ValueError, UnicodeError):
-            return found, "Job or runner inventory incomplete"
-        return found, None
+            return found, "Job or runner inventory incomplete", None
+        return found, None, None
 
     active = [repo for repo in repos if not repo.get("archived")]
     active.sort(key=lambda repo: not (repo.get("private") or repo.get("visibility") == "private"))
@@ -181,6 +192,11 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
     private_repos = deque(repo for repo in active if repo.get("private") or repo.get("visibility") == "private")
     public_repos = deque(repo for repo in active if not (repo.get("private") or repo.get("visibility") == "private"))
     candidates, pending, private_inventories = [], {}, set()
+
+    def queue_jobs(candidate, page):
+        created = timestamp(candidate[2].get("created_at")) or since
+        heapq.heappush(candidates, (-created.timestamp(), candidate[0], candidate[2]["id"], page, candidate))
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         while private_repos or public_repos or candidates or pending:
             # Inventory every private repository before jobs so a budget cut drops
@@ -196,28 +212,30 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                 elif public_repos:
                     pending[pool.submit(inventory, public_repos.popleft())] = None
                 elif candidates:
-                    candidate = heapq.heappop(candidates)[3]
+                    page, candidate = heapq.heappop(candidates)[3:]
                     try:
                         request.reserve()
                     except CollectionStopped:
                         job_failures[(candidate[0], "Job inventory stopped before completing listed private runs")] += 1
                         continue
-                    pending[pool.submit(job_inventory, candidate)] = candidate
+                    pending[pool.submit(job_inventory, candidate, page)] = (candidate, page)
                 else:
                     break
             completed, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed:
-                candidate = pending.pop(future)
-                if candidate is None:
+                task = pending.pop(future)
+                if task is None:
                     private_inventories.discard(future)
                     repo_runs, repo_candidates, repo_errors = future.result()
                     runs.extend(repo_runs)
                     for entry in repo_candidates:
-                        created = timestamp(entry[2].get("created_at")) or since
-                        heapq.heappush(candidates, (-created.timestamp(), entry[0], entry[2]["id"], entry))
+                        queue_jobs(entry, 1)
                     errors.extend(repo_errors)
                     continue
-                found, failure = future.result()
+                candidate, _ = task
+                found, failure, continuation = future.result()
+                if continuation is not None:
+                    queue_jobs(candidate, continuation)
                 if failure:
                     job_failures[(candidate[0], failure)] += 1
                 for entry in found:
