@@ -136,12 +136,15 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
         runs, candidates, seen_runs, failures = [], [], set(), Counter()
         inventory_errors = []
         cursor = until
-        completed_window = False
         try:
             while cursor > since:
+                missing_before = cursor
                 window_start = max(cursor - dt.timedelta(days=1), since)
                 try:
                     for run in window_runs(request, full, window_start, cursor):
+                        created = timestamp(run.get("created_at"))
+                        if created is not None:
+                            missing_before = min(missing_before, created)
                         if run["id"] in seen_runs:
                             continue  # GitHub's range endpoints are inclusive.
                         seen_runs.add(run["id"])
@@ -149,18 +152,17 @@ def collect(get, owner, since, until, workers=8, max_seconds=480):
                         # Public repositories use hosted runners and need run-level data only.
                         if visibility == "private":
                             candidates.append((full, visibility, run))
-                    completed_window = True
                 except CollectionStopped:
                     raise
                 except APIError:
                     failures["Run inventory incomplete"] += 1
                 cursor = window_start
         except CollectionStopped:
-            if not completed_window:
+            if not runs and cursor == until:
                 inventory_errors.append(f"Run inventory not started for {full}; all runs are missing.")
             else:
                 inventory_errors.append(f"Run inventory stopped before completing {full}; "
-                                        f"runs created before {cursor.strftime('%Y-%m-%dT%H:%M:%SZ')} are missing.")
+                                        f"runs created before {missing_before.strftime('%Y-%m-%dT%H:%M:%SZ')} may be missing.")
         inventory_errors.extend(f"{kind} for {full}: {count} daily windows." for kind, count in failures.items())
         return runs, candidates, inventory_errors
 

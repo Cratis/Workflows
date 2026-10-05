@@ -544,7 +544,7 @@ class UsageReportTests(unittest.TestCase):
         self.assertEqual(len(data[3]), 201)
         self.assertIn("Job inventory stopped before completing listed private runs for Cratis/Private: 2 runs.", data[4])
 
-    def test_no_completed_run_window_reports_all_runs_missing(self):
+    def test_first_window_budget_cut_distinguishes_unstarted_and_partial_inventories(self):
         for partial_page in (False, True):
             with self.subTest(partial_page=partial_page):
                 calls = []
@@ -556,12 +556,42 @@ class UsageReportTests(unittest.TestCase):
                         return [PRIVATE]
                     if endpoint == "orgs/Cratis":
                         return {"total_private_repos": 1}
-                    return {"workflow_runs": [{"id": i} for i in range(100)]}
+                    return {"workflow_runs": [{"id": i, "created_at": "2026-09-30T00:00:00Z"}
+                                             for i in range(100)]}
                 data = report.collect(get, "Cratis", SINCE, UNTIL, workers=1)
-                self.assertIn("Run inventory not started for Cratis/Private; all runs are missing.", data[4])
+                if partial_page:
+                    self.assertIn("Run inventory stopped before completing Cratis/Private; "
+                                  "runs created before 2026-09-30T00:00:00Z may be missing.", data[4])
+                    self.assertFalse(any("all runs are missing" in error for error in data[4]))
+                else:
+                    self.assertIn("Run inventory not started for Cratis/Private; all runs are missing.", data[4])
                 self.assertNotIn("older runs may be missing", "\n".join(data[4]))
                 self.assertEqual(len(data[2]), 100 if partial_page else 0)
                 self.assertEqual(len(calls), 4 if partial_page else 3)
+
+    def test_failed_run_windows_then_budget_cut_reports_partial_inventory_consistently(self):
+        for partial_page in (False, True):
+            with self.subTest(partial_page=partial_page):
+                def get(endpoint):
+                    if endpoint == "rate_limit":
+                        # Metadata, then two failing daily windows; no completed windows.
+                        return {"resources": {"core": {"remaining": 106 if partial_page else 104}}}
+                    if endpoint.startswith("orgs/Cratis/repos?"):
+                        return [PUBLIC]
+                    if endpoint == "orgs/Cratis":
+                        return {"total_private_repos": 0}
+                    if partial_page and endpoint.endswith("page=1"):
+                        day = int(endpoint.split("created=2026-09-")[1][:2])
+                        return {"workflow_runs": [{"id": day * 100 + i,
+                                                  "created_at": f"2026-09-{day}T12:00:00Z"}
+                                                 for i in range(100)]}
+                    raise report.APIError("denied")
+                data = report.collect(get, "Cratis", SINCE, UNTIL, workers=1)
+                self.assertEqual(len(data[2]), 200 if partial_page else 0)
+                self.assertIn("Run inventory stopped before completing Cratis/Public; "
+                              "runs created before 2026-09-29T00:00:00Z may be missing.", data[4])
+                self.assertIn("Run inventory incomplete for Cratis/Public: 2 daily windows.", data[4])
+                self.assertFalse(any("all runs are missing" in error for error in data[4]))
 
     def test_empty_completed_run_window_reports_the_precise_missing_cursor(self):
         def get(endpoint):
@@ -574,7 +604,7 @@ class UsageReportTests(unittest.TestCase):
             return {"workflow_runs": []}
         data = report.collect(get, "Cratis", SINCE, UNTIL, workers=1)
         self.assertIn("Run inventory stopped before completing Cratis/Private; "
-                      "runs created before 2026-09-30T00:00:00Z are missing.", data[4])
+                      "runs created before 2026-09-30T00:00:00Z may be missing.", data[4])
         self.assertFalse(any("all runs are missing" in error for error in data[4]))
 
     def test_run_inventory_stop_is_not_misreported_as_one_missing_run(self):
@@ -589,7 +619,7 @@ class UsageReportTests(unittest.TestCase):
             return {"workflow_runs": [{"id": day}]}
         data = report.collect(get, "Cratis", SINCE, UNTIL, workers=1)
         self.assertIn("Run inventory stopped before completing Cratis/Private; "
-                      "runs created before 2026-09-29T00:00:00Z are missing.", data[4])
+                      "runs created before 2026-09-29T00:00:00Z may be missing.", data[4])
         self.assertTrue(any("Job inventory stopped" in error and "2 runs" in error for error in data[4]))
         self.assertFalse(any("1 runs" in error for error in data[4]))
 
