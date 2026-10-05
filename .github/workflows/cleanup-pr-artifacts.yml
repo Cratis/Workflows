@@ -12,6 +12,9 @@ on:
     secrets:
       PAT_WORKFLOWS:
         required: true
+      PACKAGE_CLEANUP_TOKEN:
+        description: Optional classic PAT dedicated to package cleanup
+        required: false
   workflow_dispatch:
     inputs:
       target_repository:
@@ -51,6 +54,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          PACKAGE_CLEANUP_TOKEN: ${{ secrets.PACKAGE_CLEANUP_TOKEN }}
           CALLER_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_REF: ${{ github.ref }}
@@ -263,8 +267,8 @@ jobs:
                       "Manual apply requires the exact pull request to be closed")
 
           def main():
-              token = os.environ.get("GH_TOKEN", "")
-              require(bool(token.strip()), "PAT_WORKFLOWS is required")
+              token = os.environ.get("PACKAGE_CLEANUP_TOKEN", "") or os.environ.get("GH_TOKEN", "")
+              require(bool(token.strip()), "PACKAGE_CLEANUP_TOKEN or PAT_WORKFLOWS is required")
               caller = os.environ.get("CALLER_REPO", "")
               manual = os.environ.get("EVENT_NAME") == "workflow_dispatch"
               repository = os.environ.get("TARGET_REPO", "") if manual else caller
@@ -293,13 +297,18 @@ jobs:
                   plan = inventory(api, repository, pr)
               except InventoryNotAuthorized:
                   message = ("Could not run: package inventory not authorized. No versions deleted. "
-                             "Organization package inventory requires a classic PAT (fine-grained PATs "
-                             "are not supported) with read:packages and delete:packages scopes, "
-                             "package-admin rights, and organization SSO authorization if enforced.")
-                  print(f"::warning::{message}")
+                             "Create a classic PAT (fine-grained PATs are not supported) with "
+                             "read:packages and delete:packages scopes, package-admin rights, and "
+                             "organization SSO authorization if enforced; store it as the organization "
+                             "secret PACKAGE_CLEANUP_TOKEN. Cleanup uses it when provided, otherwise "
+                             "PAT_WORKFLOWS. HTTP 401 can also mean an expired or revoked token; "
+                             "other workflows using that secret still fail.")
                   if os.environ.get("GITHUB_STEP_SUMMARY"):
                       with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
                           summary.write(f"### PR package cleanup\n\n{message}\n")
+                  if expected is not None:
+                      raise CleanupError(message)
+                  print(f"::warning::{message}")
                   return
               if expected is not None:
                   # Comparing canonical JSON also distinguishes booleans from numeric IDs.

@@ -22,6 +22,7 @@ SOURCE = WORKFLOW.read_text()
 SHELL = textwrap.dedent(SOURCE.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
 PROGRAM = SHELL.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 TOKEN = "fake-credential-never-log-this"
+CLEANUP_TOKEN = "fake-dedicated-cleanup-credential-never-log-this"
 REPOSITORY = "Cratis/Chronicle"
 
 
@@ -54,6 +55,7 @@ class FakeAPI:
         self.delete_status = 204
         self.keep_deleted = False
         self.closed = True
+        self.expected_token = TOKEN
 
     @property
     def deletes(self):
@@ -61,7 +63,7 @@ class FakeAPI:
 
     def open(self, request, timeout):
         assert timeout == 60
-        assert request.get_header("Authorization") == "Bearer " + TOKEN
+        assert request.get_header("Authorization") == "Bearer " + self.expected_token
         assert request.full_url.startswith("https://api.github.com/")
         endpoint = request.full_url.removeprefix("https://api.github.com/")
         method = request.get_method()
@@ -134,8 +136,9 @@ class CleanupTests(unittest.TestCase):
             plan = json.loads(path.read_text()) if path.exists() else None
             summary_path = Path(env["GITHUB_STEP_SUMMARY"])
             summary = summary_path.read_text() if summary_path.exists() else ""
-            self.assertNotIn(TOKEN, output.getvalue())
-            self.assertNotIn(TOKEN, summary)
+            for secret in [TOKEN, CLEANUP_TOKEN]:
+                self.assertNotIn(secret, output.getvalue())
+                self.assertNotIn(secret, summary)
             if expected_summary is not None:
                 self.assertIn(expected_summary, summary)
             return status, plan, output.getvalue(), api
@@ -251,7 +254,7 @@ class CleanupTests(unittest.TestCase):
     def test_package_inventory_not_authorized_is_neutral_without_deletion(self):
         message = "Could not run: package inventory not authorized. No versions deleted."
         for status in [401, 403]:
-            for mode in ["reusable", "dry-run", "apply"]:
+            for mode in ["reusable", "scheduled", "dry-run"]:
                 for failing in ["package_type=container", "package_type=nuget"]:
                     with self.subTest(status=status, mode=mode, failing=failing):
                         api = FakeAPI()
@@ -259,9 +262,27 @@ class CleanupTests(unittest.TestCase):
                         api.packages["container"] = [package("container", "image")]
                         api.versions[("container", "image")] = [version(tags=["pr42"])]
                         api.hook = lambda m, e: Response(status=status, raw=TOKEN.encode()) if failing in e else None
-                        env = self.approved() if mode == "apply" else {}
-                        result = self.run_cleanup(api, manual=mode != "reusable", expected_summary=message, **env)
+                        env = {"EVENT_NAME": "schedule"} if mode == "scheduled" else {}
+                        result = self.run_cleanup(api, manual=mode == "dry-run", expected_summary=message, **env)
                         self.assert_neutral_without_deletes(result)
+
+    def test_manual_apply_inventory_not_authorized_fails_without_deletion(self):
+        message = "Could not run: package inventory not authorized. No versions deleted."
+        approved = self.approved()
+        for status in [401, 403]:
+            for failing in ["package_type=container", "package_type=nuget", "page=2"]:
+                with self.subTest(status=status, failing=failing):
+                    api = FakeAPI()
+                    api.packages["container"] = [package("container", "image")]
+                    api.versions[("container", "image")] = [version(tags=["pr42"])]
+                    api.packages["nuget"] = [package(name=f"Package{i}", identity=i) for i in range(1, 102)]
+                    api.hook = lambda m, e: Response(status=status, raw=TOKEN.encode()) if failing in e else None
+                    result = self.run_cleanup(api, manual=True, expected_summary=message, **approved)
+                    self.assert_failed_without_deletes(result)
+                    self.assertIsNone(result[1])
+                    self.assertIn("::error::" + message, result[2])
+                    self.assertNotIn("::warning::", result[2])
+                    self.assertNotIn("Cleanup verified:", result[2])
 
     def assert_neutral_without_deletes(self, result):
         status, plan, output, api = result
@@ -270,7 +291,8 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(api.deletes, [])
         self.assertIn("::warning::Could not run: package inventory not authorized", output)
         for requirement in ["classic PAT", "fine-grained PATs", "read:packages", "delete:packages",
-                            "package-admin", "SSO authorization"]:
+                            "package-admin", "SSO authorization", "PACKAGE_CLEANUP_TOKEN",
+                            "PAT_WORKFLOWS", "expired or revoked token"]:
             self.assertIn(requirement, output)
         self.assertNotIn("::error::", output)
         self.assertNotIn("Cleanup verified:", output)
@@ -385,6 +407,37 @@ class CleanupTests(unittest.TestCase):
                     return Response(status=403) if mode == "listing" else Response([version()])
             api.hook = hook
             self.assertEqual(self.run_cleanup(api)[0], 1, mode)
+
+    def test_dedicated_cleanup_token_takes_precedence(self):
+        for fallback in [TOKEN, ""]:
+            with self.subTest(fallback_present=bool(fallback)):
+                api = FakeAPI()
+                api.expected_token = CLEANUP_TOKEN
+                result = self.run_cleanup(api, PACKAGE_CLEANUP_TOKEN=CLEANUP_TOKEN, GH_TOKEN=fallback)
+                self.assertEqual(result[0], 0, result[2])
+                self.assertEqual(len(result[3].deletes), 1)
+
+    def test_absent_or_empty_cleanup_token_falls_back_to_pat_workflows(self):
+        for environment in [{}, {"PACKAGE_CLEANUP_TOKEN": ""}]:
+            with self.subTest(environment=environment):
+                result = self.run_cleanup(**environment)
+                self.assertEqual(result[0], 0, result[2])
+                self.assertEqual(len(result[3].deletes), 1)
+
+    def test_dedicated_token_is_not_leaked_in_a_plan_or_transport_error(self):
+        for failure in ["plan", "transport"]:
+            with self.subTest(failure=failure):
+                api = FakeAPI()
+                api.expected_token = CLEANUP_TOKEN
+                if failure == "plan":
+                    api.versions[("nuget", "Cratis.Test")] = [version(name="pr42-" + CLEANUP_TOKEN)]
+                else:
+                    def fail(method, endpoint):
+                        raise OSError("untrusted stderr Authorization: Bearer " + CLEANUP_TOKEN)
+                    api.hook = fail
+                result = self.run_cleanup(api, manual=True, PACKAGE_CLEANUP_TOKEN=CLEANUP_TOKEN)
+                self.assert_failed_without_deletes(result)
+                self.assertIsNone(result[1])
 
     def test_missing_token_and_invalid_inputs_do_not_call_api(self):
         for env in [{"GH_TOKEN": ""}, {"PR_NUMBER": "0"}, {"PR_NUMBER": "-1"},
@@ -504,7 +557,11 @@ class CleanupTests(unittest.TestCase):
         self.assertIn("default: true", SOURCE)
         self.assertIn("expected_targets:", SOURCE)
         self.assertIn("pr-package-cleanup", SOURCE)
-        self.assertIn("secrets.PAT_WORKFLOWS", SOURCE)
+        self.assertIn("          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}", SOURCE)
+        self.assertIn("          PACKAGE_CLEANUP_TOKEN: ${{ secrets.PACKAGE_CLEANUP_TOKEN }}", SOURCE)
+        self.assertIn("      PACKAGE_CLEANUP_TOKEN:\n"
+                      "        description: Optional classic PAT dedicated to package cleanup\n"
+                      "        required: false", SOURCE)
 
 
 if __name__ == "__main__":

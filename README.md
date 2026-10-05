@@ -296,9 +296,12 @@ association data fails closed rather than guessing ownership.
 
 Only packages whose `repository.full_name` equals the **calling repository** are
 eligible in reusable calls. Both container and NuGet inventories are completely
-paginated and validated before any DELETE. Listing errors, invalid JSON, malformed
-pagination, and identity drift fail the job; they are never treated as an empty
-inventory. A genuinely empty inventory succeeds with a zero count.
+paginated and validated before any DELETE. The only listing-error exception is
+HTTP 401/403 on the organization package inventory: reusable calls and dry runs
+report a neutral warning and delete nothing, without treating it as an empty
+inventory. Manual apply with an approved manifest fails instead. All other
+listing errors, invalid JSON, malformed pagination, and identity drift fail the
+job. A genuinely empty inventory succeeds with a zero count.
 
 Every planned package association and version identity is read again during full
 preflight and immediately before deletion. Each DELETE must return 204 or 404,
@@ -310,12 +313,26 @@ Readback mismatch makes the run red even if earlier deletes succeeded.
 The program is inline in the reusable workflow: it neither checks out caller code
 with the package token nor fetches a helper from a moving `main` reference.
 
-**Secret required:** `PAT_WORKFLOWS`, with package read/delete access and the package
-administration rights required by GitHub. Classic PAT scopes are `read:packages`
-and `delete:packages`; private repository visibility may also require `repo`.
-Manual apply additionally needs read access to the target pull request. Use a
-GitHub-supported token type for the organization Packages endpoints; do not assume
-a fine-grained token supports them. A permission failure is a blocking error.
+**Cleanup token:** optionally create a classic PAT with `read:packages` and
+`delete:packages`, package administration rights, and organization SSO
+authorization if enforced. Store it as the organization secret
+`PACKAGE_CLEANUP_TOKEN`, accessible to the calling repositories and Workflows for
+manual runs. Cleanup uses it when provided; otherwise it falls back to
+`PAT_WORKFLOWS` (still required by the reusable caller contract). Private
+repository visibility may also require `repo`; manual apply additionally needs
+read access to the target pull request. Fine-grained PATs do not support these
+organization Packages endpoints.
+
+The bootstrapped cleanup wrapper and the manual setup above use `secrets: inherit`,
+so they automatically pass `PACKAGE_CLEANUP_TOKEN` when it is available to the
+caller. Callers with an explicit secrets map must add
+`PACKAGE_CLEANUP_TOKEN: ${{ secrets.PACKAGE_CLEANUP_TOKEN }}` to opt in; callers
+that pass only `PAT_WORKFLOWS` are unaffected.
+
+Permission failures remain blocking except for the organization inventory
+HTTP 401/403 warning described above. HTTP 401 also covers an expired or revoked
+token: it now produces a warning in reusable cleanup calls and dry runs, but
+manual apply and other workflows using that secret still fail.
 
 ### Retry an already-closed PR safely
 
