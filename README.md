@@ -171,6 +171,7 @@ caller such as Stage should retain its reviewed immutable pin.
 ```bash
 python3 .github/scripts/tests/update-packages.test.py
 python3 .github/scripts/tests/bootstrap-package-update-safety.test.py
+python3 .github/scripts/tests/bootstrap-schedules.test.py
 actionlint .github/workflows/update-packages.yml .github/workflows/verify-package-updates.yml \
   .github/workflows/bootstrap-common-workflows.yml
 ```

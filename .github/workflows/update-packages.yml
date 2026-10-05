@@ -37,7 +37,7 @@ on:
         description: >-
           Runner label the update job runs on. Callers in private repositories
           should pass their self-hosted scale-set label (for example cratis-arc)
-          so the daily update does not consume billed GitHub-hosted minutes.
+          so the scheduled update does not consume billed GitHub-hosted minutes.
         type: string
         required: false
         default: ubuntu-latest
