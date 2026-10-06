@@ -13,13 +13,13 @@ const rootNames = 'README LICENSE AGENTS CLAUDE GEMINI CODE_OF_CONDUCT CONTRIBUT
 // Retain legacy all-caps matches within a filename; mixed-case matching is
 // prefix-based so a numbered ADR about handover policy remains documentation.
 const legacySession = /(^|\/)[^/]*HANDOVER[^/]*\.md$|(^|\/)PROMPT-[^/]+\.md$|(^|\/)[^/]*NEXT-SESSION[^/]*\.md$|(^|\/)SESSION-PROMPT[^/]*\.md$|(^|\/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$/;
-const session = /(^|\/)(HANDOVER|PROMPT|NEXT-SESSION|SESSION)([-_][^/]*)?\.md$/i;
+const session = /(^|\/)(HANDOVER|PROMPT|SESSION)[-_][^/]+\.md$|(^|\/)NEXT-SESSION([-_][^/]+)?\.md$/i;
 const shape = /(^|\/)(PLAN|DESIGN|REPORT|STATUS)([-_][^/]*)?\.md$/i;
 const splitInput = value => (value ?? '').split(',').map(part => part.trim()).filter(Boolean);
 
 export function checkPaths(files, environment = process.env) {
     const allowed = new Set([...rootNames, ...splitInput(environment.EXTRA_ALLOWED).map(name => name.replace(/\.md$/i, '').toUpperCase())]);
-    const docs = ['decisions', 'Documentation', 'docs', 'Knowledge', ...splitInput(environment.EXTRA_ALLOWED_PATHS)].map(path => `${path.replace(/\/$/, '').toLowerCase()}/`);
+    const docs = ['decisions', 'Documentation', 'docs', 'Knowledge', 'evidence', 'governance', ...splitInput(environment.EXTRA_ALLOWED_PATHS)].map(path => `${path.replace(/\/$/, '').toLowerCase()}/`);
     const violations = [];
     for (const path of files) {
         let rule;
@@ -33,7 +33,7 @@ export function checkPaths(files, environment = process.env) {
             } else if (!/^\.(claude|github|pi|agents|cratis)\//.test(path)) {
                 if (legacySession.test(path) || session.test(path)) {
                     rule = 'session';
-                } else if (shape.test(path) && !docs.some(prefix => path.toLowerCase().startsWith(prefix))) {
+                } else if (shape.test(path) && !(!path.includes('/') && allowed.has(path.slice(0, -3).toUpperCase())) && !docs.some(prefix => path.toLowerCase().startsWith(prefix))) {
                     rule = 'work-record-shape';
                 }
             }
@@ -45,7 +45,7 @@ export function checkPaths(files, environment = process.env) {
 
 function check() {
     // NUL-delimited output handles spaces, newlines and Git's quoted filenames.
-    const listing = spawnSync('git', ['ls-files', '-z'], { encoding: 'utf8' });
+    const listing = spawnSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 });
     if (listing.error || listing.status !== 0) {
         console.error(`could not run: git ls-files failed: ${listing.error?.message ?? listing.stderr.trim()}`);
         return 2;
@@ -56,7 +56,13 @@ function check() {
         return 2;
     }
     const violations = checkPaths(files);
-    for (const violation of violations) console.log(`[${violation.rule}] ${JSON.stringify(violation.path)}`);
+    for (const violation of violations) {
+        console.log(`[${violation.rule}] ${JSON.stringify(violation.path)}`);
+        if (process.env.GITHUB_ACTIONS === 'true') {
+            const escaped = violation.path.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+            console.log(`::error title=${violation.rule}::${escaped}`);
+        }
+    }
     if (violations.length) {
         console.log('AI session work artifacts are local-only: keep them in the untracked .ai-work/ folder. A durable follow-up becomes a GitHub issue, not a file.');
     } else {
@@ -89,7 +95,7 @@ function selfTest() {
             ['ai-work', '.ai-work/notes.md'],
             ['pi-runtime', '.pi/fusion/x/prompt.md'],
             ['root-document', 'IMPLEMENTATION_STATUS.md'],
-            ['session', 'decisions/hAnDoVeR.md'],
+            ['session', 'decisions/hAnDoVeR-notes.md'],
             ['work-record-shape', 'Notes/pLaN-something.md']
         ];
         let red = 0;
@@ -98,7 +104,7 @@ function selfTest() {
             if (result.status === 1 && result.stdout.includes(`[${rule}] ${JSON.stringify(path)}`) && result.stdout.includes('violations: 1')) red++;
             else console.error(`self-test: planted defect not caught: ${path}`);
         }
-        const clean = ['README.md', 'DECISIONS.md', 'decisions/D-0001-example.md', 'Documentation/decisions/0003-kernel-boundary.md', 'Source/Reporting.md', '.pi/settings.json'];
+        const clean = ['README.md', 'DECISIONS.md', 'decisions/D-0001-example.md', 'Documentation/decisions/0003-kernel-boundary.md', 'Source/Reporting.md', 'templates/build-kit/lib/prompt.md', 'templates/session.md', 'templates/handover.md', '.pi/settings.json'];
         if (process.env.VERIFY_SELF_TEST_BREAK === '1') clean.push('PLAN-break.md');
         const control = run('control', clean);
         const counts = control.stdout.includes(`scanned: ${clean.length} tracked files, rules: ${ruleCount}, violations: 0`);
