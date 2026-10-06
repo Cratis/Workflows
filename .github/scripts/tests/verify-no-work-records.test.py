@@ -184,6 +184,13 @@ class Guard(unittest.TestCase):
         digest = re.search(r"script_sha256='([a-f0-9]{64})'", workflow)
         self.assertIsNotNone(digest)
         self.assertEqual(digest[1], hashlib.sha256(SCRIPT.read_bytes()).hexdigest())
+        # When the pinned commit is in the local history, its script must hash to the same digest,
+        # so a changed script with a re-computed checksum cannot ship with a stale pin.
+        pinned = subprocess.run(["git", "cat-file", "blob", f"{pin[1]}:.github/scripts/verify-no-work-records.mjs"],
+                                cwd=ROOT, capture_output=True)
+        if pinned.returncode == 0:
+            self.assertEqual(digest[1], hashlib.sha256(pinned.stdout).hexdigest(),
+                             "The pinned commit's script does not match script_sha256; re-pin the URL")
 
     def test_workflow_runs_against_the_caller_and_propagates_fetch_failure(self):
         workflow = (ROOT / ".github/workflows/verify-no-work-records.yml").read_text()
