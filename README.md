@@ -573,10 +573,10 @@ A reusable guard that fails when AI session work records are tracked. It applies
 | `ai-work` | anything under `.ai-work/` |
 | `pi-runtime` | anything under `.pi/delegate/`, `.pi/fusion/`, `.pi/tasks/` or `.pi/*-session-*/`; `.pi/settings.json` and `.pi/extensions/` stay allowed |
 | `root-document` | a root-level SCREAMING-CASE `.md` file outside the root allowlist (`README`, `LICENSE`, `AGENTS`, `CLAUDE`, `GEMINI`, `CODE_OF_CONDUCT`, `CONTRIBUTING`, `SECURITY`, `CHANGELOG`, `CREDITS`, `RESOURCES`, `BRAND`, `MESSAGING`, `PAGES`, `SITE`, `PRIVACY_POLICY`, `ROADMAP`, `START-HERE`, `CHRONICLE`, `COMPATIBILITY`, `NOTICE`, `SUPPORT`, `GOVERNANCE`, `VERSION`, `DECISIONS`) |
-| `session` | a handover, prompt or next-session file at any depth, in ALL CAPS (`HANDOVER`, `PROMPT-*`, `NEXT-SESSION`, `SESSION-PROMPT`, `SESSION-HANDOVER`) or Titlecase (`Handover`, `Prompt-*`, `Next-Session`, `Session-*`); never exempted by a documentation directory |
+| `session` | a handover, prompt or next-session filename prefix at any depth, case-insensitively (`HANDOVER`, `PROMPT-*`, `NEXT-SESSION`, `SESSION-PROMPT`, `SESSION-HANDOVER`, `Session-*`); legacy embedded all-caps names are also caught; never exempted by a documentation directory |
 | `work-record-shape` | a `PLAN`, `DESIGN`, `REPORT` or `STATUS` file at any depth (`PLAN-foo.md`, `Plan-foo.md`, `Status.md`), outside the documentation directories |
 
-Decision records are documentation. `decisions/`, `Decisions/`, `Documentation/`, `documentation/`, `docs/`, `Docs/` and `Knowledge/` at the repository root exempt the `work-record-shape` rule. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Lowercase names such as `design-notes.md` are not flagged, to spare real documentation.
+Decision records are documentation. `decisions/`, `Documentation/`, `docs/` and `Knowledge/` at the repository root exempt the `work-record-shape` rule, case-insensitively. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Work-record prefixes match every letter case, including `pLaN-notes.md` and `design-notes.md`, outside the documentation directories.
 
 Inputs:
 
@@ -588,7 +588,9 @@ Inputs:
 
 Exit codes: `0` ran and found nothing, `1` ran and found violations (one line per file with the rule id), `2` could not run (`git ls-files` failed or listed no files). A green run prints `scanned: <n> tracked files, rules: 5, violations: 0`.
 
-The check is one inline program, because a reusable workflow checks out the caller's repository and no script file from this repository is on the runner. It supports `--self-test`, which plants one defect per rule in temporary repositories and asserts the exit codes; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` against the inline program on every change.
+The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. When changing the script, commit it first and update the workflow's script pin to that commit. The offline tests reject a pin whose script differs from the tested source.
+
+Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
 
 ---
 

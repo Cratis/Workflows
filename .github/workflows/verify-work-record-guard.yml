@@ -5,6 +5,7 @@ name: Verify Work Record Guard
 on:
   pull_request:
     paths:
+      - .github/scripts/verify-no-work-records.mjs
       - .github/workflows/verify-no-work-records.yml
       - .github/workflows/verify-work-record-guard.yml
       - .github/scripts/tests/verify-no-work-records.test.py
@@ -12,6 +13,7 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/scripts/verify-no-work-records.mjs
       - .github/workflows/verify-no-work-records.yml
       - .github/workflows/verify-work-record-guard.yml
       - .github/scripts/tests/verify-no-work-records.test.py
@@ -29,6 +31,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Exercise the actual inline guard program
-        # Fixture repositories only; no GitHub contact. Includes the program's --self-test.
-        run: python3 .github/scripts/tests/verify-no-work-records.test.py
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Check guard syntax
+        run: node --check .github/scripts/verify-no-work-records.mjs
+      - name: Exercise the extracted guard and pinned caller
+        # Fixture repositories only; no GitHub contact. Includes --self-test and its red control.
+        run: python3 -B .github/scripts/tests/verify-no-work-records.test.py

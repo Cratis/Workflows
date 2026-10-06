@@ -1,17 +1,19 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
-"""Offline regressions for the exact inline program of verify-no-work-records.yml."""
+"""Offline regressions for the extracted work-record guard."""
 import os
 from pathlib import Path
 import subprocess
-import tempfile
+import shutil
+import re
 import textwrap
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
-WORKFLOW = ROOT / ".github/workflows/verify-no-work-records.yml"
-SOURCE = WORKFLOW.read_text()
-SHELL = textwrap.dedent(SOURCE.split("        run: |\n", 1)[1])
+SCRIPT = ROOT / ".github/scripts/verify-no-work-records.mjs"
+SOURCE = SCRIPT.read_text()
+NODE = shutil.which("node")
 
 CLEAN = [
     "README.md",
@@ -36,8 +38,7 @@ class Guard(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
-        cls.script = Path(cls.directory.name) / "guard.sh"
-        cls.script.write_text(SHELL)
+        cls.script = SCRIPT
 
     @classmethod
     def tearDownClass(cls):
@@ -46,7 +47,7 @@ class Guard(unittest.TestCase):
     def run_script(self, cwd, *arguments, **environment):
         env = {**os.environ, "EXTRA_ALLOWED": "", "EXTRA_ALLOWED_PATHS": "",
                "GIT_CEILING_DIRECTORIES": str(Path(cwd).parent), **environment}
-        return subprocess.run(["bash", str(self.script), *arguments], cwd=cwd, env=env,
+        return subprocess.run([NODE, str(self.script), *arguments], cwd=cwd, env=env,
                               capture_output=True, text=True, check=False)
 
     def fixture(self, files):
@@ -70,6 +71,8 @@ class Guard(unittest.TestCase):
     def test_each_dirty_path_fails_and_is_named(self):
         dirty = [
             "PLAN-foo.md", "Plan-bar.md", "REPORT-weekly.md", "notes/DESIGN-bar.md",
+            "notes/pLaN-mixed.md", "notes/dEsIgN-mixed.MD", "notes/rEpOrT-mixed.md",
+            "notes/sTaTuS-mixed.md", "docs/hAnDoVeR.md", "notes/pRoMpT-next.md",
             "Notes/Plan-something.md", "Source/Report-weekly.md", "Source/Status-board.md",
             "Source/STATUS.md", "decisions/HANDOVER.md", "docs/Handover.md", "docs/Session-notes.md",
             "Notes/Next-Session.md", "IMPLEMENTATION_STATUS.md", ".ai-work/anything.md",
@@ -103,7 +106,7 @@ class Guard(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty:
             result = self.run_script(empty)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("could not run", result.stdout)
+        self.assertIn("could not run", result.stderr)
 
     def test_zero_tracked_files_exits_two(self):
         repository = tempfile.TemporaryDirectory()
@@ -113,17 +116,65 @@ class Guard(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         result = self.run_script(root)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("no tracked files", result.stdout)
+        self.assertIn("no tracked files", result.stderr)
 
     def test_failing_listing_exits_two_not_zero(self):
-        mutated = SHELL.replace("git ls-files 2>&1", "false")
-        self.assertNotEqual(mutated, SHELL)
-        script = Path(self.directory.name) / "mutated.sh"
+        mutated = SOURCE.replace("spawnSync('git', ['ls-files', '-z']", "spawnSync('false', ['ls-files', '-z']")
+        self.assertNotEqual(mutated, SOURCE)
+        script = Path(self.directory.name) / "mutated.mjs"
         script.write_text(mutated)
         root = self.fixture(CLEAN)
-        result = subprocess.run(["bash", str(script)], cwd=root, capture_output=True, text=True,
+        result = subprocess.run([NODE, str(script)], cwd=root, capture_output=True, text=True,
                                 env={**os.environ, "EXTRA_ALLOWED": "", "EXTRA_ALLOWED_PATHS": ""})
         self.assertEqual(result.returncode, 2)
+
+    def test_listing_preserves_unusual_filenames(self):
+        result = self.run_script(self.fixture(CLEAN + ["notes/Plan-with space.md", "notes/Plan-with\nnewline.md"]))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("violations: 2", result.stdout)
+        self.assertIn("Plan-with\\nnewline.md", result.stdout)
+
+    def test_missing_git_exits_two(self):
+        with tempfile.TemporaryDirectory() as empty:
+            result = self.run_script(empty, PATH="")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("could not run", result.stderr)
+
+    def test_unknown_argument_exits_two(self):
+        result = self.run_script(self.fixture(CLEAN), "--unknown")
+        self.assertEqual(result.returncode, 2)
+
+    def test_workflow_pin_matches_the_tested_script(self):
+        workflow = (ROOT / ".github/workflows/verify-no-work-records.yml").read_text()
+        pin = re.search(r"raw.githubusercontent.com/Cratis/Workflows/([a-f0-9]{40})/", workflow)
+        self.assertIsNotNone(pin)
+        committed = subprocess.run(["git", "show", f"{pin[1]}:.github/scripts/verify-no-work-records.mjs"],
+                                   cwd=ROOT, capture_output=True, text=True, check=True)
+        self.assertEqual(committed.stdout, SOURCE)
+
+    def test_workflow_runs_against_the_caller_and_propagates_fetch_failure(self):
+        workflow = (ROOT / ".github/workflows/verify-no-work-records.yml").read_text()
+        shell = textwrap.dedent(workflow.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            curl = tools / "curl"
+            curl.write_text('#!/bin/sh\nfor arg; do output="$arg"; done\ncp "$GUARD_SOURCE" "$output"\n')
+            curl.chmod(0o755)
+            caller = self.fixture(CLEAN + ["Notes/pLaN-caller.md"])
+            env = {**os.environ, "RUNNER_TEMP": temporary, "GUARD_SOURCE": str(SCRIPT),
+                   "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                   "EXTRA_ALLOWED": "", "EXTRA_ALLOWED_PATHS": ""}
+            result = subprocess.run(["/bin/bash", "-c", shell], cwd=caller, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("Notes/pLaN-caller.md", result.stdout)
+            curl.write_text('#!/bin/sh\nexit 1\n')
+            result = subprocess.run(["/bin/bash", "-c", shell], cwd=caller, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("downloading the pinned", result.stderr)
 
     def test_self_test_passes_and_breaks_on_demand(self):
         with tempfile.TemporaryDirectory() as cwd:
