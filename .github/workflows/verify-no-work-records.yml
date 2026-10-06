@@ -4,6 +4,14 @@ name: Verify No Work Records
 # session notes, continuation prompts, status boards) are tracked in git.
 # Such files are local-only and live in the gitignored .ai-work/ folder;
 # durable follow-ups become GitHub issues instead of planning files.
+#
+# The check is one self-contained shell program because a reusable workflow
+# checks out the caller's repository, so no script file from this repository
+# is available on the runner. It supports `--self-test` and is exercised by
+# .github/scripts/tests/verify-no-work-records.test.py.
+#
+# Exit codes: 0 ran and found nothing, 1 ran and found violations,
+# 2 could not run (listing failed or nothing was tracked to scan).
 
 on:
   workflow_call:
@@ -18,6 +26,11 @@ on:
         default: ubuntu-latest
       extra-allowed:
         description: Comma-separated additional allowed root-level markdown file names (with or without .md)
+        required: false
+        type: string
+        default: ""
+      extra-allowed-paths:
+        description: Comma-separated additional documentation directory prefixes (for example governance/,evidence/) whose work-record-style file names are allowed
         required: false
         type: string
         default: ""
@@ -37,43 +50,178 @@ jobs:
       - name: Verify no AI work records are tracked
         env:
           EXTRA_ALLOWED: ${{ inputs.extra-allowed }}
+          EXTRA_ALLOWED_PATHS: ${{ inputs.extra-allowed-paths }}
         run: |
           set -euo pipefail
-          violations=()
+          self="$0"
+          rule_count=5
 
-          # 1. Nothing under .ai-work/ may ever be tracked.
-          while IFS= read -r f; do
-            violations+=(".ai-work/ content must never be tracked: $f")
-          done < <(git ls-files -- '.ai-work/')
+          # Prints the checker's exit code contract; see the header of this workflow.
+          check() {
+            local listing
+            if ! listing="$(git ls-files 2>&1)"; then
+              echo "::error::could not run: git ls-files failed: $listing"
+              return 2
+            fi
+            if [ -z "$listing" ]; then
+              echo "::error::could not run: git ls-files listed no tracked files"
+              return 2
+            fi
+            local -a files extra extra_paths
+            mapfile -t files <<< "$listing"
 
-          # 2. Root-level SCREAMING-CASE markdown outside the allowlist is a
-          #    work record (HANDOVER.md, PLAN.md, IMPLEMENTATION_STATUS.md, ...).
-          allow='README|LICENSE|AGENTS|CLAUDE|GEMINI|CODE_OF_CONDUCT|CONTRIBUTING|SECURITY|CHANGELOG|CREDITS|RESOURCES|BRAND|MESSAGING|PAGES|SITE|PRIVACY_POLICY|ROADMAP|START-HERE|CHRONICLE|COMPATIBILITY|NOTICE|SUPPORT|GOVERNANCE|VERSION'
-          IFS=',' read -ra extra <<< "${EXTRA_ALLOWED:-}"
-          for e in "${extra[@]}"; do
-            e="$(echo "$e" | xargs)"
-            [ -n "$e" ] && allow="$allow|${e%.md}"
-          done
-          while IFS= read -r f; do
-            echo "$f" | grep -qE "^($allow)\.md$" && continue
-            violations+=("work-record-style root document: $f")
-          done < <(git ls-files -- '*.md' | grep -E '^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$' || true)
+            # Root-level SCREAMING-CASE markdown names that are documentation.
+            local allow='README|LICENSE|AGENTS|CLAUDE|GEMINI|CODE_OF_CONDUCT|CONTRIBUTING|SECURITY|CHANGELOG|CREDITS|RESOURCES|BRAND|MESSAGING|PAGES|SITE|PRIVACY_POLICY|ROADMAP|START-HERE|CHRONICLE|COMPATIBILITY|NOTICE|SUPPORT|GOVERNANCE|VERSION|DECISIONS'
+            local e
+            IFS=',' read -ra extra <<< "${EXTRA_ALLOWED:-}"
+            for e in ${extra[@]+"${extra[@]}"}; do
+              e="$(echo "$e" | xargs)"
+              [ -n "$e" ] && allow="$allow|${e%.md}"
+            done
 
-          # 3. Session/handover/prompt naming anywhere outside the AI corpus
-          #    adapter folders (uppercase convention only, to spare real docs).
-          while IFS= read -r f; do
-            case "$f" in
-              .claude/*|.github/*|.pi/*|.agents/*|.cratis/*|.ai-work/*) continue ;;
-            esac
-            violations+=("session work record: $f")
-          done < <(git ls-files -- '*.md' | grep -E '(^|/)[^/]*HANDOVER[^/]*\.md$|(^|/)PROMPT-[^/]+\.md$|(^|/)[^/]*NEXT-SESSION[^/]*\.md$|(^|/)SESSION-PROMPT[^/]*\.md$|(^|/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$' || true)
+            # Documentation directories: work-record-style names there are documentation.
+            # They never exempt the session/handover rule.
+            local docs='^(decisions|Decisions|Documentation|documentation|docs|Docs|Knowledge)/'
+            IFS=',' read -ra extra_paths <<< "${EXTRA_ALLOWED_PATHS:-}"
+            for e in ${extra_paths[@]+"${extra_paths[@]}"}; do
+              e="$(echo "$e" | xargs)"
+              e="${e%/}"
+              [ -n "$e" ] && docs="${docs%)/}|$e)/"
+            done
 
-          if [ ${#violations[@]} -gt 0 ]; then
-            printf '::error::%s\n' "${violations[@]}"
-            echo ""
-            echo "AI session work artifacts are local-only: keep them in the untracked"
-            echo ".ai-work/ folder. A follow-up"
-            echo "that must survive the session becomes a GitHub issue, not a file."
-            exit 1
+            local root_screaming='^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$'
+            local session='(^|/)[^/]*HANDOVER[^/]*\.md$|(^|/)PROMPT-[^/]+\.md$|(^|/)[^/]*NEXT-SESSION[^/]*\.md$|(^|/)SESSION-PROMPT[^/]*\.md$|(^|/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$|(^|/)(Handover|Prompt|Next-Session|Session)([-_][^/]*)?\.md$'
+            local shape='(^|/)(PLAN|Plan|DESIGN|Design|REPORT|Report|STATUS|Status)([-_][^/]*)?\.md$'
+            local root_allowed="^($allow)\\.md\$"
+
+            local -a violations=()
+            local f
+            for f in "${files[@]}"; do
+              # 1. Nothing under .ai-work/ may ever be tracked.
+              if [[ "$f" == .ai-work/* ]]; then
+                violations+=("[ai-work] .ai-work/ content must never be tracked: $f")
+                continue
+              fi
+
+              # 2. Pi runtime state is a session artifact. Tracked adapter files such as
+              #    .pi/settings.json and .pi/extensions/ stay allowed.
+              if [[ "$f" == .pi/delegate/* || "$f" == .pi/fusion/* || "$f" == .pi/tasks/* || "$f" == .pi/*-session-*/* ]]; then
+                violations+=("[pi-runtime] Pi runtime state must never be tracked: $f")
+                continue
+              fi
+
+              case "$f" in *.md) ;; *) continue ;; esac
+
+              # 3. Root-level SCREAMING-CASE markdown outside the allowlist is a
+              #    work record (HANDOVER.md, PLAN.md, IMPLEMENTATION_STATUS.md, ...).
+              if [[ "$f" != */* && "$f" =~ $root_screaming && ! "$f" =~ $root_allowed ]]; then
+                violations+=("[root-document] work-record-style root document: $f")
+                continue
+              fi
+
+              # The remaining rules skip the AI corpus adapter folders.
+              case "$f" in
+                .claude/*|.github/*|.pi/*|.agents/*|.cratis/*) continue ;;
+              esac
+
+              # 4. Session/handover/prompt names anywhere, in ALL CAPS or Titlecase.
+              if [[ "$f" =~ $session ]]; then
+                violations+=("[session] session work record: $f")
+                continue
+              fi
+
+              # 5. Plan/design/report/status documents at any depth, in ALL CAPS or
+              #    Titlecase, outside the documentation directories.
+              if [[ "$f" =~ $shape && ! "$f" =~ $docs ]]; then
+                violations+=("[work-record-shape] work-record-style document: $f")
+              fi
+            done
+
+            if [ ${#violations[@]} -gt 0 ]; then
+              printf '::error::%s\n' "${violations[@]}"
+              echo ""
+              echo "AI session work artifacts are local-only: keep them in the untracked"
+              echo ".ai-work/ folder. A follow-up"
+              echo "that must survive the session becomes a GitHub issue, not a file."
+              echo "scanned: ${#files[@]} tracked files, rules: $rule_count, violations: ${#violations[@]}"
+              return 1
+            fi
+            echo "No AI work records tracked."
+            echo "scanned: ${#files[@]} tracked files, rules: $rule_count, violations: 0"
+          }
+
+          self_test() {
+            local scratch planted=0 red=0 status output
+            scratch="$(mktemp -d)"
+            trap 'rm -rf "$scratch"' RETURN
+
+            # Runs the checker over the files given on stdin in a fresh repository.
+            run_fixture() {
+              local dir="$1" line
+              mkdir -p "$dir"
+              git -C "$dir" init -q
+              while IFS= read -r line; do
+                mkdir -p "$dir/$(dirname "$line")"
+                echo "x" > "$dir/$line"
+              done
+              git -C "$dir" add -f -A
+              (cd "$dir" && bash "$self" 2>&1)
+            }
+
+            # One planted defect per rule, each in its own repository.
+            local -a plants=(
+              ".ai-work/notes.md"
+              "IMPLEMENTATION_STATUS.md"
+              "decisions/HANDOVER.md"
+              "Notes/Plan-something.md"
+              ".pi/fusion/x/prompt.md"
+            )
+            local plant
+            for plant in "${plants[@]}"; do
+              planted=$((planted + 1))
+              status=0
+              output="$(printf 'README.md\ndecisions/D-0001-example.md\n%s\n' "$plant" | run_fixture "$scratch/plant-$planted")" || status=$?
+              if [ "$status" -eq 1 ] && [[ "$output" == *"$plant"* ]]; then
+                red=$((red + 1))
+              else
+                echo "self-test: planted defect not caught (exit $status): $plant" >&2
+              fi
+            done
+
+            # Clean control. VERIFY_SELF_TEST_BREAK=1 plants a defect in it, so the
+            # self-test itself must go red.
+            local -a control_files=(
+              "README.md"
+              "DECISIONS.md"
+              "decisions/D-0001-example.md"
+              "Documentation/decisions/0003-kernel-boundary.md"
+              "Source/Reporting.md"
+              ".pi/settings.json"
+            )
+            if [ "${VERIFY_SELF_TEST_BREAK:-}" = "1" ]; then
+              control_files+=("PLAN-break.md")
+            fi
+            local control=0
+            output="$(printf '%s\n' "${control_files[@]}" | run_fixture "$scratch/control")" || control=$?
+            if [ "$control" -eq 0 ] && [[ "$output" == *"violations: 0"* ]]; then
+              :
+            else
+              echo "self-test: clean control was not green (exit $control)" >&2
+            fi
+
+            # A broken listing (not a git checkout) must exit 2, never 0.
+            local broken=0
+            mkdir -p "$scratch/not-a-repo"
+            (cd "$scratch/not-a-repo" && GIT_CEILING_DIRECTORIES="$scratch" bash "$self" >/dev/null 2>&1) || broken=$?
+
+            echo "self-test: $planted planted, $red red, control $control, broken-listing $broken"
+            [ "$red" -eq "$planted" ] && [ "$control" -eq 0 ] && [ "$broken" -eq 2 ]
+          }
+
+          if [ "${1:-}" = "--self-test" ]; then
+            self_test
+            exit $?
           fi
-          echo "No AI work records tracked."
+          status=0
+          check || status=$?
+          exit "$status"

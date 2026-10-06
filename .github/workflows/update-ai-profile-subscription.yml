@@ -173,7 +173,7 @@ jobs:
           test "${#changed[@]}" -gt 0
           for path in "${changed[@]}"; do
             case "$path" in
-              .cratis/ai.json|.pi/settings.json) ;;
+              .cratis/ai.json|.pi/settings.json|.gitignore) ;;
               *)
                 echo "::error::Controller changed forbidden path: $path"
                 exit 1

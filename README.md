@@ -201,13 +201,31 @@ The controller:
 - verifies profile, public/engineering channel, package name, and exact SemVer;
 - performs a dry run unless `apply` and an exact repository confirmation are
   both supplied;
-- changes only `.cratis/ai.json` and the matching exact Pi package source in
-  `.pi/settings.json`;
+- changes only `.cratis/ai.json`, the matching exact Pi package source in
+  `.pi/settings.json`, and the managed Pi runtime-state block in `.gitignore`;
 - preserves Pi skill filters and unrelated settings;
 - rejects partial APM-managed updates until their lockfile can be refreshed;
 - supports explicit rollback to a lower exact release;
 - scopes the GitHub App token to one authorized repository; and
 - opens a normal PR whose repository checks must pass before a human merges it.
+
+When a subscriber selects Pi, an update also ensures this managed block in its
+`.gitignore` (the dry-run receipt lists `.gitignore` among the changes and
+reports `piRuntimeIgnore` as `missing`, `incomplete` or `current`; a rollback
+leaves it alone):
+
+```gitignore
+# cratis-ai: pi runtime state
+.ai-work/
+.pi/delegate/
+.pi/fusion/
+.pi/tasks/
+.pi/*-session-*/
+# end cratis-ai: pi runtime state
+```
+
+`.ai-work/` is included only when no other line in `.gitignore` already ignores
+it. `verify-no-work-records.yml` fails when these directories are tracked.
 
 Run the controller locally without GitHub writes:
 
@@ -543,6 +561,34 @@ contract remains the required numeric `pull_request` input and `PAT_WORKFLOWS`
 secret, plus the optional `PACKAGE_CLEANUP_TOKEN` secret. See
 [Cleaning up PR artifacts](#cleaning-up-pr-artifacts) for matching rules, permissions,
 manual approval inputs, recovery limitations, and offline verification.
+
+---
+
+### `verify-no-work-records.yml`
+
+A reusable guard that fails when AI session work records are tracked. It applies five rules:
+
+| Rule | Fails when tracked |
+|---|---|
+| `ai-work` | anything under `.ai-work/` |
+| `pi-runtime` | anything under `.pi/delegate/`, `.pi/fusion/`, `.pi/tasks/` or `.pi/*-session-*/`; `.pi/settings.json` and `.pi/extensions/` stay allowed |
+| `root-document` | a root-level SCREAMING-CASE `.md` file outside the root allowlist (`README`, `LICENSE`, `AGENTS`, `CLAUDE`, `GEMINI`, `CODE_OF_CONDUCT`, `CONTRIBUTING`, `SECURITY`, `CHANGELOG`, `CREDITS`, `RESOURCES`, `BRAND`, `MESSAGING`, `PAGES`, `SITE`, `PRIVACY_POLICY`, `ROADMAP`, `START-HERE`, `CHRONICLE`, `COMPATIBILITY`, `NOTICE`, `SUPPORT`, `GOVERNANCE`, `VERSION`, `DECISIONS`) |
+| `session` | a handover, prompt or next-session file at any depth, in ALL CAPS (`HANDOVER`, `PROMPT-*`, `NEXT-SESSION`, `SESSION-PROMPT`, `SESSION-HANDOVER`) or Titlecase (`Handover`, `Prompt-*`, `Next-Session`, `Session-*`); never exempted by a documentation directory |
+| `work-record-shape` | a `PLAN`, `DESIGN`, `REPORT` or `STATUS` file at any depth (`PLAN-foo.md`, `Plan-foo.md`, `Status.md`), outside the documentation directories |
+
+Decision records are documentation. `decisions/`, `Decisions/`, `Documentation/`, `documentation/`, `docs/`, `Docs/` and `Knowledge/` at the repository root exempt the `work-record-shape` rule. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Lowercase names such as `design-notes.md` are not flagged, to spare real documentation.
+
+Inputs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `runs-on` | `ubuntu-latest` | Runner label |
+| `extra-allowed` | empty | Comma-separated additional root-level file names |
+| `extra-allowed-paths` | empty | Comma-separated additional documentation directory prefixes, such as `governance/,evidence/` |
+
+Exit codes: `0` ran and found nothing, `1` ran and found violations (one line per file with the rule id), `2` could not run (`git ls-files` failed or listed no files). A green run prints `scanned: <n> tracked files, rules: 5, violations: 0`.
+
+The check is one inline program, because a reusable workflow checks out the caller's repository and no script file from this repository is on the runner. It supports `--self-test`, which plants one defect per rule in temporary repositories and asserts the exit codes; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` against the inline program on every change.
 
 ---
 
