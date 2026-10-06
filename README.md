@@ -201,13 +201,33 @@ The controller:
 - verifies profile, public/engineering channel, package name, and exact SemVer;
 - performs a dry run unless `apply` and an exact repository confirmation are
   both supplied;
-- changes only `.cratis/ai.json` and the matching exact Pi package source in
-  `.pi/settings.json`;
+- changes only `.cratis/ai.json`, the matching exact Pi package source in
+  `.pi/settings.json`, and the managed Pi runtime-state block in `.gitignore`;
 - preserves Pi skill filters and unrelated settings;
 - rejects partial APM-managed updates until their lockfile can be refreshed;
 - supports explicit rollback to a lower exact release;
 - scopes the GitHub App token to one authorized repository; and
 - opens a normal PR whose repository checks must pass before a human merges it.
+
+When a subscriber selects Pi, an update also ensures this managed block in its
+`.gitignore` (the dry-run receipt lists `.gitignore` among the changes and
+reports `piRuntimeIgnore` as `missing`, `incomplete` or `current`; a rollback
+leaves it alone):
+
+```gitignore
+# cratis-ai: pi runtime state
+.ai-work/
+.pi/delegate/
+.pi/fusion/
+.pi/tasks/
+.pi/*-session-*/
+# end cratis-ai: pi runtime state
+```
+
+`.ai-work/` is included only when no other line in `.gitignore` already ignores
+it. Malformed (unmatched, nested or duplicate) managed markers are rejected before
+any writes, preserving unrelated ignore rules. `verify-no-work-records.yml` fails
+when these directories are tracked and the caller's path filters trigger it.
 
 Run the controller locally without GitHub writes:
 
@@ -543,6 +563,54 @@ contract remains the required numeric `pull_request` input and `PAT_WORKFLOWS`
 secret, plus the optional `PACKAGE_CLEANUP_TOKEN` secret. See
 [Cleaning up PR artifacts](#cleaning-up-pr-artifacts) for matching rules, permissions,
 manual approval inputs, recovery limitations, and offline verification.
+
+---
+
+### `verify-no-work-records.yml`
+
+A reusable guard that fails when AI session work records are tracked. It applies five rules:
+
+| Rule | Fails when tracked |
+|---|---|
+| `ai-work` | anything under `.ai-work/` |
+| `pi-runtime` | anything under `.pi/delegate/`, `.pi/fusion/`, `.pi/tasks/` or `.pi/*-session-*/`; `.pi/settings.json` and `.pi/extensions/` stay allowed |
+| `root-document` | a root-level SCREAMING-CASE `.md` file outside the root allowlist (`README`, `LICENSE`, `AGENTS`, `CLAUDE`, `GEMINI`, `CODE_OF_CONDUCT`, `CONTRIBUTING`, `SECURITY`, `CHANGELOG`, `CREDITS`, `RESOURCES`, `BRAND`, `MESSAGING`, `PAGES`, `SITE`, `PRIVACY_POLICY`, `ROADMAP`, `START-HERE`, `CHRONICLE`, `COMPATIBILITY`, `NOTICE`, `SUPPORT`, `GOVERNANCE`, `VERSION`, `DECISIONS`) |
+| `session` | explicit session prefixes at any depth, case-insensitively (`Handover-*`, `PROMPT-*`, `NEXT-SESSION`, `Session-*`, with `-` or `_` separators); legacy embedded all-caps names such as `HANDOVER.md` are also caught; never exempted by a documentation directory. Bare `prompt.md`, `session.md` and `handover.md` remain ordinary product files |
+| `work-record-shape` | a `PLAN`, `DESIGN`, `REPORT` or `STATUS` file at any depth (`PLAN-foo.md`, `Plan-foo.md`, `Status.md`), outside the documentation directories and product `templates/` directories |
+
+Decision records are documentation. `decisions/`, `Documentation/`, `docs/`, `Knowledge/`, `evidence/` and `governance/` at the repository root exempt the `work-record-shape` rule, case-insensitively. Product `templates/` directories at any depth also exempt the shape rule (for example Direct's prompt sections), not the session/runtime rules. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Work-record prefixes match every letter case, including `pLaN-notes.md` and `design-notes.md`, outside the documentation directories.
+
+Inputs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `runs-on` | `ubuntu-latest` | Runner label |
+| `extra-allowed` | empty | Comma-separated additional root-level file names, with or without `.md`; exempts the root-document and work-record-shape rules, not session/runtime rules |
+| `extra-allowed-paths` | empty | Comma-separated additional documentation directory prefixes, such as `product-docs/` |
+
+Existing `@main` callers retain their root exemptions. `evidence/` and `governance/`
+are documentation by default, so Strategy's reviewed documents require no coordinated
+new-input rollout. Other documentation directories can use `extra-allowed-paths`
+after the reusable workflow exposing that input is available.
+
+Callers must include `.pi/**` in both `pull_request.paths` and `push.paths` for the
+`pi-runtime` rule to run on runtime-only changes; updating the reusable workflow
+alone does not update caller triggers. Keep their branch filters, runner and other
+settings unchanged. For each event's paths, use:
+
+```yaml
+paths: ["**.md", ".ai-work/**", ".pi/**"]
+```
+
+Without `.pi/**`, runtime-only changes do not run the guard. Updating the bootstrap
+caller template is an organization-wide rollout and is reviewed separately; no
+fleet-wide writes are performed by this change or by the checker itself.
+
+Exit codes: `0` ran and found nothing, `1` ran and found violations (one line per file with the rule id), `2` could not run (`git ls-files` failed or listed no files). A green run prints `scanned: <n> tracked files, rules: 5, violations: 0`.
+
+The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. The downloaded script's SHA-256 must match the workflow's reviewed checksum before execution. When changing the script, commit it first and update the workflow's script pin and checksum. Offline tests compare the checksum with the tested source without needing the script commit in a shallow or squash-merged checkout.
+
+Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
 
 ---
 

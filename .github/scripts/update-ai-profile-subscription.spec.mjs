@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import {
     applySubscriptionUpdate,
     compareSemVer,
+    planPiRuntimeIgnore,
     planSubscriptionUpdate,
 } from "./update-ai-profile-subscription.mjs";
 
@@ -133,8 +134,9 @@ test("dry-run plans only subscription and exact Pi package changes", () => {
         assert.equal(plan.toVersion, "1.1.0");
         assert.deepEqual(
             plan.changes.map((entry) => entry.path),
-            [".cratis/ai.json", ".pi/settings.json"],
+            [".cratis/ai.json", ".pi/settings.json", ".gitignore"],
         );
+        assert.equal(plan.piRuntimeIgnore, "missing");
         assert(readFileSync(join(repository, ".cratis/ai.json")).equals(beforeSubscription));
         assert(readFileSync(join(repository, ".pi/settings.json")).equals(beforePi));
     });
@@ -283,7 +285,7 @@ test("application framework client and documentation repositories plan independe
                 releaseManifestPath: release,
             });
             assert.equal(plan.state, "UPDATE_READY", kind);
-            assert.equal(plan.changes.length, 2, kind);
+            assert.equal(plan.changes.length, 3, kind);
         }
     });
 });
@@ -387,5 +389,135 @@ test("CLI is dry-run by default and emits an auditable receipt", () => {
             readdirSync(join(repository, ".cratis")).sort(),
             ["PROJECT.md", "ai.json"],
         );
+    });
+});
+
+const runtimeBlock = [
+    "# cratis-ai: pi runtime state",
+    ".ai-work/",
+    ".pi/delegate/",
+    ".pi/fusion/",
+    ".pi/tasks/",
+    ".pi/*-session-*/",
+    "# end cratis-ai: pi runtime state",
+    "",
+].join("\n");
+
+test("apply adds the Pi runtime-state ignore block once and a second run changes nothing", () => {
+    withFixture((root) => {
+        const repository = createRepository(root);
+        writeFileSync(join(repository, ".gitignore"), "bin/\nobj/\n");
+        applySubscriptionUpdate(
+            planSubscriptionUpdate({
+                repositoryRoot: repository,
+                releaseManifestPath: manifestPath(root),
+            }),
+        );
+        const ignored = readFileSync(join(repository, ".gitignore"), "utf8");
+        assert.equal(ignored, `bin/\nobj/\n\n${runtimeBlock}`);
+        const second = planSubscriptionUpdate({
+            repositoryRoot: repository,
+            releaseManifestPath: manifestPath(
+                root,
+                releaseManifest({ version: "1.2.0" }),
+            ),
+        });
+        assert.equal(second.piRuntimeIgnore, "current");
+        assert.deepEqual(
+            second.changes.map((entry) => entry.path),
+            [".cratis/ai.json", ".pi/settings.json"],
+        );
+    });
+});
+
+test("a missing .gitignore is created with the managed block", () => {
+    withFixture((root) => {
+        const repository = createRepository(root);
+        const created = applySubscriptionUpdate(
+            planSubscriptionUpdate({
+                repositoryRoot: repository,
+                releaseManifestPath: manifestPath(root),
+            }),
+        );
+        assert.equal(created.state, "UPDATE_APPLIED");
+        assert.equal(readFileSync(join(repository, ".gitignore"), "utf8"), runtimeBlock);
+    });
+});
+
+test("an incomplete managed block is repaired and .ai-work/ is not duplicated", () => {
+    const stale = [
+        ".ai-work",
+        "# cratis-ai: pi runtime state",
+        ".pi/delegate/",
+        "# end cratis-ai: pi runtime state",
+        "node_modules/",
+        "",
+    ].join("\n");
+    const planned = planPiRuntimeIgnore(stale);
+    assert.equal(planned.state, "incomplete");
+    assert.equal(
+        planned.text,
+        [
+            ".ai-work",
+            "# cratis-ai: pi runtime state",
+            ".pi/delegate/",
+            ".pi/fusion/",
+            ".pi/tasks/",
+            ".pi/*-session-*/",
+            "# end cratis-ai: pi runtime state",
+            "node_modules/",
+            "",
+        ].join("\n"),
+    );
+    assert.equal(planPiRuntimeIgnore(planned.text).state, "current");
+});
+
+test("malformed managed markers are rejected without consuming unrelated rules", () => {
+    for (const current of [
+        "# cratis-ai: pi runtime state\n.pi/delegate/\nnode_modules/\n",
+        "node_modules/\n# end cratis-ai: pi runtime state\n",
+        "# end cratis-ai: pi runtime state\nnode_modules/\n# cratis-ai: pi runtime state\n",
+        `# cratis-ai: pi runtime state\n${runtimeBlock}node_modules/\n`,
+        `${runtimeBlock}${runtimeBlock}node_modules/\n`,
+    ]) {
+        withFixture((root) => {
+            const repository = createRepository(root);
+            writeFileSync(join(repository, ".gitignore"), current);
+            const beforeSubscription = readFileSync(join(repository, ".cratis/ai.json"));
+            for (let pass = 0; pass < 2; pass++) {
+                assert.throws(() => planSubscriptionUpdate({
+                    repositoryRoot: repository,
+                    releaseManifestPath: manifestPath(root),
+                }), /Malformed Pi runtime-state managed block/);
+                assert.equal(readFileSync(join(repository, ".gitignore"), "utf8"), current);
+                assert(readFileSync(join(repository, ".cratis/ai.json")).equals(beforeSubscription));
+            }
+        });
+    }
+});
+
+test("non-Pi repositories and rollbacks leave .gitignore alone", () => {
+    withFixture((root) => {
+        const nonPi = createRepository(root, {
+            name: "non-pi",
+            subscription: subscription({ harnesses: ["agent-plugin"] }),
+        });
+        const plan = planSubscriptionUpdate({
+            repositoryRoot: nonPi,
+            releaseManifestPath: manifestPath(root),
+        });
+        assert.equal(plan.piRuntimeIgnore, "not-applicable");
+        assert(!plan.changes.some((entry) => entry.path === ".gitignore"));
+        const piRollback = createRepository(root, {
+            name: "rollback",
+            subscription: subscription({ version: "1.1.0" }),
+            piSettings: { packages: ["npm:@cratis/ai-fundamentals@1.1.0"] },
+        });
+        const rollback = planSubscriptionUpdate({
+            repositoryRoot: piRollback,
+            releaseManifestPath: manifestPath(root, releaseManifest({ version: "1.0.0" })),
+            rollback: true,
+        });
+        assert(!rollback.changes.some((entry) => entry.path === ".gitignore"));
     });
 });

@@ -169,11 +169,13 @@ jobs:
           DEFAULT_BRANCH: ${{ steps.branch.outputs.default_branch }}
         run: |
           set -euo pipefail
-          mapfile -t changed < <(git -C subscriber diff --name-only)
+          # Include newly created files such as .gitignore, not just tracked diffs.
+          git -C subscriber ls-files --modified --others --exclude-standard > "$RUNNER_TEMP/subscription-changed-paths"
+          mapfile -t changed < "$RUNNER_TEMP/subscription-changed-paths"
           test "${#changed[@]}" -gt 0
           for path in "${changed[@]}"; do
             case "$path" in
-              .cratis/ai.json|.pi/settings.json) ;;
+              .cratis/ai.json|.pi/settings.json|.gitignore) ;;
               *)
                 echo "::error::Controller changed forbidden path: $path"
                 exit 1

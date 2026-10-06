@@ -1,9 +1,11 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
 name: Verify No Work Records
 
-# Reusable guard that fails when AI session work records (plans, handovers,
-# session notes, continuation prompts, status boards) are tracked in git.
-# Such files are local-only and live in the gitignored .ai-work/ folder;
-# durable follow-ups become GitHub issues instead of planning files.
+# Reusable guard for the caller's tracked files. The script is fetched at an
+# immutable Workflows commit because checkout below contains the caller's repo,
+# not this repository. Update the script pin whenever the script changes.
+# Exit codes: 0 clean, 1 violations, 2 could not run.
 
 on:
   workflow_call:
@@ -21,6 +23,11 @@ on:
         required: false
         type: string
         default: ""
+      extra-allowed-paths:
+        description: Comma-separated additional documentation directory prefixes (for example governance/,evidence/) whose work-record-style file names are allowed
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -34,46 +41,35 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       - name: Verify no AI work records are tracked
         env:
           EXTRA_ALLOWED: ${{ inputs.extra-allowed }}
+          EXTRA_ALLOWED_PATHS: ${{ inputs.extra-allowed-paths }}
         run: |
           set -euo pipefail
-          violations=()
-
-          # 1. Nothing under .ai-work/ may ever be tracked.
-          while IFS= read -r f; do
-            violations+=(".ai-work/ content must never be tracked: $f")
-          done < <(git ls-files -- '.ai-work/')
-
-          # 2. Root-level SCREAMING-CASE markdown outside the allowlist is a
-          #    work record (HANDOVER.md, PLAN.md, IMPLEMENTATION_STATUS.md, ...).
-          allow='README|LICENSE|AGENTS|CLAUDE|GEMINI|CODE_OF_CONDUCT|CONTRIBUTING|SECURITY|CHANGELOG|CREDITS|RESOURCES|BRAND|MESSAGING|PAGES|SITE|PRIVACY_POLICY|ROADMAP|START-HERE|CHRONICLE|COMPATIBILITY|NOTICE|SUPPORT|GOVERNANCE|VERSION'
-          IFS=',' read -ra extra <<< "${EXTRA_ALLOWED:-}"
-          for e in "${extra[@]}"; do
-            e="$(echo "$e" | xargs)"
-            [ -n "$e" ] && allow="$allow|${e%.md}"
-          done
-          while IFS= read -r f; do
-            echo "$f" | grep -qE "^($allow)\.md$" && continue
-            violations+=("work-record-style root document: $f")
-          done < <(git ls-files -- '*.md' | grep -E '^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$' || true)
-
-          # 3. Session/handover/prompt naming anywhere outside the AI corpus
-          #    adapter folders (uppercase convention only, to spare real docs).
-          while IFS= read -r f; do
-            case "$f" in
-              .claude/*|.github/*|.pi/*|.agents/*|.cratis/*|.ai-work/*) continue ;;
-            esac
-            violations+=("session work record: $f")
-          done < <(git ls-files -- '*.md' | grep -E '(^|/)[^/]*HANDOVER[^/]*\.md$|(^|/)PROMPT-[^/]+\.md$|(^|/)[^/]*NEXT-SESSION[^/]*\.md$|(^|/)SESSION-PROMPT[^/]*\.md$|(^|/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$' || true)
-
-          if [ ${#violations[@]} -gt 0 ]; then
-            printf '::error::%s\n' "${violations[@]}"
-            echo ""
-            echo "AI session work artifacts are local-only: keep them in the untracked"
-            echo ".ai-work/ folder. A follow-up"
-            echo "that must survive the session becomes a GitHub issue, not a file."
-            exit 1
+          if ! command -v curl >/dev/null || ! command -v node >/dev/null; then
+            echo 'could not run: curl and node are required' >&2
+            exit 2
           fi
-          echo "No AI work records tracked."
+          script="$RUNNER_TEMP/verify-no-work-records.mjs"
+          if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            'https://raw.githubusercontent.com/Cratis/Workflows/366135082754c74199b284163fb00b8e596cc424/.github/scripts/verify-no-work-records.mjs' \
+            --output "$script"; then
+            echo 'could not run: downloading the pinned work-record guard failed' >&2
+            exit 2
+          fi
+          script_sha256='4b0628fa06fb573f8b16f4398ded1c394f2b39294d6000bb1a65ce2711387c34'
+          if ! node --input-type=module --eval '
+            import { createHash } from "node:crypto";
+            import { readFileSync } from "node:fs";
+            const digest = createHash("sha256").update(readFileSync(process.argv[1])).digest("hex");
+            if (digest !== process.argv[2]) process.exit(2);
+          ' "$script" "$script_sha256"; then
+            echo 'could not run: pinned work-record guard checksum mismatch' >&2
+            exit 2
+          fi
+          node "$script"

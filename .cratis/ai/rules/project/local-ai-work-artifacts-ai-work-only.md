@@ -15,4 +15,6 @@ session notes, continuation prompts, status boards, scratch analyses. These are
   anything inside it.
 - A genuine follow-up that must survive the session becomes a GitHub issue,
   not a planning file. Knowledge that must outlive the session belongs in this
-  repository's documentation through normal review.
+  repository's documentation through normal review. A decision log is not a work
+  record: decision records live in `decisions/` or the repository's documented
+  decisions folder. Session prompts and handovers remain work records even there.

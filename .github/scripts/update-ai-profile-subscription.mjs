@@ -7,6 +7,7 @@ import {
     existsSync,
     readFileSync,
     renameSync,
+    unlinkSync,
     writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -150,6 +151,53 @@ function updatePiSettings(settings, manifest, currentVersion) {
     return { ...settings, packages };
 }
 
+const ignoreBlockStart = "# cratis-ai: pi runtime state";
+const ignoreBlockEnd = "# end cratis-ai: pi runtime state";
+const piRuntimeIgnoreEntries = [
+    ".pi/delegate/",
+    ".pi/fusion/",
+    ".pi/tasks/",
+    ".pi/*-session-*/",
+];
+
+function splitIgnoreBlock(text) {
+    const lines = text.split("\n");
+    const starts = lines.flatMap((line, index) => line === ignoreBlockStart ? [index] : []);
+    const ends = lines.flatMap((line, index) => line === ignoreBlockEnd ? [index] : []);
+    if (!starts.length && !ends.length) return { lines, start: -1, end: -1 };
+    if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0])
+        throw new Error("Malformed Pi runtime-state managed block in .gitignore");
+    return { lines, start: starts[0], end: ends[0] };
+}
+
+// Returns the desired .gitignore text and whether the managed block was missing,
+// incomplete or already current.
+export function planPiRuntimeIgnore(current) {
+    const { lines, start, end } = splitIgnoreBlock(current);
+    const outside =
+        start === -1
+            ? lines
+            : [...lines.slice(0, start), ...lines.slice(end + 1)];
+    const hasAiWork = outside.some((line) => /^\/?\.ai-work\/?$/.test(line.trim()));
+    const block = [
+        ignoreBlockStart,
+        ...(hasAiWork ? [] : [".ai-work/"]),
+        ...piRuntimeIgnoreEntries,
+        ignoreBlockEnd,
+    ];
+    if (start === -1) {
+        const kept = current.replace(/\n+$/, "");
+        const lead = kept.length === 0 ? [] : [kept, ""];
+        return { state: "missing", text: `${[...lead, ...block].join("\n")}\n` };
+    }
+    const existing = lines.slice(start, end + 1);
+    const same = existing.length === block.length && existing.every((line, index) => line === block[index]);
+    return {
+        state: same ? "current" : "incomplete",
+        text: same ? current : [...lines.slice(0, start), ...block, ...lines.slice(end + 1)].join("\n"),
+    };
+}
+
 function jsonBytes(value) {
     return Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -229,6 +277,22 @@ export function planSubscriptionUpdate({
         });
     }
 
+    let piRuntimeIgnore = "not-applicable";
+    if (subscription.harnesses.includes("pi") && !rollback) {
+        const ignorePath = join(root, ".gitignore");
+        const beforeIgnore = existsSync(ignorePath) ? readFileSync(ignorePath) : Buffer.alloc(0);
+        const planned = planPiRuntimeIgnore(beforeIgnore.toString("utf8"));
+        piRuntimeIgnore = planned.state;
+        if (planned.state !== "current")
+            writes.push({
+                absolutePath: ignorePath,
+                relativePath: ".gitignore",
+                before: beforeIgnore,
+                after: Buffer.from(planned.text),
+                existed: existsSync(ignorePath),
+            });
+    }
+
     return {
         schemaVersion: "1.0.0",
         state: rollback ? "ROLLBACK_READY" : "UPDATE_READY",
@@ -239,6 +303,7 @@ export function planSubscriptionUpdate({
         packageName: manifest.packageName,
         fromVersion: subscription.version,
         toVersion: manifest.version,
+        piRuntimeIgnore,
         releaseManifestSha256: sha256(readFileSync(releaseManifestPath)),
         changes: writes.map((entry) =>
             change(entry.relativePath, entry.before, entry.after),
@@ -255,8 +320,10 @@ export function applySubscriptionUpdate(plan) {
             applied.push(entry);
         }
     } catch (error) {
-        for (const entry of applied.reverse())
-            atomicWrite(entry.absolutePath, entry.before);
+        for (const entry of applied.reverse()) {
+            if (entry.existed === false) unlinkSync(entry.absolutePath);
+            else atomicWrite(entry.absolutePath, entry.before);
+        }
         throw new Error("Subscription update was rolled back after a write failure", {
             cause: error,
         });

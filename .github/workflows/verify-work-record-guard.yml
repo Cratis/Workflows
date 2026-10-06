@@ -1,0 +1,41 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Work Record Guard
+
+on:
+  pull_request:
+    paths:
+      - .github/scripts/verify-no-work-records.mjs
+      - .github/workflows/verify-no-work-records.yml
+      - .github/workflows/verify-work-record-guard.yml
+      - .github/scripts/tests/verify-no-work-records.test.py
+      - README.md
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/verify-no-work-records.mjs
+      - .github/workflows/verify-no-work-records.yml
+      - .github/workflows/verify-work-record-guard.yml
+      - .github/scripts/tests/verify-no-work-records.test.py
+      - README.md
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out workflow and offline tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Check guard syntax
+        run: node --check .github/scripts/verify-no-work-records.mjs
+      - name: Exercise the extracted guard and pinned caller
+        # Fixture repositories only; no GitHub contact. Includes --self-test and its red control.
+        run: python3 -B .github/scripts/tests/verify-no-work-records.test.py
