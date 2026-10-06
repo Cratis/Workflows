@@ -62,4 +62,14 @@ jobs:
             echo 'could not run: downloading the pinned work-record guard failed' >&2
             exit 2
           fi
+          script_sha256='3fa2ccb46c5fa58ab03ed8715786dc45ce2b1ffebd95bd5a5a30f7c14855aa33'
+          if ! node --input-type=module --eval '
+            import { createHash } from "node:crypto";
+            import { readFileSync } from "node:fs";
+            const digest = createHash("sha256").update(readFileSync(process.argv[1])).digest("hex");
+            if (digest !== process.argv[2]) process.exit(2);
+          ' "$script" "$script_sha256"; then
+            echo 'could not run: pinned work-record guard checksum mismatch' >&2
+            exit 2
+          fi
           node "$script"

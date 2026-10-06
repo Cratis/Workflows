@@ -588,7 +588,7 @@ Inputs:
 
 Exit codes: `0` ran and found nothing, `1` ran and found violations (one line per file with the rule id), `2` could not run (`git ls-files` failed or listed no files). A green run prints `scanned: <n> tracked files, rules: 5, violations: 0`.
 
-The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. When changing the script, commit it first and update the workflow's script pin to that commit. The offline tests reject a pin whose script differs from the tested source.
+The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. The downloaded script's SHA-256 must match the workflow's reviewed checksum before execution. When changing the script, commit it first and update the workflow's script pin and checksum. Offline tests compare the checksum with the tested source without needing the script commit in a shallow or squash-merged checkout.
 
 Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
 

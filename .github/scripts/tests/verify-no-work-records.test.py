@@ -2,6 +2,7 @@
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 """Offline regressions for the extracted work-record guard."""
 import os
+import hashlib
 from pathlib import Path
 import subprocess
 import shutil
@@ -148,9 +149,9 @@ class Guard(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/verify-no-work-records.yml").read_text()
         pin = re.search(r"raw.githubusercontent.com/Cratis/Workflows/([a-f0-9]{40})/", workflow)
         self.assertIsNotNone(pin)
-        committed = subprocess.run(["git", "show", f"{pin[1]}:.github/scripts/verify-no-work-records.mjs"],
-                                   cwd=ROOT, capture_output=True, text=True, check=True)
-        self.assertEqual(committed.stdout, SOURCE)
+        digest = re.search(r"script_sha256='([a-f0-9]{64})'", workflow)
+        self.assertIsNotNone(digest)
+        self.assertEqual(digest[1], hashlib.sha256(SCRIPT.read_bytes()).hexdigest())
 
     def test_workflow_runs_against_the_caller_and_propagates_fetch_failure(self):
         workflow = (ROOT / ".github/workflows/verify-no-work-records.yml").read_text()
@@ -170,6 +171,11 @@ class Guard(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("Notes/pLaN-caller.md", result.stdout)
+            curl.write_text('#!/bin/sh\nfor arg; do output="$arg"; done\nprintf "wrong script" > "$output"\n')
+            result = subprocess.run(["/bin/bash", "-c", shell], cwd=caller, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("checksum mismatch", result.stderr)
             curl.write_text('#!/bin/sh\nexit 1\n')
             result = subprocess.run(["/bin/bash", "-c", shell], cwd=caller, env=env,
                                     capture_output=True, text=True)
