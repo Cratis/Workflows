@@ -28,12 +28,14 @@ export function checkPaths(files, environment = process.env) {
         } else if (/^\.pi\/(delegate|fusion|tasks|[^/]*-session-[^/]*)\//.test(path)) {
             rule = 'pi-runtime';
         } else if (/\.md$/i.test(path)) {
-            if (!path.includes('/') && /^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$/.test(path) && !allowed.has(path.slice(0, -3).toUpperCase())) {
+            const allowedRoot = !path.includes('/') && allowed.has(path.slice(0, -3).toUpperCase());
+            const documentation = /(^|\/)templates\//i.test(path) || docs.some(prefix => path.toLowerCase().startsWith(prefix));
+            if (!path.includes('/') && /^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$/.test(path) && !allowedRoot) {
                 rule = 'root-document';
             } else if (!/^\.(claude|github|pi|agents|cratis)\//.test(path)) {
                 if (legacySession.test(path) || session.test(path)) {
                     rule = 'session';
-                } else if (shape.test(path) && !(!path.includes('/') && allowed.has(path.slice(0, -3).toUpperCase())) && !docs.some(prefix => path.toLowerCase().startsWith(prefix))) {
+                } else if (shape.test(path) && !allowedRoot && !documentation) {
                     rule = 'work-record-shape';
                 }
             }
