@@ -225,7 +225,9 @@ leaves it alone):
 ```
 
 `.ai-work/` is included only when no other line in `.gitignore` already ignores
-it. `verify-no-work-records.yml` fails when these directories are tracked.
+it. Malformed (unmatched, nested or duplicate) managed markers are rejected before
+any writes, preserving unrelated ignore rules. `verify-no-work-records.yml` fails
+when these directories are tracked and the caller's path filters trigger it.
 
 Run the controller locally without GitHub writes:
 
@@ -573,18 +575,36 @@ A reusable guard that fails when AI session work records are tracked. It applies
 | `ai-work` | anything under `.ai-work/` |
 | `pi-runtime` | anything under `.pi/delegate/`, `.pi/fusion/`, `.pi/tasks/` or `.pi/*-session-*/`; `.pi/settings.json` and `.pi/extensions/` stay allowed |
 | `root-document` | a root-level SCREAMING-CASE `.md` file outside the root allowlist (`README`, `LICENSE`, `AGENTS`, `CLAUDE`, `GEMINI`, `CODE_OF_CONDUCT`, `CONTRIBUTING`, `SECURITY`, `CHANGELOG`, `CREDITS`, `RESOURCES`, `BRAND`, `MESSAGING`, `PAGES`, `SITE`, `PRIVACY_POLICY`, `ROADMAP`, `START-HERE`, `CHRONICLE`, `COMPATIBILITY`, `NOTICE`, `SUPPORT`, `GOVERNANCE`, `VERSION`, `DECISIONS`) |
-| `session` | a handover, prompt or next-session filename prefix at any depth, case-insensitively (`HANDOVER`, `PROMPT-*`, `NEXT-SESSION`, `SESSION-PROMPT`, `SESSION-HANDOVER`, `Session-*`); legacy embedded all-caps names are also caught; never exempted by a documentation directory |
-| `work-record-shape` | a `PLAN`, `DESIGN`, `REPORT` or `STATUS` file at any depth (`PLAN-foo.md`, `Plan-foo.md`, `Status.md`), outside the documentation directories |
+| `session` | explicit session prefixes at any depth, case-insensitively (`Handover-*`, `PROMPT-*`, `NEXT-SESSION`, `Session-*`, with `-` or `_` separators); legacy embedded all-caps names such as `HANDOVER.md` are also caught; never exempted by a documentation directory. Bare `prompt.md`, `session.md` and `handover.md` remain ordinary product files |
+| `work-record-shape` | a `PLAN`, `DESIGN`, `REPORT` or `STATUS` file at any depth (`PLAN-foo.md`, `Plan-foo.md`, `Status.md`), outside the documentation directories and product `templates/` directories |
 
-Decision records are documentation. `decisions/`, `Documentation/`, `docs/` and `Knowledge/` at the repository root exempt the `work-record-shape` rule, case-insensitively. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Work-record prefixes match every letter case, including `pLaN-notes.md` and `design-notes.md`, outside the documentation directories.
+Decision records are documentation. `decisions/`, `Documentation/`, `docs/`, `Knowledge/`, `evidence/` and `governance/` at the repository root exempt the `work-record-shape` rule, case-insensitively. Product `templates/` directories at any depth also exempt the shape rule (for example Direct's prompt sections), not the session/runtime rules. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Work-record prefixes match every letter case, including `pLaN-notes.md` and `design-notes.md`, outside the documentation directories.
 
 Inputs:
 
 | Input | Default | Meaning |
 |---|---|---|
 | `runs-on` | `ubuntu-latest` | Runner label |
-| `extra-allowed` | empty | Comma-separated additional root-level file names |
-| `extra-allowed-paths` | empty | Comma-separated additional documentation directory prefixes, such as `governance/,evidence/` |
+| `extra-allowed` | empty | Comma-separated additional root-level file names, with or without `.md`; exempts the root-document and work-record-shape rules, not session/runtime rules |
+| `extra-allowed-paths` | empty | Comma-separated additional documentation directory prefixes, such as `product-docs/` |
+
+Existing `@main` callers retain their root exemptions. `evidence/` and `governance/`
+are documentation by default, so Strategy's reviewed documents require no coordinated
+new-input rollout. Other documentation directories can use `extra-allowed-paths`
+after the reusable workflow exposing that input is available.
+
+Callers must include `.pi/**` in both `pull_request.paths` and `push.paths` for the
+`pi-runtime` rule to run on runtime-only changes; updating the reusable workflow
+alone does not update caller triggers. Keep their branch filters, runner and other
+settings unchanged. For each event's paths, use:
+
+```yaml
+paths: ["**.md", ".ai-work/**", ".pi/**"]
+```
+
+Without `.pi/**`, runtime-only changes do not run the guard. Updating the bootstrap
+caller template is an organization-wide rollout and is reviewed separately; no
+fleet-wide writes are performed by this change or by the checker itself.
 
 Exit codes: `0` ran and found nothing, `1` ran and found violations (one line per file with the rule id), `2` could not run (`git ls-files` failed or listed no files). A green run prints `scanned: <n> tracked files, rules: 5, violations: 0`.
 

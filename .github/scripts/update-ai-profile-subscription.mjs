@@ -162,10 +162,12 @@ const piRuntimeIgnoreEntries = [
 
 function splitIgnoreBlock(text) {
     const lines = text.split("\n");
-    const start = lines.indexOf(ignoreBlockStart);
-    const end = lines.indexOf(ignoreBlockEnd, start + 1);
-    if (start === -1 || end === -1) return { lines, start: -1, end: -1 };
-    return { lines, start, end };
+    const starts = lines.flatMap((line, index) => line === ignoreBlockStart ? [index] : []);
+    const ends = lines.flatMap((line, index) => line === ignoreBlockEnd ? [index] : []);
+    if (!starts.length && !ends.length) return { lines, start: -1, end: -1 };
+    if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0])
+        throw new Error("Malformed Pi runtime-state managed block in .gitignore");
+    return { lines, start: starts[0], end: ends[0] };
 }
 
 // Returns the desired .gitignore text and whether the managed block was missing,

@@ -27,6 +27,12 @@ CLEAN = [
     "Source/Design/overview.md",
     "Source/Reporting.md",
     "Source/Planning.md",
+    "templates/build-kit/lib/prompt.md",
+    "Source/Direct/Global/Work/Workers/Prompts/Templates/sections/report-progress.md",
+    "templates/session.md",
+    "templates/handover.md",
+    "evidence/design-partner-agreement-checklist.md",
+    "governance/plan-coverage-audit.md",
     "Documentation/adrs/0006-planning-roadmap-handover-authority.md",
     ".pi/settings.json",
     ".pi/extensions/lookup/index.ts",
@@ -73,9 +79,9 @@ class Guard(unittest.TestCase):
         dirty = [
             "PLAN-foo.md", "Plan-bar.md", "REPORT-weekly.md", "notes/DESIGN-bar.md",
             "notes/pLaN-mixed.md", "notes/dEsIgN-mixed.MD", "notes/rEpOrT-mixed.md",
-            "notes/sTaTuS-mixed.md", "docs/hAnDoVeR.md", "notes/pRoMpT-next.md",
+            "notes/sTaTuS-mixed.md", "docs/hAnDoVeR-notes.md", "notes/pRoMpT-next.md",
             "Notes/Plan-something.md", "Source/Report-weekly.md", "Source/Status-board.md",
-            "Source/STATUS.md", "decisions/HANDOVER.md", "docs/Handover.md", "docs/Session-notes.md",
+            "Source/STATUS.md", "decisions/HANDOVER.md", "docs/Handover-notes.md", "docs/Session-notes.md",
             "Notes/Next-Session.md", "IMPLEMENTATION_STATUS.md", ".ai-work/anything.md",
             ".pi/fusion/x/prompt.md", ".pi/delegate/run.json", ".pi/tasks/t.md",
             ".pi/review-session-1/state.json",
@@ -97,11 +103,37 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.run_script(self.fixture(CLEAN + ["decisions/HANDOVER.md"])).returncode, 1)
 
     def test_extra_allowed_inputs(self):
-        files = CLEAN + ["LIFECYCLE.md", "governance/plan-coverage-audit.md", "governance/Plan-coverage.md"]
+        files = CLEAN + ["LIFECYCLE.md", "product-docs/plan-coverage-audit.md", "product-docs/Plan-coverage.md"]
         self.assertEqual(self.run_script(self.fixture(files)).returncode, 1)
         result = self.run_script(self.fixture(files), EXTRA_ALLOWED="LIFECYCLE.md",
-                                 EXTRA_ALLOWED_PATHS="governance/")
+                                 EXTRA_ALLOWED_PATHS="product-docs/")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_legacy_extra_allowed_root_shapes_remain_allowed(self):
+        for name in ["PLAN.md", "DESIGN.md", "REPORT.md", "STATUS.md"]:
+            for allowed in [name, name[:-3]]:
+                with self.subTest(name=name, allowed=allowed):
+                    result = self.run_script(self.fixture(CLEAN + [name]), EXTRA_ALLOWED=allowed)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ["HANDOVER.md", "Session-notes.md", "templates/Session-notes.md", ".pi/tasks/run.json"]:
+            result = self.run_script(self.fixture(CLEAN + [name]), EXTRA_ALLOWED=name,
+                                     EXTRA_ALLOWED_PATHS=".pi/,docs/")
+            self.assertEqual(result.returncode, 1, name)
+
+    def test_listing_larger_than_one_megabyte(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tools = Path(temporary)
+            git = tools / "git"
+            git.write_text(f'#!{NODE}\nprocess.stdout.write(("Source/" + "x".repeat(100) + ".cs\\0").repeat(20000));\n')
+            git.chmod(0o755)
+            result = self.run_script(temporary, PATH=str(tools))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scanned: 20000 tracked files", result.stdout)
+
+    def test_github_actions_annotations_escape_command_data(self):
+        result = self.run_script(self.fixture(CLEAN + ["notes/Plan-100%\r\nnew.md"]), GITHUB_ACTIONS="true")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error title=work-record-shape::notes/Plan-100%25%0D%0Anew.md", result.stdout)
 
     def test_not_a_checkout_exits_two_with_reason(self):
         with tempfile.TemporaryDirectory() as empty:

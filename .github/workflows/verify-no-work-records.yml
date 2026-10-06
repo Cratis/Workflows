@@ -57,12 +57,12 @@ jobs:
           fi
           script="$RUNNER_TEMP/verify-no-work-records.mjs"
           if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
-            'https://raw.githubusercontent.com/Cratis/Workflows/854264789b977e26455a868b66e6b5b6f5c3abb6/.github/scripts/verify-no-work-records.mjs' \
+            'https://raw.githubusercontent.com/Cratis/Workflows/366135082754c74199b284163fb00b8e596cc424/.github/scripts/verify-no-work-records.mjs' \
             --output "$script"; then
             echo 'could not run: downloading the pinned work-record guard failed' >&2
             exit 2
           fi
-          script_sha256='3fa2ccb46c5fa58ab03ed8715786dc45ce2b1ffebd95bd5a5a30f7c14855aa33'
+          script_sha256='4b0628fa06fb573f8b16f4398ded1c394f2b39294d6000bb1a65ce2711387c34'
           if ! node --input-type=module --eval '
             import { createHash } from "node:crypto";
             import { readFileSync } from "node:fs";

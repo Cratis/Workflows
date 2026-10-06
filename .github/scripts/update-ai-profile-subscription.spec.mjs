@@ -472,6 +472,30 @@ test("an incomplete managed block is repaired and .ai-work/ is not duplicated", 
     assert.equal(planPiRuntimeIgnore(planned.text).state, "current");
 });
 
+test("malformed managed markers are rejected without consuming unrelated rules", () => {
+    for (const current of [
+        "# cratis-ai: pi runtime state\n.pi/delegate/\nnode_modules/\n",
+        "node_modules/\n# end cratis-ai: pi runtime state\n",
+        "# end cratis-ai: pi runtime state\nnode_modules/\n# cratis-ai: pi runtime state\n",
+        `# cratis-ai: pi runtime state\n${runtimeBlock}node_modules/\n`,
+        `${runtimeBlock}${runtimeBlock}node_modules/\n`,
+    ]) {
+        withFixture((root) => {
+            const repository = createRepository(root);
+            writeFileSync(join(repository, ".gitignore"), current);
+            const beforeSubscription = readFileSync(join(repository, ".cratis/ai.json"));
+            for (let pass = 0; pass < 2; pass++) {
+                assert.throws(() => planSubscriptionUpdate({
+                    repositoryRoot: repository,
+                    releaseManifestPath: manifestPath(root),
+                }), /Malformed Pi runtime-state managed block/);
+                assert.equal(readFileSync(join(repository, ".gitignore"), "utf8"), current);
+                assert(readFileSync(join(repository, ".cratis/ai.json")).equals(beforeSubscription));
+            }
+        });
+    }
+});
+
 test("non-Pi repositories and rollbacks leave .gitignore alone", () => {
     withFixture((root) => {
         const nonPi = createRepository(root, {
