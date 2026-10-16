@@ -51,10 +51,14 @@ on:
       nuget-package-exclusions:
         description: >-
           Comma-delimited NuGet package IDs that dotnet package update must leave
-          unchanged. Matching is exact and case-insensitive; defaults to none.
+          unchanged. Matching is exact and case-insensitive. StyleCop.Analyzers is
+          excluded by default: its 1.3.x betas add rules that fail the build of
+          every repository holding 1.2.0-beta.556 (SA1137, SA1204, SA1500, SA1602),
+          so an update would fail instead of opening a pull request. A caller that
+          sets this input replaces the default and lists the package itself to keep it held.
         type: string
         required: false
-        default: ''
+        default: StyleCop.Analyzers
       node-version:
         description: >-
           Node.js version used for NPM updates. Defaults to 24, which satisfies

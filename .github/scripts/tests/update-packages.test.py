@@ -314,7 +314,7 @@ class UpdatePackagesTests(unittest.TestCase):
         for name, default in [("publication-mode", "direct"), ("post-update-command", "''"),
                               ("pull-request-label", "''"), ("runs-on", "ubuntu-latest"),
                               ("npm-package-exclusions", "typescript"),
-                              ("nuget-package-exclusions", "''")]:
+                              ("nuget-package-exclusions", "StyleCop.Analyzers")]:
             # Input properties are more deeply indented; use the next top-level input.
             block = re.split(r"\n      [a-z]", inputs.split(f"      {name}:\n", 1)[1])[0]
             self.assertIn(f"default: {default}", block)
