@@ -253,9 +253,9 @@ render_policy_wrapper() {
     if: ${{ !cancelled() }}
 '
   fi
-  file_content="${file_content/__DEPENDABOT_JOB__/$normalizer}"
-  file_content="${file_content/__POLICY_NEEDS__/$needs}"
-  printf '%s\n' "${file_content/__RELEASE_INTENT__/$releases}"
+  file_content="${file_content/__DEPENDABOT_JOB__/"$normalizer"}"
+  file_content="${file_content/__POLICY_NEEDS__/"$needs"}"
+  printf '%s\n' "${file_content/__RELEASE_INTENT__/"$releases"}"
 }
 
 # .github/codeql/codeql-config.yml — shared CodeQL configuration
