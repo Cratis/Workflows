@@ -98,6 +98,47 @@ test("each blocking failure, missing or skipped outcome independently fails aggr
     assert.equal(aggregate({}).status, 0);
 });
 
+function probe(version) {
+    const bin = join(root, `bin-${counter++}`);
+    mkdirSync(bin);
+    if (version !== null) {
+        writeFileSync(join(bin, "node"), `#!/bin/sh\necho ${version}\n`, { mode: 0o755 });
+    }
+    const output = join(root, `probe-output-${counter++}`);
+    writeFileSync(output, "");
+    // Only the fake node directory and the system directories bash needs; no real node on PATH.
+    const result = spawnSync("/bin/bash", ["-e", "-o", "pipefail", "-c", shell(step("node-present"))], {
+        encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin`, GITHUB_OUTPUT: output },
+    });
+    return { status: result.status, out: result.stdout + result.stderr, output: readFileSync(output, "utf8") };
+}
+
+test("setup-node is skipped only when Node 24 or later is already installed, never the job", () => {
+    for (const version of ["v24.0.0", "v24.11.1", "v25.2.0", "v100.0.0"]) {
+        const result = probe(version);
+        assert.equal(result.status, 0, result.out);
+        assert.equal(result.output, "ready=true\n", version);
+    }
+    for (const version of ["v22.21.1", "v20.0.0", "v8.17.0", "garbage", "", null]) {
+        const result = probe(version);
+        assert.equal(result.status, 0, result.out);
+        assert.equal(result.output, "", String(version));
+    }
+    assert.match(step("node-present"), /continue-on-error: true/);
+    assert.match(step("node"), /\n {8}if: \$\{\{ steps.node-present.outputs.ready != 'true' \}\}\n/);
+    assert.match(step("node"), /node-version: 24$/);
+    assert(steps.indexOf(step("node-present")) < steps.indexOf(step("node")), "probe runs before setup");
+    assert.doesNotMatch(workflow.split("\n    steps:\n")[0], /\n {4}if:/, "the verify job is never skipped");
+    assert.match(workflow, /NODE_PRESENT: \$\{\{ steps.node-present.outputs.ready \}\}/);
+    for (const outcome of ["skipped", "success"]) {
+        const result = aggregate({ NODE_PRESENT: "true", NODE_OUTCOME: outcome });
+        assert.equal(result.status, 0, result.out);
+        assert.match(result.summary, /\| Node setup \| (not applicable|pass) /);
+    }
+    assert.equal(aggregate({ NODE_PRESENT: "true", NODE_OUTCOME: "failure" }).status, 1);
+    for (const present of ["", "false"]) assert.equal(aggregate({ NODE_PRESENT: present, NODE_OUTCOME: "skipped" }).status, 1);
+});
+
 test("drift failures only warn; non-PR events and disabled or stacked intent may skip", () => {
     for (const env of [{ DRIFT_OUTCOME: "failure" }, { DRIFT_TREE_OUTCOME: "failure", DRIFT_READY: "", DRIFT_OUTCOME: "skipped" }]) {
         const result = aggregate(env);
