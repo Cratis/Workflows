@@ -699,9 +699,10 @@ non-archived Cratis repository's default branch with `PAT_WORKFLOWS` (read only)
 
 The checker, `.github/scripts/verify-release-concurrency.py`, looks at workflow files
 whose name contains `publish`, `release` or `deploy`. It skips `verify-*`,
-`auto-approve-*` and names containing `release-notes` or `release-intent`, and exempts a
-file whose only trigger is `workflow_call`, because a reusable piece runs inside its
-caller's group. For each remaining file:
+`auto-approve-*` and names containing `release-notes`, `release-intent` or
+`documentation` (a documentation workflow only triggers a site build, where the newest
+build covers the ones before it), and exempts a file whose only trigger is
+`workflow_call`, because a reusable piece runs inside its caller's group. For each remaining file:
 
 - any `cancel-in-progress` at workflow or job level that is not literally `false` is a
   violation, including an expression;
@@ -711,7 +712,8 @@ caller's group. For each remaining file:
 
 A workflow that deliberately keeps a single pending slot is listed in the script's
 `ALLOWLIST` with its repository, file and reason (today: Studio's `publish.yml`, which
-releases every unreleased pull request in one run). The exemption covers only the
+releases every unreleased pull request in one run, and Arc's `chronicle-published.yml`,
+a Chronicle dependency bump with one group per version that releases nothing itself). The exemption covers only the
 missing `queue: max`, never cancelling, and the sweep fails an entry once its file no
 longer needs it.
 
