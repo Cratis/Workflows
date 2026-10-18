@@ -6,10 +6,8 @@
 #   - cleanup-pr-artifacts.yml             — cleans up PR-published GitHub Packages
 #   - update-packages.yml                  — weekly package updates (NuGet + NPM)
 #   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
-#   - verify-no-work-records.yml           — fails PRs that track AI session work records
-#   - verify-release-notes.yml             — fails release-bound PRs whose description breaks the release-note contract
-#   - verify-semver-label.yml              — requires exactly one release-intent label; no-release only on Dependabot PRs;
-#                                            only in repositories that release with Cratis/release-action
+#   - verify-pull-request-policy.yml      — notes, drift, release intent and work records in one job;
+#                                           replaces only known bootstrapped legacy wrappers atomically
 #   - .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
@@ -226,6 +224,53 @@ BOOTSTRAPPED_FILES[".github/workflows/verify-release-notes.yml"]="bmFtZTogVmVyaW
 #         pull-requests: read
 BOOTSTRAPPED_FILES[".github/workflows/verify-semver-label.yml"]="bmFtZTogVmVyaWZ5IFNlbXZlciBMYWJlbAoKIyBUaGluIGNhbGxlciBvZiB0aGUgb3JnYW5pemF0aW9uLXdpZGUgcmVsZWFzZS1pbnRlbnQgZ2F0ZS4gVGhlIHBvbGljeSAtIHdoaWNoCiMgbGFiZWxzIGFyZSBhY2NlcHRlZCBhbmQgd2hhdCB0aGUgZXJyb3JzIHNheSAtIGxpdmVzIGluCiMgQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy92ZXJpZnktcmVsZWFzZS1pbnRlbnQueW1sLiBUaGlydHkgZGl2ZXJnaW5nCiMgcGVyLXJlcG9zaXRvcnkgY29waWVzIG9mIHRoYXQgbG9naWMgYXJlIGhvdyB0aGUgMjAyNi0wOC0yNSB1bmludGVuZGVkIHJlbGVhc2VzCiMgaGFwcGVuZWQ7IGRvIG5vdCByZWludHJvZHVjZSBsb2dpYyBoZXJlLiBJbnN0YWxsZWQgYW5kIGtlcHQgY3VycmVudCBieQojIENyYXRpcy9Xb3JrZmxvd3MnIGJvb3RzdHJhcC1jb21tb24td29ya2Zsb3dzLgojCiMgQSBEZXBlbmRhYm90IHB1bGwgcmVxdWVzdCBmaXJzdCBoYXMgaXRzIGxhYmVscyBjb3JyZWN0ZWQ6IERlcGVuZGFib3QgYWRkcyBtYWpvciwKIyBtaW5vciBvciBwYXRjaCBvbiBpdHMgb3duLCBhbmQgYSBEZXBlbmRhYm90IHB1bGwgcmVxdWVzdCBvbmx5IGV2ZXIgY2FycmllcwojIG5vLXJlbGVhc2UuIFRoZSBnYXRlIHRoZW4gcmVhZHMgdGhlIGxhYmVscyBhcyB0aGV5IGFyZSBub3csIHNvIGl0IHNlZXMgdGhlCiMgY29ycmVjdGlvbiBhbHRob3VnaCBhIGxhYmVsIGNoYW5nZSBtYWRlIHdpdGggR0lUSFVCX1RPS0VOIHN0YXJ0cyBubyBuZXcgcnVuLgojCiMgVGhlIGpvYiBpcyBuYW1lZCByZWxlYXNlLWludGVudCBzbyB0aGUgY2hlY2sgcmVhZHMgYHJlbGVhc2UtaW50ZW50IC8gdmVyaWZ5YCBhbmQKIyBkb2VzIG5vdCBjb2xsaWRlIHdpdGggYHZlcmlmeSAvIHZlcmlmeWAgZnJvbSB2ZXJpZnktbm8td29yay1yZWNvcmRzLgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKb246CiAgcHVsbF9yZXF1ZXN0OgogICAgdHlwZXM6IFtvcGVuZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkXQogICAgIyBTY29wZWQgdG8gdGhlIHNhbWUgYnJhbmNoIFB1Ymxpc2ggcmVsZWFzZXMgZnJvbS4gQSBwdWxsIHJlcXVlc3Qgc3RhY2tlZCBvbnRvIGFub3RoZXIgb25lJ3MgYnJhbmNoIGNhbm5vdAogICAgIyBjdXQgYSByZWxlYXNlLCBzbyBkZW1hbmRpbmcgYSB2ZXJzaW9uIGxhYmVsIG9mIGl0IHdvdWxkIGJlIGFza2luZyB3aGljaCB2ZXJzaW9uIGEgbWVyZ2UgdGhhdCBwdWJsaXNoZXMKICAgICMgbm90aGluZyBzaG91bGQgY2FycnkuCiAgICBicmFuY2hlczoKICAgICAgLSBtYWluCgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZAoKam9iczoKICBkZXBlbmRhYm90LWxhYmVsczoKICAgIGlmOiBnaXRodWIuZXZlbnQucHVsbF9yZXF1ZXN0LnVzZXIubG9naW4gPT0gJ2RlcGVuZGFib3RbYm90XScKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3Mvbm9ybWFsaXplLWRlcGVuZGFib3QtbGFiZWxzLnltbEBtYWluCiAgICBwZXJtaXNzaW9uczoKICAgICAgcHVsbC1yZXF1ZXN0czogd3JpdGUKCiAgcmVsZWFzZS1pbnRlbnQ6CiAgICBuZWVkczogZGVwZW5kYWJvdC1sYWJlbHMKICAgICMgQWxzbyBhZnRlciBhIGZhaWxlZCBvciBza2lwcGVkIGNvcnJlY3Rpb246IHRoZSBnYXRlIHRoZW4gcmVwb3J0cyB0aGUgbGFiZWxzIGFzIHRoZXkgYXJlLgogICAgaWY6ICR7eyAhY2FuY2VsbGVkKCkgfX0KICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2UtaW50ZW50LnltbEBtYWluCiAgICBwZXJtaXNzaW9uczoKICAgICAgY29udGVudHM6IHJlYWQKICAgICAgcHVsbC1yZXF1ZXN0czogcmVhZAo="
 
+# Legacy payloads above are retained as migration fixtures, not installed anymore.
+# One caller now supplies the policy / verify context. Tokens below are rendered
+# per repository; only releasing repositories get the separate write-scoped job.
+BOOTSTRAPPED_FILES[".github/workflows/verify-pull-request-policy.yml"]="bmFtZTogVmVyaWZ5IFB1bGwgUmVxdWVzdCBQb2xpY3kKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbb3BlbmVkLCBlZGl0ZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkLCByZWFkeV9mb3JfcmV2aWV3XQogIHB1c2g6CiAgICBicmFuY2hlczogW21haW5dCgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKcGVybWlzc2lvbnM6CiAgY29udGVudHM6IHJlYWQKICBwdWxsLXJlcXVlc3RzOiByZWFkCgpqb2JzOgpfX0RFUEVOREFCT1RfSk9CX18gIHBvbGljeToKX19QT0xJQ1lfTkVFRFNfXyAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3ZlcmlmeS1wdWxsLXJlcXVlc3QtcG9saWN5LnltbEBtYWluCiAgICB3aXRoOgogICAgICBydW5zLW9uOiAke3sgdmFycy5SVU5ORVJfR0FURSB8fCAnX19QT0xJQ1lfUlVOTkVSX18nIH19CiAgICAgIHJlbGVhc2UtaW50ZW50OiBfX1JFTEVBU0VfSU5URU5UX18K"
+
+# Blob ids of every historical bootstrap payload for each path (git log -p of
+# this script). Never accept an arbitrary wrapper just because its name matches.
+declare -A LEGACY_WRAPPER_HASHES
+LEGACY_WRAPPER_HASHES[".github/workflows/verify-no-work-records.yml"]="7c8cd3960a171a8a5d230cc307a5d51bd267f9d7 fd2934b809b5a306f1fecb37cb47c37768534cdc"
+LEGACY_WRAPPER_HASHES[".github/workflows/verify-release-notes.yml"]="3af453d97af21253079bc6f2ad244166584c7630 e68b9b6f9a60f2d2f2b3e8f144e3fdce4048d40f"
+LEGACY_WRAPPER_HASHES[".github/workflows/verify-semver-label.yml"]="5c60360adffde449eba3dcee57e49d1aea6573c6"
+for legacy_path in "${!LEGACY_WRAPPER_HASHES[@]}"; do
+  unset 'BOOTSTRAPPED_FILES['"$legacy_path"']'
+done
+
+# $3 is the default runner: GitHub-hosted for public repositories, whose pull_request jobs must never
+# reach self-hosted runners (any fork could run code there), and cratis-arc-small for private ones.
+# RUNNER_GATE overrides it per repository or organization.
+render_policy_wrapper() {
+  local file_content="$1" releases="$2" runner="$3" normalizer="" needs="" normalizer_with=""
+  # Bash 5.2+ expands an unquoted & in a substitution replacement to the match; the
+  # fragments contain &&. Quoting the replacement instead is not portable: Bash 3.2
+  # keeps the quotes literally.
+  shopt -u patsub_replacement 2>/dev/null || true
+  if [ "$runner" != ubuntu-latest ]; then
+    normalizer_with='    with:
+      runs-on: ${{ vars.RUNNER_GATE || '\''__POLICY_RUNNER__'\'' }}
+'
+  fi
+  if [ "$releases" = true ]; then
+    normalizer='  dependabot-labels:
+    if: github.event.pull_request.user.login == '\''dependabot[bot]'\'' && github.event.pull_request.base.ref == '\''main'\''
+    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main
+'"$normalizer_with"'    permissions:
+      pull-requests: write
+
+'
+    needs='    needs: dependabot-labels
+    if: ${{ !cancelled() }}
+'
+  fi
+  file_content="${file_content/__DEPENDABOT_JOB__/$normalizer}"
+  file_content="${file_content/__POLICY_NEEDS__/$needs}"
+  file_content="${file_content/__RELEASE_INTENT__/$releases}"
+  printf '%s\n' "${file_content//__POLICY_RUNNER__/$runner}"
+}
+
 # .github/codeql/codeql-config.yml — shared CodeQL configuration
 # Decodes to:
 #   name: "Cratis CodeQL config"
@@ -283,14 +328,24 @@ SEMVER_LABEL_FILE=".github/workflows/verify-semver-label.yml"
 # recursive tree (JSON). A repository that starts releasing is picked up on the next run, without a list to
 # maintain.
 releases_with_release_action() {
-  local repo="$1" tree="$2" blob_sha content
+  local repo="$1" tree="$2" blob_sha content encoded
+  local policy_file=".github/workflows/verify-pull-request-policy.yml"
   if echo "$tree" | jq -e --arg path "$SEMVER_LABEL_FILE" '.tree[] | select(.path == $path)' >/dev/null 2>&1; then
     return 0
   fi
   while read -r blob_sha; do
     [ -n "$blob_sha" ] || continue
-    content=$(gh api "repos/Cratis/$repo/git/blobs/$blob_sha" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
+    if ! encoded=$(gh api "repos/Cratis/$repo/git/blobs/$blob_sha" --jq '.content' 2>/dev/null) \
+      || ! content=$(printf '%s' "$encoded" | base64 -d 2>/dev/null); then
+      echo "  Could not discover release configuration in Cratis/$repo (blob $blob_sha); skipping repo" >&2
+      return 2
+    fi
     if grep -qi 'Cratis/release-action' <<<"$content"; then
+      return 0
+    fi
+    if echo "$tree" | jq -e --arg path "$policy_file" --arg sha "$blob_sha" \
+      '.tree[] | select(.path == $path and .sha == $sha)' >/dev/null \
+      && grep -Eq '^[[:space:]]+release-intent:[[:space:]]+true([[:space:]]*(#.*)?)?$' <<<"$content"; then
       return 0
     fi
   done < <(echo "$tree" | jq -r '.tree[] | select(.type == "blob" and (.path | test("^[.]github/workflows/[^/]+[.]ya?ml$"))) | .sha')
@@ -318,11 +373,12 @@ if [ -n "$probe_repo" ]; then
   echo "✓ PAT has write access to Cratis/$probe_repo (pre-flight check passed)"
 fi
 
-echo "$repos" | jq -r '.[]' | while read -r repo; do
+update_repo() {
+  local repo="$1" attempt="$2"
   # Skip repos in the ignore list
   if echo "$repos_ignore" | jq -e --arg r "$repo" 'index($r) != null' >/dev/null 2>&1; then
     echo "Skipping $repo (in ignore list)"
-    continue
+    return 0
   fi
 
   echo "Processing Cratis/$repo..."
@@ -338,9 +394,19 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     echo "  ⚠ Could not get default branch for $repo, skipping"
     [ -n "$repo_info_api_error" ] && echo "    API error: $repo_info_api_error"
     rm -f "$repo_info_error"
-    continue
+    return 1
   fi
   rm -f "$repo_info_error"
+  # Unknown visibility must never fall back to a self-hosted runner for a public repository.
+  repo_private=$(gh api "repos/Cratis/$repo" --jq '.private' 2>/dev/null || true)
+  case "$repo_private" in
+    true) repo_runner=cratis-arc-small ;;
+    false) repo_runner=ubuntu-latest ;;
+    *)
+      echo "  ⚠ Could not determine the visibility of $repo, skipping"
+      return 1
+      ;;
+  esac
 
   head_sha_error=$(mktemp)
   _head_sha_resp=$(gh api "repos/Cratis/$repo/git/ref/heads/$default_branch" \
@@ -351,7 +417,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     echo "  ⚠ Could not get HEAD SHA for $repo ($default_branch branch not found), skipping"
     [ -n "$head_sha_api_error" ] && echo "    API error: $head_sha_api_error"
     rm -f "$head_sha_error"
-    continue
+    return 1
   fi
   rm -f "$head_sha_error"
 
@@ -367,7 +433,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     echo "  ⚠ Could not get tree SHA for $repo, skipping"
     [ -n "$tree_sha_api_error" ] && echo "    API error: $tree_sha_api_error"
     rm -f "$tree_sha_error"
-    continue
+    return 1
   fi
   rm -f "$tree_sha_error"
 
@@ -377,12 +443,12 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   subtree_error=$(mktemp)
   subtree=$(gh api "repos/Cratis/$repo/git/trees/$tree_sha?recursive=1" \
     2>"$subtree_error" || true)
-  if [ -z "$subtree" ]; then
+  if ! echo "$subtree" | jq -e '.truncated != true and (.tree | type == "array")' >/dev/null 2>&1; then
     subtree_api_error=$(cat "$subtree_error" 2>/dev/null || true)
     echo "  ⚠ Could not get tree for $repo, skipping"
     [ -n "$subtree_api_error" ] && echo "    API error: $subtree_api_error"
     rm -f "$subtree_error"
-    continue
+    return 1
   fi
   rm -f "$subtree_error"
 
@@ -393,22 +459,24 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
   has_changes=false
   commit_parts=()
 
-  repo_releases=""
+  repo_releases=false
+  discovery=0
+  releases_with_release_action "$repo" "$subtree" || discovery=$?
+  if [ "$discovery" -eq 0 ]; then repo_releases=true
+  elif [ "$discovery" -ne 1 ]; then return 1
+  fi
+  # Arc.Kotlin retains its deliberately pinned semver wrapper, not a second gate.
+  if skips_file "$SEMVER_LABEL_FILE" "$repo"; then repo_releases=false; fi
   for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
     if skips_file "$file_path" "$repo"; then
       echo "  ℹ Skipping $file_path (Cratis/$repo keeps its own copy)"
       continue
     fi
-    if [ "$file_path" = "$SEMVER_LABEL_FILE" ]; then
-      if [ -z "$repo_releases" ]; then
-        if releases_with_release_action "$repo" "$subtree"; then repo_releases=yes; else repo_releases=no; fi
-      fi
-      if [ "$repo_releases" = no ]; then
-        echo "  ℹ Skipping $file_path (Cratis/$repo does not release with Cratis/release-action)"
-        continue
-      fi
-    fi
     file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
+    if [ "$file_path" = ".github/workflows/verify-pull-request-policy.yml" ]; then
+      file_content=$(printf '%s' "$file_b64" | base64 -d)
+      file_b64=$(render_policy_wrapper "$file_content" "$repo_releases" "$repo_runner" | base64 | tr -d '\n')
+    fi
     if [ "$file_path" = ".github/workflows/update-packages.yml" ]; then
       file_content=$(printf '%s' "$file_b64" | base64 -d)
       file_content="${file_content/__PACKAGE_UPDATE_CRON__/$(package_update_cron "$repo")}"
@@ -438,8 +506,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       echo "  ⚠ Could not create blob for $file_label in $repo"
       [ -n "$blob_err" ] && echo "    blob error: $blob_err"
       rm -f "$blob_error"
-      echo "$repo" >> "$failures_file"
-      continue 2  # skip entire repo on blob failure
+      return 1  # No tree/ref update, so no legacy wrapper can be deleted.
     fi
     rm -f "$blob_error"
 
@@ -468,9 +535,25 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       '. + [{path: $path, mode: "100644", type: "blob", sha: $sha}]')
   done
 
+  # Add the replacement and deletions to ONE tree. This is reached only after
+  # every replacement blob was created successfully, including the policy blob.
+  for file_path in "${!LEGACY_WRAPPER_HASHES[@]}"; do
+    if skips_file "$file_path" "$repo"; then continue; fi
+    existing_sha=$(echo "$subtree" | jq -r --arg path "$file_path" '.tree[] | select(.path == $path) | .sha')
+    [ -n "$existing_sha" ] || continue
+    if [[ " ${LEGACY_WRAPPER_HASHES[$file_path]} " != *" $existing_sha "* ]]; then
+      echo "  Keeping customized $file_path in Cratis/$repo"
+      continue
+    fi
+    tree_entries=$(echo "$tree_entries" | jq --arg path "$file_path" \
+      '. + [{path: $path, mode: "100644", type: "blob", sha: null}]')
+    has_changes=true
+    commit_parts+=("remove $(basename "$file_path" .yml)")
+  done
+
   if [ "$has_changes" != "true" ]; then
     echo "  ℹ No changes needed for $repo"
-    continue
+    return 0
   fi
 
   # ----------------------------------------------------------------
@@ -498,8 +581,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
       [ -n "$tree_api_error" ] && echo "    API error: $tree_api_error"
     fi
     rm -f "$tree_error"
-    echo "$repo" >> "$failures_file"
-    continue
+    return 1
   fi
   rm -f "$tree_error"
 
@@ -525,8 +607,7 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     echo "  ⚠ Could not create commit for $repo"
     [ -n "$commit_api_error" ] && echo "    API error: $commit_api_error"
     rm -f "$commit_error"
-    echo "$repo" >> "$failures_file"
-    continue
+    return 1
   fi
   rm -f "$commit_error"
 
@@ -547,12 +628,25 @@ echo "$repos" | jq -r '.[]' | while read -r repo; do
     [ -n "$push_api_error" ] && echo "    API error: $push_api_error"
     [ -n "$push_msg" ]       && echo "    GitHub message: $push_msg"
     rm -f "$push_error"
-    echo "$repo" >> "$failures_file"
-    continue
+    if [ "$attempt" -eq 0 ] && grep -Eqi 'not a fast forward|not fast forward|non-fast-forward' <<<"$push_api_error $push_msg"; then
+      echo "  Branch moved; retrying once from fresh HEAD"
+      return 75
+    fi
+    return 1
   fi
   rm -f "$push_error"
 
   echo "  ✓ Pushed to $default_branch in $repo: $commit_message"
+}
+
+echo "$repos" | jq -r '.[]' | while read -r repo; do
+  result=0
+  update_repo "$repo" 0 || result=$?
+  if [ "$result" -eq 75 ]; then
+    result=0
+    update_repo "$repo" 1 || result=$?
+  fi
+  if [ "$result" -ne 0 ]; then echo "$repo" >> "$failures_file"; fi
 done
 
 total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")

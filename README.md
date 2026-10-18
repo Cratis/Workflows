@@ -584,7 +584,20 @@ The optional `runs-on` input (default `ubuntu-latest`) names the runner label, a
 
 The pull request template's comment states the same contract; it is propagated to every repository that is not in the template propagation's ignore list, including those where the check is not installed, so it says editing the description re-runs the check "where it is installed". Its placeholder bullets carry no `(#n)`: the comment shows the syntax, and a description that only fills in the placeholders must not arrive with a literal `(#123)`.
 
-The common workflow bootstrap installs `verify-release-notes.yml` in every non-archived Cratis repository that is not in the bootstrap's `REPOS_TO_IGNORE`, and, like its other wrappers, overwrites a copy that differs from the canonical one. It installs `verify-semver-label.yml` only where the repository already has it or one of its workflows uses `Cratis/release-action`, so a repository that never releases (a blog, samples, workshops, a Homebrew tap) does not get a gate that turns every pull request red; a repository that starts releasing gets it on the next run. The canonical release-notes caller passes `runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
+The common workflow bootstrap now installs `verify-pull-request-policy.yml` in every
+non-archived Cratis repository outside `REPOS_TO_IGNORE`. It removes each old
+`verify-release-notes.yml`, `verify-semver-label.yml` and `verify-no-work-records.yml`
+caller only when its blob matches a known historical bootstrap payload for that
+path; customized callers are kept and logged. Replacement and deletions share one
+Git tree and commit, and a failed replacement aborts the update. Ref updates remain
+nonforce; a non-fast-forward retries once after re-reading the fresh HEAD and files.
+
+An old semver caller, an existing policy caller with `release-intent: true`, or a
+workflow using `Cratis/release-action` enables intent and the normalizer. Detection
+errors skip the repository rather than installing a nonreleasing caller. Repositories
+that never release receive `release-intent: false`; Arc.Kotlin also receives false
+because it retains its pinned semver caller. The canonical policy caller passes
+`runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. The bootstrap reads each repository's visibility and renders that default per repository: a public repository gets `ubuntu-latest` (its `pull_request` jobs never run on self-hosted runners, per `.cratis/ai/rules/github-actions.md`), a private repository gets `cratis-arc-small`, also for the Dependabot label normalizer, and a repository whose visibility cannot be read is skipped. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
 
 A repository that keeps its own copy of one bootstrapped file, and takes every other one, is listed for that file in the script's `SKIP_FILE_REPOS`: Arc.Kotlin keeps its SHA-pinned `verify-semver-label.yml`.
 
@@ -592,8 +605,9 @@ Repositories in `REPOS_TO_IGNORE` never receive the callers automatically and ne
 
 The policy specs execute the combined inline programs, verify that the live-read,
 notes and drift copies remain byte-identical to the legacy reusable, and cover
-head-versus-merge drift, fetch failure and blocking aggregation. The bootstrap does
-not install the policy caller yet; repositories adopt it through reviewed changes.
+head-versus-merge drift, fetch failure and blocking aggregation. Offline bootstrap
+specs cover atomic migration, customizations, failed replacement/discovery,
+idempotence, release continuity and the bounded non-fast-forward retry.
 
 The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including a corpus of over 900 published Cratis release bodies (`.github/scripts/tests/fixtures/release-notes/corpus.json`) whose recorded rules any rule change must keep or deliberately update, and `.github/scripts/tests/verify-release-intent.spec.mjs` against the release-intent gate and the Dependabot normalizer.
 

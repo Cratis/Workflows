@@ -24,11 +24,17 @@ name: Normalize Dependabot Labels
 # check here would only hide the real ones.
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner for the job. Public repositories keep the GitHub-hosted default.
+        type: string
+        required: false
+        default: ubuntu-latest
 
 jobs:
   normalize:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
 
     steps:
