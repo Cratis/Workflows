@@ -1,0 +1,17 @@
+name: Publish
+
+# Aggregates every unreleased pull request per run, so a single pending slot is enough.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - run: echo release

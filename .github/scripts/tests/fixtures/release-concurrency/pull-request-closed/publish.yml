@@ -1,0 +1,17 @@
+name: Publish
+
+concurrency:
+  group: ${{ (github.event_name != 'pull_request' || github.event.pull_request.merged == true) && format('publish-{0}', github.repository) || format('publish-unmerged-{0}', github.run_id) }}
+  queue: max
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [closed]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - run: echo release

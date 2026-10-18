@@ -1,0 +1,16 @@
+name: Publish Documentation
+
+# Only dispatches a documentation site build; the newest build covers the ones before it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Documentation/**"
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo trigger documentation build
