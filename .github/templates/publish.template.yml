@@ -6,9 +6,15 @@
 
 name: Publish
 
+# Never cancel or drop a release. cratis/release-action releases one merged pull request per run, and
+# GitHub's default concurrency keeps a single pending run per group and cancels any older pending one,
+# so merges in quick succession would lose releases. `queue: max` keeps up to 100 pending runs and starts
+# them in order. Leave `cancel-in-progress` out: a cancelled half-publish is worse than a queued one, and
+# GitHub rejects `queue: max` combined with it. A pull request closed without merging releases nothing,
+# so it gets a group of its own and never takes a place in front of a real release.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ (github.event_name != 'pull_request' || github.event.pull_request.merged == true) && format('publish-{0}', github.repository) || format('publish-unmerged-{0}', github.run_id) }}
+  queue: max
 
 env:
   NUGET_OUTPUT: ./Artifacts/NuGet

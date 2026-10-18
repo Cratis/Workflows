@@ -1,0 +1,61 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Release Concurrency
+
+# Pull requests and pushes test the checker offline against its fixtures and the publish template.
+# The weekly sweep runs it over every non-archived Cratis repository and fails when any publish,
+# release or deploy workflow can cancel a release or drop a pending one (Cratis/Workflows#162).
+on:
+  pull_request:
+    paths:
+      - .github/scripts/verify-release-concurrency.py
+      - .github/scripts/tests/verify-release-concurrency.test.py
+      - .github/scripts/tests/fixtures/release-concurrency/**
+      - .github/templates/publish.template.yml
+      - .github/workflows/verify-release-concurrency.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/verify-release-concurrency.py
+      - .github/scripts/tests/verify-release-concurrency.test.py
+      - .github/scripts/tests/fixtures/release-concurrency/**
+      - .github/templates/publish.template.yml
+      - .github/workflows/verify-release-concurrency.yml
+  schedule:
+    - cron: "47 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The sweep has its own group so a push to main never cancels a running organization sweep.
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'sweep' || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the checker against its fixtures and the publish template
+        run: python3 -B .github/scripts/tests/verify-release-concurrency.test.py
+      - name: Prove the checker still finds planted violations
+        run: python3 -B .github/scripts/verify-release-concurrency.py --self-test
+
+  sweep:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check every Cratis release workflow
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: python3 -B .github/scripts/verify-release-concurrency.py --org

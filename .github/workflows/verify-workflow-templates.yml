@@ -8,6 +8,7 @@ on:
       - .github/workflows/**
       - .github/templates/**
       - .github/scripts/tests/workflow-templates.test.py
+      - .github/scripts/verify-release-concurrency.py
       - README.md
       - .cratis/ai/rules/project/what-lives-here.md
   push:
@@ -16,6 +17,7 @@ on:
       - .github/workflows/**
       - .github/templates/**
       - .github/scripts/tests/workflow-templates.test.py
+      - .github/scripts/verify-release-concurrency.py
       - README.md
       - .cratis/ai/rules/project/what-lives-here.md
 

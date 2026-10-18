@@ -460,6 +460,8 @@ This workflow is included in the common workflow bootstrap process and is automa
 
 > [!NOTE]
 > See [publish.template.yml](/.github/templates/publish.template.yml) for an example of a publish workflow that this auto-approve workflow will watch. Copy it to `.github/workflows/publish.yml` in the consuming repository and replace the placeholder package-publishing steps. It lives outside `.github/workflows` here because it is an incomplete example, not an executable workflow.
+>
+> The template never cancels or drops a release. `cratis/release-action` releases one merged pull request per run, and GitHub's default concurrency keeps a single pending run per group and cancels any older pending one, so merges in quick succession would lose releases. Its concurrency group therefore uses `queue: max`, which keeps up to 100 pending runs and starts them in order, and leaves `cancel-in-progress` out (GitHub rejects it together with `queue: max`). A pull request closed without merging gets a group of its own, so it never takes a place in front of a real release. Keep this block when customizing the copy; [`verify-release-concurrency.yml`](#verify-release-concurrencyyml) checks it across the organization.
 
 ---
 
@@ -739,6 +741,54 @@ Exit codes: `0` ran and found nothing, `1` ran and found violations (one line pe
 The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. The downloaded script's SHA-256 must match the workflow's reviewed checksum before execution. When changing the script, commit it first and update the workflow's script pin and checksum. Offline tests compare the checksum with the tested source without needing the script commit in a shallow or squash-merged checkout.
 
 Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
+
+---
+
+### `verify-release-concurrency.yml`
+
+**Triggers:** `pull_request` and `push` to `main` when the checker, its tests and
+fixtures, the publish template or the workflow change; weekly `schedule`; and
+`workflow_dispatch`.
+
+Fails when a Cratis publish, release or deploy workflow can cancel a release or drop
+a pending one. Pull requests and pushes run
+`.github/scripts/tests/verify-release-concurrency.test.py` (fixtures and the publish
+template) and the checker's `--self-test`. The schedule and manual runs sweep every
+non-archived Cratis repository's default branch with `PAT_WORKFLOWS` (read only).
+
+The checker, `.github/scripts/verify-release-concurrency.py`, looks at workflow files
+whose name contains `publish`, `release` or `deploy`. It skips `verify-*`,
+`auto-approve-*` and names containing `release-notes`, `release-intent` or
+`documentation` (a documentation workflow only triggers a site build, where the newest
+build covers the ones before it). A file whose `on:` lists `workflow_call` and no other
+trigger is exempt from every check, because it can only run as a reusable piece inside
+its caller's group; a file that also has its own trigger (for example `workflow_call`
+plus `workflow_dispatch`) is checked. For each remaining file:
+
+- any `cancel-in-progress` at workflow or job level that is not literally `false` is a
+  violation, including an expression;
+- a publish or release workflow (name not starting with `deploy`) must queue its
+  pending runs. GitHub applies the workflow-level group before any job group, so a
+  workflow-level concurrency block needs `queue: max` itself, unless its group is unique
+  per run or commit (it contains `github.run_id` or `github.sha`); then a job's
+  concurrency needs `queue: max`. Without a workflow-level block, a job's concurrency
+  needs `queue: max`. Other job groups without a queue (for example a latest-wins deploy
+  job) are fine. Deploy workflows need no queue: deploying the newest commit covers the
+  ones before it.
+
+A workflow that deliberately keeps a single pending slot is listed in the script's
+`ALLOWLIST` with its repository, file and reason (today: Studio's `publish.yml`, which
+releases every unreleased pull request in one run, and Arc's `chronicle-published.yml`,
+a Chronicle dependency bump with one group per version that releases nothing itself). The exemption covers only the
+missing `queue: max`, never cancelling, and the sweep fails an entry once its file no
+longer needs it.
+
+Run it with `--dir <workflows directory> [--repo <name>]`, `--org` (needs `GH_TOKEN`) or
+`--self-test`. Exit codes: `0` ran clean, `1` found violations (one
+`<repository>/<file>: <reason>` line each), `2` could not run (GitHub API error, no
+repositories, no workflow files or release subjects to check, or a release workflow
+that does not parse). A clean run prints
+`checked <n> repositories, <m> workflow files, <k> release subjects, 0 violations`.
 
 ---
 
