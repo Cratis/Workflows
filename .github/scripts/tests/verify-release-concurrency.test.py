@@ -89,6 +89,15 @@ class FixtureTests(unittest.TestCase):
         result = scan("not-a-subject")
         self.assertEqual((result.files, result.subjects, result.violations), (1, 0, []))
 
+    def test_documentation_workflow_is_not_a_subject(self):
+        result = scan("documentation")
+        self.assertEqual((result.files, result.subjects, result.violations), (1, 0, []))
+
+    def test_arc_chronicle_dependency_bump_is_allowlisted(self):
+        result = checker.Scan()
+        result.check("Arc", "chronicle-published.yml", UNQUEUED)
+        self.assertEqual((result.subjects, result.violations), (1, []))
+
     def test_allowlisted_file_passes_only_for_its_repository(self):
         allowed = scan("allowlisted", repo="Studio")
         self.assertEqual((allowed.violations, allowed.allowlist_used), ([], {("Studio", "publish.yml")}))
@@ -104,11 +113,20 @@ class SubjectNameTests(unittest.TestCase):
         for name in ["publish.yml", "Release.yaml", "deploy-staging.yml", "preview-publish.yml"]:
             self.assertTrue(checker.is_subject_name(name), name)
         for name in ["verify-publish.yml", "verify-release-notes.yml", "release-notes.yml",
-                     "release-intent.yml", "auto-approve-publish-deployments.yml", "build.yml", "publish.txt"]:
+                     "release-intent.yml", "auto-approve-publish-deployments.yml", "build.yml", "publish.txt",
+                     "publish-documentation.yml"]:
             self.assertFalse(checker.is_subject_name(name), name)
 
 
 class OrganizationTests(unittest.TestCase):
+    def setUp(self):
+        # Scope the sweep to the Studio entry so each fake organization need not carry every allowlisted file.
+        studio = tuple(entry for entry in checker.ALLOWLIST if entry[0] == "Studio")
+        for name, value in (("ALLOWLIST", studio), ("ALLOWED", {entry[:2] for entry in studio})):
+            patcher = patch.object(checker, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_sweep_skips_archived_repositories_and_counts_ones_without_workflows(self):
         api = FakeAPI([{"name": "Arc"}, {"name": "Empty"}, {"name": "Old", "archived": True}, {"name": "Studio"}],
                       {"Arc": {"publish.yml": QUEUED, "build.yml": UNQUEUED}, "Studio": {"publish.yml": UNQUEUED}})

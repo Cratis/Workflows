@@ -32,6 +32,8 @@ SUBJECT_PATTERN = re.compile(r"publish|release|deploy", re.IGNORECASE)
 ALLOWLIST = (
     ("Studio", "publish.yml",
      "aggregates every unreleased pull request per run and keeps a single pending slot on purpose (plan §5)"),
+    ("Arc", "chronicle-published.yml",
+     "dependency bump per Chronicle version, one group per version; not a release of Arc"),
 )
 ALLOWED = {(repo, name) for repo, name, _ in ALLOWLIST}
 
@@ -52,7 +54,9 @@ def is_subject_name(name):
     lower = name.lower()
     if not lower.endswith(WORKFLOW_SUFFIXES) or not SUBJECT_PATTERN.search(lower):
         return False
-    excluded = lower.startswith(("verify-", "auto-approve")) or "release-notes" in lower or "release-intent" in lower
+    # A documentation workflow only triggers a site build, where latest-wins is correct.
+    excluded = (lower.startswith(("verify-", "auto-approve"))
+                or any(part in lower for part in ("release-notes", "release-intent", "documentation")))
     return not excluded
 
 
@@ -252,6 +256,7 @@ CLEAN = {
     "deploy-latest-wins.yml": "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: false\n",
     "release-reusable.yml": "on: workflow_call\nconcurrency:\n  group: release\n  cancel-in-progress: true\n",
     "verify-release-notes.yml": "on: pull_request\nconcurrency:\n  group: notes\n  cancel-in-progress: true\n",
+    "publish-documentation.yml": "on: push\njobs: {}\n",
 }
 
 
@@ -283,8 +288,12 @@ def self_test_allowlist():
         }
         return responses.__getitem__
 
-    still_needed = scan_organization(fake("on: push\njobs: {}\n")).violations
-    no_longer_needed = scan_organization(fake("on: push\n" + QUEUED)).violations
+    def violations(text):
+        # Other allowlist entries are absent from the fake organization and correctly reported as stale.
+        return [violation for violation in scan_organization(fake(text)).violations if violation[:2] == (repo, name)]
+
+    still_needed = violations("on: push\njobs: {}\n")
+    no_longer_needed = violations("on: push\n" + QUEUED)
     problems = [] if not still_needed else [f"allowlisted {repo}/{name} was reported: {still_needed}"]
     if not any("allowlist entry no longer needed" in reason for _, _, reason in no_longer_needed):
         problems.append(f"stale allowlist entry {repo}/{name} was not reported")
