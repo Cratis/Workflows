@@ -79,7 +79,8 @@ env:
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
-    # The staggered rollout spreads repositories over 10–15 minutes; 90 minutes bounds a hung run.
+    # A slow run waits up to 45 minutes for the canary and then staggers the other repositories over 10–15
+    # minutes; 90 minutes leaves room for that and still bounds a hung run.
     timeout-minutes: 90
     # One organization-wide write at a time. A newer run waits instead of cancelling one
     # that is part-way through pushing; it syncs from main, so only the latest pending run matters.
