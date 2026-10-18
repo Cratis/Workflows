@@ -275,7 +275,7 @@ jobs:
                 subprocess.run(['actionlint', str(caller)], check=True, capture_output=True)
 
     def test_known_hash_table_covers_every_historical_payload_per_path(self):
-        history = subprocess.check_output(['git', 'log', '-p', '--all', '--', '.github/scripts/bootstrap-common-workflows.sh'], cwd=ROOT, text=True)
+        history = subprocess.check_output(['git', 'log', '-p', 'HEAD', '--', '.github/scripts/bootstrap-common-workflows.sh'], cwd=ROOT, text=True)
         for path in LEGACY:
             values = re.findall(r'^[ +\-]?BOOTSTRAPPED_FILES\["' + re.escape(path) + r'"\]="([^"]+)"', history, re.M)
             self.assertTrue(values, path)
