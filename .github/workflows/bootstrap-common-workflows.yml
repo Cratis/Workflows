@@ -60,6 +60,9 @@ env:
   # Strategy - private, and deliberately removed its cleanup-pr-artifacts, update-packages and
   #   auto-approve-publish-deployments workflows (2026-09-27); its verify-no-work-records runs on cratis-arc
   # Identity - private and new: the canonical wrappers run on ubuntu-latest, which has no budget there
+  # KeldaKraft, studio-cluster-verification - private: the 2026-10-18 run installed the canonical ubuntu-latest
+  #   update-packages, cleanup-pr-artifacts and auto-approve-publish-deployments wrappers there; they keep their
+  #   policy caller on cratis-arc-small and fix the rest through their own reviewed change
   # Ante, Chronicle.Elixir, Components, Orleans - public repositories with a deliberately customized
   #   update-packages.yml (staggered cron, pull-request publication mode, paused schedule, post-update command)
   # AI.Distribution - no longer in use; its branch protection also rejects direct pushes
@@ -71,7 +74,7 @@ env:
   # The ignored private and customized repositories install verify-release-notes.yml through their own
   #   reviewed change, copying the caller with their own runner fallback in its `runs-on` input (RUNNER_GATE is
   #   only an outage escape hatch, normally unset; Ensemble uses vars.ENSEMBLE_RUNNER)
-  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin","Chronicle.Go","Arc.Go","Fundamentals.Go"]'
+  REPOS_TO_IGNORE: '["Workflows","cratis.github.io","StudioIssues","Documentation","cratis.studio","Automation",".github","Dockerfiles","AI","Templates","Dockerfiles","release-action","Chronicle.Dapr","Chronicle.Wolverine","Stage","Studio","Direct","Ensemble","Infrastructure","Experiments","Strategy","Identity","KeldaKraft","studio-cluster-verification","Ante","Chronicle.Elixir","Components","Orleans","AI.Distribution","Arc.TypeScript","Chronicle.Python","Eventmodelers-Build-Kit-Java","Eventmodelers-Build-Kit-Kotlin","Chronicle.Go","Arc.Go","Fundamentals.Go"]'
 
 jobs:
   bootstrap:

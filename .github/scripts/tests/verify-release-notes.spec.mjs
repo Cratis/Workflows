@@ -806,7 +806,7 @@ test("the bootstrap leaves private and deliberately customized repositories to t
     const ignored = JSON.parse(/^ {2}REPOS_TO_IGNORE: '([^']+)'$/m.exec(BOOTSTRAP_WORKFLOW)[1]);
     // Private repositories have no GitHub-hosted Actions budget: their wrappers run on cratis-arc, and Strategy and
     // Identity have none of the canonical ones (removed on purpose, or a new repository whose CI is its own).
-    const privateRepositories = ["Studio", "Direct", "Ensemble", "Infrastructure", "Experiments", "Strategy", "Identity"];
+    const privateRepositories = ["Studio", "Direct", "Ensemble", "Infrastructure", "Experiments", "Strategy", "Identity", "KeldaKraft", "studio-cluster-verification"];
     // Public repositories whose update-packages.yml differs from the canonical wrapper on purpose.
     const customized = ["Ante", "Chronicle.Elixir", "Components", "Orleans"];
     for (const repository of [...privateRepositories, ...customized]) {
