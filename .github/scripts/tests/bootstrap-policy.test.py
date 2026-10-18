@@ -46,7 +46,10 @@ def tree_id(entries):
     sha = oid(entries)
     s['trees'][sha] = entries
     return sha
-if method == 'GET' and endpoint.count('/') == 2:
+if method == 'GET' and '/actions/runs?' in endpoint:
+    # The canary wait: this repository's commit starts no workflow runs.
+    result = {'total_count':0,'workflow_runs':[]}
+elif method == 'GET' and endpoint.count('/') == 2:
     result = {'default_branch':'main','permissions':{'push':True},'private':s.get('private',False)}
     if s.get('fail_visibility') and '.private' in a: error = 'HTTP 503 repository read failed'
 elif '/git/ref/heads/' in endpoint:
@@ -131,7 +134,8 @@ class BootstrapPolicyTests(unittest.TestCase):
         (self.directory / 'repos.json').write_text('["Example"]')
         self.env = {**os.environ, 'PATH': str(self.directory) + os.pathsep + os.environ['PATH'],
                     'STUB_STATE': str(self.state_file), 'REPOS_FILE': str(self.directory / 'repos.json'),
-                    'GITHUB_WORKSPACE': str(self.directory), 'REPOS_IGNORE': '[]', 'TMPDIR': str(self.directory)}
+                    'GITHUB_WORKSPACE': str(self.directory), 'REPOS_IGNORE': '[]', 'TMPDIR': str(self.directory),
+                    'SLEEP_CMD': 'true', 'CANARY_SETTLE_SECONDS': '0'}
 
     def initialize(self, files=None, **options):
         files = files if files is not None else {path: base64.b64decode(PAYLOADS[path]).decode() for path in LEGACY}

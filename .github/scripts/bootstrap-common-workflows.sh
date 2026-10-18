@@ -17,6 +17,17 @@
 #   - Already-bootstrapped: updates wrappers if their content has changed
 #   - Up-to-date repos:     skips processing
 #
+# Rollout (Cratis/Workflows#163): a run does not start every push-triggered
+# workflow in every repository at once.
+#   - Canary: the first repository that needs a change, trying the repositories
+#     in CANARY_PREFERENCE first, is pushed without [skip ci]. The rollout then
+#     waits for the workflow runs GitHub starts for that commit and stops (exit 1,
+#     no other repository touched) if any of them does not succeed or they are
+#     not complete within CANARY_TIMEOUT_SECONDS. A canary that starts no run
+#     within CANARY_SETTLE_SECONDS is logged and the rollout proceeds.
+#   - Every later commit ends with " [skip ci]" and waits STAGGER_SECONDS
+#     after the previous push; repositories that need no change do not wait.
+#
 # Expects:
 #   GH_TOKEN      - PAT with repo + Workflows permissions; the PAT owner must
 #                   be a bypass actor on target repos' branch protection rulesets
@@ -24,6 +35,15 @@
 #   REPOS_FILE    - path to a JSON file containing the repos array
 #                   (written by the "Get all Cratis repositories" step)
 #   REPOS_IGNORE  - JSON array of repo names to skip (e.g. '["Workflows"]')
+#   The PAT also needs Actions: Read to list the canary's workflow runs.
+#
+# Optional (defaults in brackets):
+#   CANARY_PREFERENCE      - repositories tried first as canary, space or comma separated [Fundamentals]
+#   CANARY_SETTLE_SECONDS  - how long to wait for the canary's first run to appear [300]
+#   CANARY_TIMEOUT_SECONDS - how long the canary's runs may take to complete [2700]
+#   CANARY_POLL_SECONDS    - interval between reads of the canary's runs [30]
+#   STAGGER_SECONDS        - wait before each push after the canary [20]
+#   SLEEP_CMD              - command used to wait; tests replace it [sleep]
 
 set -euo pipefail
 
@@ -47,6 +67,29 @@ extract_sha() {
 repos_file="${REPOS_FILE:-$GITHUB_WORKSPACE/repos.json}"
 repos_ignore="${REPOS_IGNORE:-[\"Workflows\"]}"
 repos=$(cat "$repos_file")
+
+canary_preference="${CANARY_PREFERENCE:-Fundamentals}"
+canary_settle_seconds="${CANARY_SETTLE_SECONDS:-300}"
+canary_timeout_seconds="${CANARY_TIMEOUT_SECONDS:-2700}"
+canary_poll_seconds="${CANARY_POLL_SECONDS:-30}"
+stagger_seconds="${STAGGER_SECONDS:-20}"
+sleep_cmd="${SLEEP_CMD:-sleep}"
+for setting in "CANARY_SETTLE_SECONDS=$canary_settle_seconds" "CANARY_TIMEOUT_SECONDS=$canary_timeout_seconds" \
+  "CANARY_POLL_SECONDS=$canary_poll_seconds" "STAGGER_SECONDS=$stagger_seconds"; do
+  if ! [[ "${setting#*=}" =~ ^[0-9]+$ ]]; then
+    echo "::error::${setting%%=*} must be a whole number of seconds, got '${setting#*=}'"
+    exit 2
+  fi
+done
+if [ "$canary_poll_seconds" -lt 1 ]; then
+  echo "::error::CANARY_POLL_SECONDS must be at least 1"
+  exit 2
+fi
+
+# Commits pushed so far in this run; the first one is the canary.
+pushes_done=0
+# Set by update_repo to the commit it pushed, empty when it pushed nothing.
+pushed_sha=""
 
 failures_file=$(mktemp)
 
@@ -353,6 +396,82 @@ releases_with_release_action() {
 }
 
 # ================================================================
+# Rollout: canary first, then staggered [skip ci] commits (Cratis/Workflows#163)
+# ================================================================
+
+# The repositories in processing order: those named in CANARY_PREFERENCE (in that order) first, then the rest in
+# their listed order. The first repository that pushes a commit is the canary, so it is the first preferred
+# repository that needs a change, or else the first repository that needs one.
+rollout_order() {
+  echo "$repos" | jq -r --arg preference "$canary_preference" '
+    . as $all
+    | reduce ($preference | splits("[\\s,]+") | select(length > 0)) as $name ([];
+        if ($all | index($name)) != null and index($name) == null then . + [$name] else . end)
+    | . as $first
+    | ($first + ($all | map(select(. as $name | $first | index($name) == null))))[]'
+}
+
+# Reads a workflow-runs response on stdin and prints none, pending, success or failure. A completed run counts as
+# a success only with conclusion success, skipped or neutral; anything else fails the canary.
+canary_runs_state() {
+  jq -r '
+    (.workflow_runs | if type == "array" then . else error("no workflow_runs array") end) as $runs
+    | def ok: .status == "completed" and ((.conclusion // "") as $c | ["success", "skipped", "neutral"] | index($c) != null);
+    if ($runs | length) == 0 then "none"
+    elif any($runs[]; .status == "completed" and (ok | not)) then "failure"
+    elif all($runs[]; ok) then "success"
+    else "pending" end'
+}
+
+# Waits for the workflow runs GitHub starts for the canary commit $2 in repository $1. Returns 0 when they all
+# succeeded or none started within CANARY_SETTLE_SECONDS, 1 when one failed, they did not complete within
+# CANARY_TIMEOUT_SECONDS, or the runs could not be read three times in a row. Elapsed time is counted in poll
+# intervals, so the wait is deterministic when SLEEP_CMD is replaced.
+wait_for_canary() {
+  local repo="$1" sha="$2" elapsed=0 read_errors=0 response state runs_error
+  echo "  Waiting for the workflow runs of canary Cratis/$repo at $sha..."
+  while true; do
+    runs_error=$(mktemp)
+    state=""
+    if response=$(gh api "repos/Cratis/$repo/actions/runs?head_sha=$sha&per_page=100" 2>"$runs_error") \
+      && state=$(printf '%s' "$response" | canary_runs_state 2>>"$runs_error"); then
+      read_errors=0
+    else
+      read_errors=$((read_errors + 1))
+      echo "  ⚠ Could not read the workflow runs of Cratis/$repo (attempt $read_errors of 3): $(cat "$runs_error" 2>/dev/null || true)"
+    fi
+    rm -f "$runs_error"
+    case "$state" in
+      success)
+        echo "  ✓ Canary Cratis/$repo: $(printf '%s' "$response" | jq '.workflow_runs | length') workflow run(s) succeeded"
+        return 0
+        ;;
+      failure)
+        echo "::error::Canary Cratis/$repo: a workflow run for $sha did not succeed; stopping the rollout"
+        printf '%s' "$response" | jq -r '.workflow_runs[] | "    \(.name // "?"): \(.status) \(.conclusion // "") \(.html_url // "")"'
+        return 1
+        ;;
+      none)
+        if [ "$elapsed" -ge "$canary_settle_seconds" ]; then
+          echo "  ℹ Canary Cratis/$repo started no workflow runs within ${canary_settle_seconds}s; proceeding"
+          return 0
+        fi
+        ;;
+    esac
+    if [ "$read_errors" -ge 3 ]; then
+      echo "::error::Could not read the workflow runs of canary Cratis/$repo; stopping the rollout"
+      return 1
+    fi
+    if [ "$elapsed" -ge "$canary_timeout_seconds" ]; then
+      echo "::error::Canary Cratis/$repo: workflow runs for $sha not complete after ${canary_timeout_seconds}s; stopping the rollout"
+      return 1
+    fi
+    "$sleep_cmd" "$canary_poll_seconds"
+    elapsed=$((elapsed + canary_poll_seconds))
+  done
+}
+
+# ================================================================
 # Pre-flight: verify PAT has write permission on target repositories
 # ================================================================
 probe_repo=$(echo "$repos" | jq -r \
@@ -375,6 +494,7 @@ fi
 
 update_repo() {
   local repo="$1" attempt="$2"
+  pushed_sha=""
   # Skip repos in the ignore list
   if echo "$repos_ignore" | jq -e --arg r "$repo" 'index($r) != null' >/dev/null 2>&1; then
     echo "Skipping $repo (in ignore list)"
@@ -591,6 +711,13 @@ update_repo() {
   # Join commit parts: "Add/Update cleanup-pr-artifacts, add update-packages"
   commit_message=$(IFS=', '; echo "Bootstrap common workflows: ${commit_parts[*]}")
   commit_message="${commit_message^}"  # Capitalize first letter
+  # Exception to .cratis/ai/rules/github-actions.md ("Do not add [skip ci] to bot commits as a load
+  # optimization"), approved for Cratis/Workflows#163: these commits touch only bootstrapped wrapper files, and
+  # the canary - the first commit of the run - keeps its CI run, which must succeed before any other repository
+  # is changed. Without it one run starts every push-triggered workflow in every repository at once.
+  if [ "$pushes_done" -gt 0 ]; then
+    commit_message="$commit_message [skip ci]"
+  fi
 
   commit_error=$(mktemp)
   _commit_resp=$(jq -n \
@@ -614,6 +741,11 @@ update_repo() {
   # ----------------------------------------------------------------
   # 7. Push commit directly to the default branch
   # ----------------------------------------------------------------
+  # Space out the pushes after the canary. A retry of the same repository already waited.
+  if [ "$pushes_done" -gt 0 ] && [ "$attempt" -eq 0 ] && [ "$stagger_seconds" -gt 0 ]; then
+    echo "  Waiting ${stagger_seconds}s before pushing (stagger)"
+    "$sleep_cmd" "$stagger_seconds"
+  fi
   push_error=$(mktemp)
   push_result=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
     -f sha="$new_commit_sha" \
@@ -635,25 +767,46 @@ update_repo() {
     return 1
   fi
   rm -f "$push_error"
+  pushed_sha="$updated_sha"
 
   echo "  ✓ Pushed to $default_branch in $repo: $commit_message"
 }
 
-echo "$repos" | jq -r '.[]' | while read -r repo; do
+# The loop runs in this shell (not a pipeline subshell) so the push count and the canary outcome survive it.
+rollout=$(rollout_order)
+mapfile -t ordered_repos <<<"$rollout"
+repos_processed=0
+canary_failed=""
+for repo in "${ordered_repos[@]}"; do
+  [ -n "$repo" ] || continue
+  repos_processed=$((repos_processed + 1))
   result=0
   update_repo "$repo" 0 || result=$?
   if [ "$result" -eq 75 ]; then
     result=0
     update_repo "$repo" 1 || result=$?
   fi
-  if [ "$result" -ne 0 ]; then echo "$repo" >> "$failures_file"; fi
+  if [ "$result" -ne 0 ]; then echo "$repo" >> "$failures_file"; continue; fi
+  [ -n "$pushed_sha" ] || continue
+  pushes_done=$((pushes_done + 1))
+  if [ "$pushes_done" -eq 1 ] && ! wait_for_canary "$repo" "$pushed_sha"; then
+    echo "$repo" >> "$failures_file"
+    canary_failed="$repo"
+    break
+  fi
 done
 
 total_failures=$(wc -l < "$failures_file" 2>/dev/null || echo "0")
 rm -f "$failures_file"
 
 echo ""
+echo "Processed $repos_processed repo(s), pushed $pushes_done commit(s)"
 echo "Summary: $total_failures failure(s)"
+
+if [ -n "$canary_failed" ]; then
+  echo "::error::Canary Cratis/$canary_failed did not pass; no other repository was changed after it."
+  exit 1
+fi
 
 if [ "$total_failures" -gt 0 ]; then
   echo "::error::$total_failures repo(s) failed. Check the log above for details."

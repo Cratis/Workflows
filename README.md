@@ -696,6 +696,31 @@ cleanup rollout. Its PAT requires the repository/workflow write permissions and
 branch-rule bypass described in the workflow. Exact deployment effects need
 separate approval before merging a watched file.
 
+A run does not start every push-triggered workflow in every repository at once
+([#163](https://github.com/Cratis/Workflows/issues/163)):
+
+- **Canary.** The first repository that needs a change is pushed normally and keeps
+  its CI run. Repositories named in `CANARY_PREFERENCE` (default `Fundamentals`) are
+  tried first, so the canary is the first of them that needs a change, or else the
+  first repository that needs one. The run then waits for the workflow runs GitHub
+  starts for the canary's commit. It stops with exit code 1, before any other
+  repository is changed, when one of them ends with a conclusion other than
+  `success`, `skipped` or `neutral`, when they are not complete after
+  `CANARY_TIMEOUT_SECONDS` (default 2700), or when the runs cannot be read three
+  times in a row. A canary that starts no run within `CANARY_SETTLE_SECONDS`
+  (default 300) is logged and the rollout continues. Reading the runs needs the PAT's
+  **Actions: Read** permission.
+- **`[skip ci]` on the rest.** Every later bootstrap commit touches only the
+  bootstrapped wrapper files and ends with ` [skip ci]`, an approved exception to
+  the rule against `[skip ci]` on bot commits: the canary's CI run is the check that
+  sees a merged result. Package-update and other bot commits are unchanged.
+- **Stagger.** Each push after the canary waits `STAGGER_SECONDS` (default 20).
+  Repositories that need no change do not wait, and a run with nothing to change
+  waits for no canary.
+
+The job has `timeout-minutes: 90`. `python3 -B .github/scripts/tests/bootstrap-rollout.test.py`
+exercises the rollout offline with a fake `gh` and a recording `SLEEP_CMD`.
+
 ---
 
 ### `propagate-pr-templates.yml`
