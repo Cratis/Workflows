@@ -1,0 +1,112 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Cratis .NET package cache
+description: >-
+  Restores the NuGet package cache under one key and one path list for every workflow
+  in a repository. Pull requests only restore; the cache is saved only from push to the
+  default branch, schedule, or workflow_dispatch on the default branch.
+
+inputs:
+  path:
+    description: Newline-separated paths to cache. Keep it identical everywhere; a different path list is a different cache.
+    required: false
+    default: ~/.nuget/packages
+  key-files:
+    description: Newline-separated hashFiles patterns the cache key is computed from.
+    required: false
+    default: |
+      **/packages.lock.json
+      **/*.props
+      **/*.targets
+      **/*.csproj
+      **/[Nn]u[Gg]et.[Cc]onfig
+      *.slnx
+      global.json
+  key-prefix:
+    description: Key prefix; bump the version suffix to start a fresh cache.
+    required: false
+    default: nuget-v1
+  mode:
+    description: "auto (save only on the default branch, schedule or workflow_dispatch on the default branch), restore (never save) or save (always save-capable)."
+    required: false
+    default: auto
+
+outputs:
+  cache-hit:
+    description: "'true' when the exact key was restored, otherwise 'false'."
+    value: ${{ steps.restore.outputs.cache-hit == 'true' }}
+  matched-key:
+    description: The key that was restored, exact or a restore-key prefix match; empty on a miss.
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+  key:
+    description: The primary cache key.
+    value: ${{ steps.resolve.outputs.key }}
+  mode:
+    description: The resolved mode, restore or save.
+    value: ${{ steps.resolve.outputs.mode }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve cache mode and key
+      id: resolve
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_PATH: ${{ inputs.path }}
+        CACHE_KEY_PREFIX: ${{ inputs.key-prefix }}-${{ runner.os }}-
+        CACHE_KEY_HASH: ${{ hashFiles(inputs.key-files) }}
+        EVENT_NAME: ${{ github.event_name }}
+        GIT_REF: ${{ github.ref }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        case "$INPUT_MODE" in
+          restore|save) mode="$INPUT_MODE" ;;
+          auto)
+            mode=restore
+            if [ "$EVENT_NAME" = schedule ]; then
+              mode=save
+            elif [ "$EVENT_NAME" = push ] || [ "$EVENT_NAME" = workflow_dispatch ]; then
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$GIT_REF" = "refs/heads/${DEFAULT_BRANCH}" ]; then
+                mode=save
+              fi
+            fi
+            ;;
+          *)
+            echo "::error title=dotnet-cache::mode must be auto, restore or save; got '${INPUT_MODE}'"
+            exit 2
+            ;;
+        esac
+        if [ -z "$CACHE_KEY_HASH" ]; then
+          echo "::error title=dotnet-cache::No file matched key-files; refusing to cache under a key without a content hash"
+          exit 2
+        fi
+        delimiter="path-$RANDOM-$RANDOM-$RANDOM"
+        {
+          echo "mode=${mode}"
+          echo "restore-key=${CACHE_KEY_PREFIX}"
+          echo "key=${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
+          echo "path<<${delimiter}"
+          printf '%s\n' "$INPUT_PATH"
+          echo "${delimiter}"
+        } >> "$GITHUB_OUTPUT"
+        echo "dotnet-cache: mode=${mode} key=${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
+
+    - name: Restore NuGet packages
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.path }}
+        key: ${{ steps.resolve.outputs.key }}
+        restore-keys: ${{ steps.resolve.outputs.restore-key }}
+
+    # Registers the post-job save without downloading again. actions/cache skips the
+    # save when the exact key already exists.
+    - name: Save NuGet packages at the end of the job
+      if: steps.resolve.outputs.mode == 'save'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.path }}
+        key: ${{ steps.resolve.outputs.key }}
+        lookup-only: true

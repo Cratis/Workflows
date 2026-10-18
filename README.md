@@ -471,6 +471,67 @@ The common workflow bootstrap also propagates **`.github/codeql/codeql-config.ym
 
 ---
 
+## Shared cache actions
+
+Two composite actions replace hand-written `actions/cache` steps. Each gives a repository one key and one path list per ecosystem. That matters because the path list is part of the cache version: a cache saved by a step with one path list is never restored by a step with another, even under the same key.
+
+Both follow the same rule:
+
+- **Pull requests only restore**, through `actions/cache/restore`. They never save, so they can no longer push main's caches out of GitHub's 10 GB repository limit.
+- **Saves happen only** on `push` to the default branch, on `schedule`, and on `workflow_dispatch` against the default branch. The save runs at the end of the job, and is skipped when a cache for the exact key already exists.
+- `mode: restore` never saves and `mode: save` always can; the default `mode: auto` applies the rule above.
+
+A pull request can only restore what main saved. **Add a push-to-main or nightly job that calls the action**, usually the build job you already run on `push: main`, so main always has a cache to restore.
+
+Outputs: `cache-hit` (`true` only when the exact key was restored), `matched-key` (the restored key, empty on a miss), `key` and `mode` (`restore` or `save`, as resolved).
+
+### `dotnet-cache`
+
+Caches NuGet packages only. Build output (`obj`) is not cached because it goes stale; reuse it within a run through a build-once artifact instead.
+
+```yaml
+# after checkout and actions/setup-dotnet
+- uses: Cratis/Workflows/.github/actions/dotnet-cache@main
+- run: dotnet restore
+```
+
+| Input | Default |
+|---|---|
+| `path` | `~/.nuget/packages` |
+| `key-files` | `**/packages.lock.json`, `**/*.props`, `**/*.targets`, `**/*.csproj`, `**/[Nn]u[Gg]et.[Cc]onfig`, `*.slnx`, `global.json` (one per line) |
+| `key-prefix` | `nuget-v1` |
+| `mode` | `auto` |
+
+The key is `<key-prefix>-<runner.os>-<hashFiles(key-files)>`, with `<key-prefix>-<runner.os>-` as the restore key. The action fails when `key-files` matches no file, because a key without a content hash would make every run share one stale cache.
+
+### `yarn-cache`
+
+Caches Yarn's package cache. It never caches `node_modules` (Yarn rebuilds it from the package cache on install) or `yarn.lock` (a restore would overwrite the checked-out lockfile before `yarn install --immutable` validates it). It fails when `working-directory` has no `yarn.lock`.
+
+Yarn 4 keeps its cache in a global folder (`~/.yarn/berry/cache`) unless `enableGlobalCache: false`, so by default the action caches the folder `yarn config get cacheFolder` reports in `working-directory`. That needs Yarn on `PATH`: run `actions/setup-node` and `corepack enable` before the action. Without Yarn, or when Yarn reports no folder (Yarn 1 prints `undefined`), it falls back to `<working-directory>/.yarn/cache`. An explicit `path` always wins and Yarn is not asked.
+
+```yaml
+# after checkout, actions/setup-node and corepack enable
+- uses: Cratis/Workflows/.github/actions/yarn-cache@main
+  with:
+    working-directory: Source/JavaScript
+- run: yarn install --immutable
+  working-directory: Source/JavaScript
+```
+
+| Input | Default |
+|---|---|
+| `working-directory` | `.` |
+| `path` | Yarn's `cacheFolder`, else `<working-directory>/.yarn/cache` |
+| `key-prefix` | `yarn-v1` |
+| `mode` | `auto` |
+
+The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <working-directory>/.yarnrc.yml)>`, with `<key-prefix>-<runner.os>-` as the restore key.
+
+`verify-cache-actions.yml` runs `.github/scripts/tests/cache-actions.test.py` (mode resolution, shared path and key, pinned actions) and calls both actions against `.github/scripts/tests/fixtures/cache-actions/` under `selftest-*` prefixes, so the self-test never touches a real cache.
+
+---
+
 ## Verifying release intent and release notes
 
 **`verify-pull-request-policy.yml`** combines release notes, warn-only release-note drift,
