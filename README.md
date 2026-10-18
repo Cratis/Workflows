@@ -752,8 +752,12 @@ A run does not start every push-triggered workflow in every repository at once
 - **Canary.** The first repository that needs a change is pushed normally and keeps
   its CI run. Repositories named in `CANARY_PREFERENCE` (default `Fundamentals`) are
   tried first, so the canary is the first of them that needs a change, or else the
-  first repository that needs one. The run then waits for the workflow runs GitHub
-  starts for the canary's commit. It stops with exit code 1, before any other
+  first repository that needs one. Before pushing it, the run checks that the PAT
+  can list that repository's Actions runs and stops with exit code 1, before any
+  push, when it cannot. The run then waits for the workflow runs GitHub starts for
+  the canary's commit. They pass only once `CANARY_SETTLE_SECONDS` have elapsed
+  since the push and two consecutive reads show the same completed runs, because
+  GitHub creates a commit's runs over several seconds. It stops with exit code 1, before any other
   repository is changed, when one of them ends with a conclusion other than
   `success`, `skipped` or `neutral`, when they are not complete after
   `CANARY_TIMEOUT_SECONDS` (default 2700), or when the runs cannot be read three
@@ -764,9 +768,9 @@ A run does not start every push-triggered workflow in every repository at once
   bootstrapped wrapper files and ends with ` [skip ci]`, an approved exception to
   the rule against `[skip ci]` on bot commits: the canary's CI run is the check that
   sees a merged result. Package-update and other bot commits are unchanged.
-- **Stagger.** Each push after the canary waits `STAGGER_SECONDS` (default 20).
-  Repositories that need no change do not wait, and a run with nothing to change
-  waits for no canary.
+- **Stagger.** After each push, the next repository waits `STAGGER_SECONDS`
+  (default 20) before its HEAD is read. A run with nothing to change waits for no
+  canary.
 
 The workflow sets none of these, so the script's defaults apply; they are
 environment variables of `.github/scripts/bootstrap-common-workflows.sh`.

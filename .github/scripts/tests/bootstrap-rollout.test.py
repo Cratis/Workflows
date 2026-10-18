@@ -32,7 +32,11 @@ error = None
 result = None
 def oid(x):
     return hashlib.sha1(json.dumps([name, x],sort_keys=True).encode()).hexdigest()
-if method == 'GET' and '/actions/runs?' in endpoint:
+if method == 'GET' and '/actions/runs?' in endpoint and 'head_sha=' not in endpoint:
+    # The pre-flight read of a canary's Actions runs.
+    if name in s.get('actions_unreadable', []): error = 'HTTP 403 Resource not accessible by personal access token'
+    else: result = {'total_count':0,'workflow_runs':[]}
+elif method == 'GET' and '/actions/runs?' in endpoint:
     sha = endpoint.split('head_sha=')[1].split('&')[0]
     script = s['runs'].get(name, [[]])
     read = s['run_reads'].get(name, 0)
@@ -123,7 +127,7 @@ class BootstrapRolloutTests(unittest.TestCase):
                     'STAGGER_SECONDS': str(STAGGER), 'CANARY_SETTLE_SECONDS': str(SETTLE),
                     'CANARY_TIMEOUT_SECONDS': str(TIMEOUT)}
 
-    def initialize(self, names, runs=None, up_to_date=()):
+    def initialize(self, names, runs=None, up_to_date=(), actions_unreadable=()):
         repos = {name: {'head': 'a'*40, 'commits': {'a'*40: {'tree': {'sha': 'b'*40}, 'message': 'Initial'}},
                         'trees': {'b'*40: []}, 'blobs': {}} for name in names}
         self.state_file.write_text(json.dumps({'repos': repos, 'runs': {}, 'run_reads': {}, 'calls': [],
@@ -136,6 +140,7 @@ class BootstrapRolloutTests(unittest.TestCase):
             self.state_file.write_text(json.dumps(state))
         state = json.loads(self.state_file.read_text())
         state['runs'] = runs or {}
+        state['actions_unreadable'] = list(actions_unreadable)
         self.state_file.write_text(json.dumps(state))
 
     def run_bootstrap(self, names, expected=0, **env):
@@ -168,10 +173,11 @@ class BootstrapRolloutTests(unittest.TestCase):
             [run('queued')],
             [run('completed', 'success'), run('completed', 'skipped', 'Docs'), run('completed', 'neutral', 'Lint')]]})
         out = self.run_bootstrap(['Alpha', 'Fundamentals', 'Beta'])
-        self.assertEqual(self.state['events'], ['push Fundamentals', f'sleep {POLL}',
-                                                f'sleep {STAGGER}', 'push Alpha', f'sleep {STAGGER}', 'push Beta'])
+        # Green from the second read on, but a verdict needs SETTLE elapsed and two equal consecutive reads.
+        self.assertEqual(self.state['events'], ['push Fundamentals'] + [f'sleep {POLL}'] * (SETTLE // POLL)
+                         + [f'sleep {STAGGER}', 'push Alpha', f'sleep {STAGGER}', 'push Beta'])
         self.assert_canary('Fundamentals', ['Alpha', 'Beta'])
-        self.assertEqual(self.state['run_reads'], {'Fundamentals': 2})
+        self.assertEqual(self.state['run_reads'], {'Fundamentals': SETTLE // POLL + 1})
         self.assertIn('Canary Cratis/Fundamentals: 3 workflow run(s) succeeded', out)
         self.assertIn('Processed 3 repo(s), pushed 3 commit(s)', out)
 
@@ -203,6 +209,34 @@ class BootstrapRolloutTests(unittest.TestCase):
                 self.assertIn('Build: completed ' + conclusion, out)
                 self.assertIn('::error::Canary Cratis/Fundamentals did not pass', out)
 
+    def test_a_run_created_after_an_all_green_read_still_fails_the_rollout(self):
+        self.initialize(['Alpha', 'Fundamentals'], runs={'Fundamentals': [
+            [run('completed', 'success', 'Docs')],
+            [run('completed', 'success', 'Docs'), run('completed', 'failure', 'Late')]]})
+        out = self.run_bootstrap(['Alpha', 'Fundamentals'], expected=1)
+        self.assertIn('Late: completed failure', out)
+        self.assertEqual(self.touched('Alpha'), [])
+        self.assertEqual(self.state['events'], ['push Fundamentals', f'sleep {POLL}'])
+
+    def test_success_waits_for_two_equal_reads_after_the_settle_time(self):
+        green = [run('completed', 'success')]
+        both = green + [run('completed', 'skipped', 'Docs')]
+        # The read at the settle time sees a new run, so the verdict waits for one more, equal read.
+        self.initialize(['Fundamentals'], runs={'Fundamentals': [green, green, green, both]})
+        out = self.run_bootstrap(['Fundamentals'])
+        self.assertEqual(self.state['run_reads'], {'Fundamentals': SETTLE // POLL + 2})
+        self.assertIn('Canary Cratis/Fundamentals: 2 workflow run(s) succeeded', out)
+
+    def test_a_token_that_cannot_read_actions_runs_stops_before_any_push(self):
+        self.initialize(['Alpha', 'Fundamentals'], actions_unreadable=['Fundamentals'])
+        out = self.run_bootstrap(['Alpha', 'Fundamentals'], expected=1)
+        self.assertIn('cannot read Actions runs in canary Cratis/Fundamentals; it needs the Actions: Read permission', out)
+        self.assertEqual(self.state['events'], [])
+        self.assertFalse([call for call in self.state['calls'] if '-X' in call and call[call.index('-X') + 1] != 'POST'])
+        self.assertFalse([call for call in self.state['calls'] if any(arg.endswith(('/git/trees', '/git/commits'))
+                                                                     for arg in call)])
+        self.assertEqual(self.touched('Alpha'), [])
+
     def test_a_canary_that_does_not_complete_in_time_fails_the_rollout(self):
         self.initialize(['Alpha', 'Fundamentals'], runs={'Fundamentals': [[run('in_progress')]]})
         out = self.run_bootstrap(['Alpha', 'Fundamentals'], expected=1)
@@ -225,12 +259,15 @@ class BootstrapRolloutTests(unittest.TestCase):
                          + [f'sleep {STAGGER}', 'push Alpha'])
         self.assert_canary('Fundamentals', ['Alpha'])
 
-    def test_stagger_waits_only_between_written_commits(self):
-        names = ['Fundamentals', 'Alpha', 'Beta', 'Gamma', 'Delta']
+    def test_stagger_waits_once_after_each_push_before_reading_the_next_head(self):
+        names = ['Fundamentals', 'Alpha', 'Gamma', 'Beta', 'Delta']
         self.initialize(names, runs={'Fundamentals': [[run('completed', 'success')]]}, up_to_date=['Alpha', 'Gamma'])
         out = self.run_bootstrap(names)
-        self.assertEqual(self.state['events'], ['push Fundamentals', f'sleep {STAGGER}', 'push Beta',
-                                                f'sleep {STAGGER}', 'push Delta'])
+        # Alpha takes the wait after the canary, so Gamma (also up to date) and Beta do not wait again.
+        self.assertEqual(self.state['events'], ['push Fundamentals'] + [f'sleep {POLL}'] * (SETTLE // POLL)
+                         + [f'sleep {STAGGER}', 'push Beta', f'sleep {STAGGER}', 'push Delta'])
+        for name in ['Alpha', 'Delta']:
+            self.assertIn(f'Processing Cratis/{name}...\n  Waiting {STAGGER}s after the previous push (stagger)', out)
         self.assert_canary('Fundamentals', ['Beta', 'Delta'])
         self.assertIn('Processed 5 repo(s), pushed 3 commit(s)', out)
 

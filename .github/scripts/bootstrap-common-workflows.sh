@@ -20,13 +20,16 @@
 # Rollout (Cratis/Workflows#163): a run does not start every push-triggered
 # workflow in every repository at once.
 #   - Canary: the first repository that needs a change, trying the repositories
-#     in CANARY_PREFERENCE first, is pushed without [skip ci]. The rollout then
-#     waits for the workflow runs GitHub starts for that commit and stops (exit 1,
-#     no other repository touched) if any of them does not succeed or they are
-#     not complete within CANARY_TIMEOUT_SECONDS. A canary that starts no run
-#     within CANARY_SETTLE_SECONDS is logged and the rollout proceeds.
-#   - Every later commit ends with " [skip ci]" and waits STAGGER_SECONDS
-#     after the previous push; repositories that need no change do not wait.
+#     in CANARY_PREFERENCE first, is pushed without [skip ci], once the token is
+#     shown to read its Actions runs. The rollout then waits for the workflow
+#     runs GitHub starts for that commit and stops (exit 1, no other repository
+#     touched) if any of them does not succeed or they are not complete within
+#     CANARY_TIMEOUT_SECONDS. They pass only once CANARY_SETTLE_SECONDS have
+#     elapsed and two consecutive reads show the same completed runs, since
+#     GitHub creates a commit's runs over several seconds. A canary that starts
+#     no run within CANARY_SETTLE_SECONDS is logged and the rollout proceeds.
+#   - Every later commit ends with " [skip ci]". After each push, the next
+#     repository waits STAGGER_SECONDS before its HEAD is read.
 #
 # Expects:
 #   GH_TOKEN      - PAT with repo + Workflows permissions; the PAT owner must
@@ -39,10 +42,10 @@
 #
 # Optional (defaults in brackets):
 #   CANARY_PREFERENCE      - repositories tried first as canary, space or comma separated [Fundamentals]
-#   CANARY_SETTLE_SECONDS  - how long to wait for the canary's first run to appear [300]
+#   CANARY_SETTLE_SECONDS  - least time from the canary push to a verdict on its runs [300]
 #   CANARY_TIMEOUT_SECONDS - how long the canary's runs may take to complete [2700]
 #   CANARY_POLL_SECONDS    - interval between reads of the canary's runs [30]
-#   STAGGER_SECONDS        - wait before each push after the canary [20]
+#   STAGGER_SECONDS        - wait before reading the next repository after a push [20]
 #   SLEEP_CMD              - command used to wait; tests replace it [sleep]
 
 set -euo pipefail
@@ -90,6 +93,10 @@ fi
 pushes_done=0
 # Set by update_repo to the commit it pushed, empty when it pushed nothing.
 pushed_sha=""
+# Set after each push; the next repository waits STAGGER_SECONDS before reading its HEAD.
+stagger_pending=false
+# update_repo returns this when the token cannot read the canary repository's Actions runs.
+ACTIONS_UNREADABLE=76
 
 failures_file=$(mktemp)
 
@@ -423,12 +430,19 @@ canary_runs_state() {
     else "pending" end'
 }
 
+# Reads a workflow-runs response on stdin and prints a stable fingerprint of its runs and their outcomes.
+canary_runs_fingerprint() {
+  jq -c '[.workflow_runs[] | [(.id // .name // ""), .status, (.conclusion // "")]] | sort'
+}
+
 # Waits for the workflow runs GitHub starts for the canary commit $2 in repository $1. Returns 0 when they all
 # succeeded or none started within CANARY_SETTLE_SECONDS, 1 when one failed, they did not complete within
-# CANARY_TIMEOUT_SECONDS, or the runs could not be read three times in a row. Elapsed time is counted in poll
-# intervals, so the wait is deterministic when SLEEP_CMD is replaced.
+# CANARY_TIMEOUT_SECONDS, or the runs could not be read three times in a row. GitHub creates a commit's runs over
+# several seconds, so success also needs CANARY_SETTLE_SECONDS elapsed and the same completed runs on two
+# consecutive reads. Elapsed time is counted in poll intervals, so the wait is deterministic when SLEEP_CMD is
+# replaced.
 wait_for_canary() {
-  local repo="$1" sha="$2" elapsed=0 read_errors=0 response state runs_error
+  local repo="$1" sha="$2" elapsed=0 read_errors=0 response state runs_error fingerprint previous=""
   echo "  Waiting for the workflow runs of canary Cratis/$repo at $sha..."
   while true; do
     runs_error=$(mktemp)
@@ -441,10 +455,18 @@ wait_for_canary() {
       echo "  ⚠ Could not read the workflow runs of Cratis/$repo (attempt $read_errors of 3): $(cat "$runs_error" 2>/dev/null || true)"
     fi
     rm -f "$runs_error"
+    fingerprint=""
     case "$state" in
       success)
+        # A run GitHub has not created yet would be missed by trusting the first all-green read.
+        fingerprint=$(printf '%s' "$response" | canary_runs_fingerprint)
+        if [ "$elapsed" -lt "$canary_settle_seconds" ] || [ "$fingerprint" != "$previous" ]; then
+          echo "  Canary Cratis/$repo: runs completed so far succeeded; confirming after ${elapsed}s"
+          previous="$fingerprint"
+        else
         echo "  ✓ Canary Cratis/$repo: $(printf '%s' "$response" | jq '.workflow_runs | length') workflow run(s) succeeded"
         return 0
+        fi
         ;;
       failure)
         echo "::error::Canary Cratis/$repo: a workflow run for $sha did not succeed; stopping the rollout"
@@ -458,6 +480,7 @@ wait_for_canary() {
         fi
         ;;
     esac
+    [ "$state" = success ] || previous=""
     if [ "$read_errors" -ge 3 ]; then
       echo "::error::Could not read the workflow runs of canary Cratis/$repo; stopping the rollout"
       return 1
@@ -502,6 +525,14 @@ update_repo() {
   fi
 
   echo "Processing Cratis/$repo..."
+
+  # Space out the pushes: after each push, wait before reading the next repository's HEAD, so the wait does not
+  # widen the window between reading HEAD and updating the ref. A retry of the same repository already waited.
+  if [ "$stagger_pending" = true ] && [ "$stagger_seconds" -gt 0 ]; then
+    echo "  Waiting ${stagger_seconds}s after the previous push (stagger)"
+    "$sleep_cmd" "$stagger_seconds"
+  fi
+  stagger_pending=false
 
   # ----------------------------------------------------------------
   # 1. Get default branch and HEAD SHA
@@ -676,6 +707,19 @@ update_repo() {
     return 0
   fi
 
+  # The canary is useless if its runs cannot be followed: prove the token can list this repository's Actions
+  # runs before writing anything to it.
+  if [ "$pushes_done" -eq 0 ]; then
+    actions_error=$(mktemp)
+    if ! gh api "repos/Cratis/$repo/actions/runs?per_page=1" >/dev/null 2>"$actions_error"; then
+      echo "::error::PAT_WORKFLOWS cannot read Actions runs in canary Cratis/$repo; it needs the Actions: Read permission. Nothing was pushed."
+      echo "    API error: $(cat "$actions_error" 2>/dev/null || true)"
+      rm -f "$actions_error"
+      return "$ACTIONS_UNREADABLE"
+    fi
+    rm -f "$actions_error"
+  fi
+
   # ----------------------------------------------------------------
   # 5. Create the new tree object
   # ----------------------------------------------------------------
@@ -741,11 +785,6 @@ update_repo() {
   # ----------------------------------------------------------------
   # 7. Push commit directly to the default branch
   # ----------------------------------------------------------------
-  # Space out the pushes after the canary. A retry of the same repository already waited.
-  if [ "$pushes_done" -gt 0 ] && [ "$attempt" -eq 0 ] && [ "$stagger_seconds" -gt 0 ]; then
-    echo "  Waiting ${stagger_seconds}s before pushing (stagger)"
-    "$sleep_cmd" "$stagger_seconds"
-  fi
   push_error=$(mktemp)
   push_result=$(gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$default_branch" \
     -f sha="$new_commit_sha" \
@@ -777,6 +816,7 @@ rollout=$(rollout_order)
 mapfile -t ordered_repos <<<"$rollout"
 repos_processed=0
 canary_failed=""
+actions_unreadable=""
 for repo in "${ordered_repos[@]}"; do
   [ -n "$repo" ] || continue
   repos_processed=$((repos_processed + 1))
@@ -786,9 +826,15 @@ for repo in "${ordered_repos[@]}"; do
     result=0
     update_repo "$repo" 1 || result=$?
   fi
+  if [ "$result" -eq "$ACTIONS_UNREADABLE" ]; then
+    echo "$repo" >> "$failures_file"
+    actions_unreadable="$repo"
+    break
+  fi
   if [ "$result" -ne 0 ]; then echo "$repo" >> "$failures_file"; continue; fi
   [ -n "$pushed_sha" ] || continue
   pushes_done=$((pushes_done + 1))
+  stagger_pending=true
   if [ "$pushes_done" -eq 1 ] && ! wait_for_canary "$repo" "$pushed_sha"; then
     echo "$repo" >> "$failures_file"
     canary_failed="$repo"
@@ -803,6 +849,10 @@ echo ""
 echo "Processed $repos_processed repo(s), pushed $pushes_done commit(s)"
 echo "Summary: $total_failures failure(s)"
 
+if [ -n "$actions_unreadable" ]; then
+  echo "::error::Stopped before the canary Cratis/$actions_unreadable: grant PAT_WORKFLOWS Actions: Read. No repository was changed."
+  exit 1
+fi
 if [ -n "$canary_failed" ]; then
   echo "::error::Canary Cratis/$canary_failed did not pass; no other repository was changed after it."
   exit 1
