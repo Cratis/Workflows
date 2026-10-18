@@ -1,0 +1,20 @@
+name: Publish Packages
+
+# Reusable piece of a publish workflow: it runs inside the caller's concurrency group.
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+concurrency:
+  group: publish-packages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - run: echo publish
