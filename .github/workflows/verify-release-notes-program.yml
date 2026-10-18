@@ -5,6 +5,8 @@ name: Verify Release Notes Program
 on:
   pull_request:
     paths:
+      - .github/workflows/verify-pull-request-policy.yml
+      - .github/scripts/tests/verify-pull-request-policy.spec.mjs
       - .github/workflows/verify-release-notes.yml
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
@@ -18,6 +20,8 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/workflows/verify-pull-request-policy.yml
+      - .github/scripts/tests/verify-pull-request-policy.spec.mjs
       - .github/workflows/verify-release-notes.yml
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
@@ -51,3 +55,5 @@ jobs:
       - name: Exercise the release-intent gate and the Dependabot label normalizer
         # bash, jq and a stub gh; no token and no GitHub API calls.
         run: node --test .github/scripts/tests/verify-release-intent.spec.mjs
+      - name: Exercise the combined policy programs and two-tree comparison
+        run: node --test .github/scripts/tests/verify-pull-request-policy.spec.mjs
