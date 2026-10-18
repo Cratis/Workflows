@@ -502,14 +502,16 @@ Caches NuGet packages only. Build output (`obj`) is not cached because it goes s
 | `key-prefix` | `nuget-v1` |
 | `mode` | `auto` |
 
-The key is `<key-prefix>-<runner.os>-<hashFiles(key-files)>`, with `<key-prefix>-<runner.os>-` as the restore key.
+The key is `<key-prefix>-<runner.os>-<hashFiles(key-files)>`, with `<key-prefix>-<runner.os>-` as the restore key. The action fails when `key-files` matches no file, because a key without a content hash would make every run share one stale cache.
 
 ### `yarn-cache`
 
 Caches Yarn's package cache. It never caches `node_modules` (Yarn rebuilds it from the package cache on install) or `yarn.lock` (a restore would overwrite the checked-out lockfile before `yarn install --immutable` validates it). It fails when `working-directory` has no `yarn.lock`.
 
+Yarn 4 keeps its cache in a global folder (`~/.yarn/berry/cache`) unless `enableGlobalCache: false`, so by default the action caches the folder `yarn config get cacheFolder` reports in `working-directory`. That needs Yarn on `PATH`: run `actions/setup-node` and `corepack enable` before the action. Without Yarn, or when Yarn reports no folder (Yarn 1 prints `undefined`), it falls back to `<working-directory>/.yarn/cache`. An explicit `path` always wins and Yarn is not asked.
+
 ```yaml
-# after checkout and actions/setup-node
+# after checkout, actions/setup-node and corepack enable
 - uses: Cratis/Workflows/.github/actions/yarn-cache@main
   with:
     working-directory: Source/JavaScript
@@ -520,7 +522,7 @@ Caches Yarn's package cache. It never caches `node_modules` (Yarn rebuilds it fr
 | Input | Default |
 |---|---|
 | `working-directory` | `.` |
-| `path` | `<working-directory>/.yarn/cache` |
+| `path` | Yarn's `cacheFolder`, else `<working-directory>/.yarn/cache` |
 | `key-prefix` | `yarn-v1` |
 | `mode` | `auto` |
 

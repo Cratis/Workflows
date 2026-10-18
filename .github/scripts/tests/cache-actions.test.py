@@ -9,6 +9,7 @@ restores never matched the caches main saved.
 from pathlib import Path
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -25,6 +26,7 @@ PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 RESTORE_ACTION = "actions/cache/restore@"
 SAVE_ACTION = "actions/cache@"
 SAVE_CONDITION = "steps.resolve.outputs.mode == 'save'"
+BASH = shutil.which("bash")
 
 
 def load(name):
@@ -39,15 +41,26 @@ def step(action, uses_prefix):
 
 
 def resolve(name, *, mode="auto", event="pull_request", ref="refs/pull/1/merge",
-            default_branch="main", path=None, working_directory=None, key_hash="abc123", cwd=ROOT):
-    """Run the action's production resolve script with the env GitHub would give it."""
+            default_branch="main", path=None, working_directory=None, key_hash="abc123", cwd=ROOT,
+            yarn=None):
+    """Run the action's production resolve script with the env GitHub would give it.
+
+    PATH holds only a temporary bin directory, so the script sees no yarn unless the
+    test supplies `yarn`, the body of a fake yarn shell script.
+    """
     action = load(name)
     script = next(s for s in action["runs"]["steps"] if s.get("id") == "resolve")["run"]
     with tempfile.TemporaryDirectory() as temp:
         output = Path(temp) / "github_output"
         output.write_text("")
+        bin_dir = Path(temp) / "bin"
+        bin_dir.mkdir()
+        if yarn is not None:
+            fake = bin_dir / "yarn"
+            fake.write_text("#!/bin/sh\n" + yarn)
+            fake.chmod(0o755)
         env = {
-            "PATH": os.environ["PATH"],
+            "PATH": str(bin_dir),
             "GITHUB_OUTPUT": str(output),
             "INPUT_MODE": mode,
             "INPUT_PATH": path if path is not None else action["inputs"]["path"]["default"],
@@ -59,7 +72,7 @@ def resolve(name, *, mode="auto", event="pull_request", ref="refs/pull/1/merge",
         }
         if working_directory is not None:
             env["WORKING_DIRECTORY"] = working_directory
-        result = subprocess.run(["bash", "-c", script], env=env, cwd=cwd,
+        result = subprocess.run([BASH, "-c", script], env=env, cwd=cwd,
                                 capture_output=True, text=True)
         return result, parse_output(output.read_text())
 
@@ -211,6 +224,12 @@ class CacheModeResolutionTests(unittest.TestCase):
         self.assertEqual(output["key"], "yarn-v1-Linux-abc123")
         self.assertEqual(output["restore-key"], "yarn-v1-Linux-")
 
+    def test_dotnet_key_files_matching_nothing_cannot_run(self):
+        result, output = resolve("dotnet-cache", key_hash="")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("No file matched key-files", result.stdout)
+        self.assertEqual(output, {})
+
     def test_multi_line_paths_survive_the_output(self):
         _, output = resolve("dotnet-cache", path="~/.nuget/packages\n~/.local/share/NuGet")
         self.assertEqual(output["path"], "~/.nuget/packages\n~/.local/share/NuGet")
@@ -232,9 +251,33 @@ class YarnPathTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout)
                     self.assertEqual(output["path"], ".yarn/cache")
 
-    def test_explicit_path_wins(self):
-        _, output = resolve("yarn-cache", working_directory=FIXTURE, path="Source/.yarn/cache")
-        self.assertEqual(output["path"], "Source/.yarn/cache")
+    def test_default_path_is_the_cache_folder_yarn_reports(self):
+        yarn = ('[ "$*" = "config get cacheFolder" ] || exit 1\n'
+                'echo "$(pwd -P)/berry-cache"\n')
+        result, output = resolve("yarn-cache", working_directory=FIXTURE, yarn=yarn)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(output["path"], f"{os.path.realpath(ROOT / FIXTURE)}/berry-cache")
+
+    def test_falls_back_when_yarn_reports_no_cache_folder(self):
+        for case, yarn in [("no yarn", None), ("classic yarn", "echo undefined\n"),
+                           ("yarn fails", "echo /never >&2\nexit 1\n"), ("empty", "exit 0\n"),
+                           ("multi-line", "echo /a\necho /b\n")]:
+            with self.subTest(case):
+                result, output = resolve("yarn-cache", working_directory=FIXTURE, yarn=yarn)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(output["path"], f"{FIXTURE}/.yarn/cache")
+
+    def test_explicit_path_wins_without_asking_yarn(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "yarn-was-called"
+            # PATH holds only the fake yarn, so record the call with a shell builtin.
+            yarn = f': > "{marker}"\necho /detected/cache\n'
+            for detected in [None, yarn]:
+                with self.subTest(yarn_on_path=detected is not None):
+                    _, output = resolve("yarn-cache", working_directory=FIXTURE,
+                                        path="Source/.yarn/cache", yarn=detected)
+                    self.assertEqual(output["path"], "Source/.yarn/cache")
+            self.assertFalse(marker.exists())
 
     def test_missing_lockfile_cannot_run(self):
         result, output = resolve("yarn-cache", working_directory=".github/actions")

@@ -79,7 +79,8 @@ runs:
             ;;
         esac
         if [ -z "$CACHE_KEY_HASH" ]; then
-          echo "::warning title=dotnet-cache::No file matched key-files; the key has no content hash"
+          echo "::error title=dotnet-cache::No file matched key-files; refusing to cache under a key without a content hash"
+          exit 2
         fi
         delimiter="path-$RANDOM-$RANDOM-$RANDOM"
         {

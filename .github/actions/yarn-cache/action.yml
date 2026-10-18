@@ -13,7 +13,7 @@ inputs:
     required: false
     default: .
   path:
-    description: Newline-separated paths to cache. Empty means <working-directory>/.yarn/cache. Keep it identical everywhere; a different path list is a different cache.
+    description: Newline-separated paths to cache. Empty means the folder `yarn config get cacheFolder` reports in the working directory (Yarn must be on PATH, for example after setup-node and corepack enable), falling back to <working-directory>/.yarn/cache. Keep it identical everywhere; a different path list is a different cache.
     required: false
     default: ""
   key-prefix:
@@ -83,12 +83,29 @@ runs:
           echo "::error title=yarn-cache::hashFiles matched no lockfile under '${WORKING_DIRECTORY}'; use a workspace-relative working-directory"
           exit 2
         fi
+        # Yarn 4 keeps a global cache unless enableGlobalCache is false, so ask Yarn
+        # where its cache is before assuming the project-local folder.
+        detect_cache_folder() {
+          command -v yarn >/dev/null 2>&1 || return 1
+          local folder
+          folder="$(cd "$working_directory" && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn config get cacheFolder 2>/dev/null)" || return 1
+          folder="${folder%$'\r'}"
+          case "$folder" in
+            ""|undefined|*$'\n'*) return 1 ;;
+          esac
+          printf '%s' "$folder"
+        }
         cache_path="$INPUT_PATH"
         if [ -z "$cache_path" ]; then
-          if [ "$working_directory" = "." ]; then
-            cache_path=".yarn/cache"
+          if cache_path="$(detect_cache_folder)"; then
+            echo "yarn-cache: using the cacheFolder Yarn reports: ${cache_path}"
           else
-            cache_path="${working_directory}/.yarn/cache"
+            if [ "$working_directory" = "." ]; then
+              cache_path=".yarn/cache"
+            else
+              cache_path="${working_directory}/.yarn/cache"
+            fi
+            echo "yarn-cache: Yarn did not report a cacheFolder; using ${cache_path}"
           fi
         fi
         delimiter="path-$RANDOM-$RANDOM-$RANDOM"
