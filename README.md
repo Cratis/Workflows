@@ -597,7 +597,7 @@ workflow using `Cratis/release-action` enables intent and the normalizer. Detect
 errors skip the repository rather than installing a nonreleasing caller. Repositories
 that never release receive `release-intent: false`; Arc.Kotlin also receives false
 because it retains its pinned semver caller. The canonical policy caller passes
-`runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
+`runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. The bootstrap reads each repository's visibility and renders that default per repository: a public repository gets `ubuntu-latest` (its `pull_request` jobs never run on self-hosted runners, per `.cratis/ai/rules/github-actions.md`), a private repository gets `cratis-arc-small`, also for the Dependabot label normalizer, and a repository whose visibility cannot be read is skipped. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
 
 A repository that keeps its own copy of one bootstrapped file, and takes every other one, is listed for that file in the script's `SKIP_FILE_REPOS`: Arc.Kotlin keeps its SHA-pinned `verify-semver-label.yml`.
 

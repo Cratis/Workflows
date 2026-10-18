@@ -47,7 +47,8 @@ def tree_id(entries):
     s['trees'][sha] = entries
     return sha
 if method == 'GET' and endpoint.count('/') == 2:
-    result = {'default_branch':'main','permissions':{'push':True}}
+    result = {'default_branch':'main','permissions':{'push':True},'private':s.get('private',False)}
+    if s.get('fail_visibility') and '.private' in a: error = 'HTTP 503 repository read failed'
 elif '/git/ref/heads/' in endpoint:
     result = {'object':{'sha':s['head']}}
 elif method == 'GET' and '/git/commits/' in endpoint:
@@ -110,6 +111,7 @@ if '--jq' in a:
     q = a[a.index('--jq')+1]
     if q == '.permissions.push // false': print('true')
     elif q == '.default_branch': print(result['default_branch'])
+    elif q == '.private': print('true' if result['private'] else 'false')
     elif q == '.content': print(result['content'])
     else: raise Exception(q)
 else:
@@ -273,6 +275,26 @@ jobs:
             for content in [expected, nonreleasing]:
                 caller.write_text(content)
                 subprocess.run(['actionlint', str(caller)], check=True, capture_output=True)
+
+    def test_private_repository_runs_the_policy_jobs_on_the_small_self_hosted_runners(self):
+        self.initialize(private=True)
+        self.run_bootstrap()
+        caller = self.files()[POLICY]
+        self.assertEqual(caller.count("runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc-small' }}"), 2)
+        self.assertNotIn('ubuntu-latest', caller)
+
+    def test_public_repository_never_routes_pull_request_jobs_to_self_hosted_runners(self):
+        self.initialize()
+        self.run_bootstrap()
+        caller = self.files()[POLICY]
+        self.assertIn("runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}", caller)
+        self.assertNotIn('cratis-arc', caller)
+
+    def test_unknown_visibility_skips_the_repository(self):
+        self.initialize(fail_visibility=True)
+        self.run_bootstrap(expected=1)
+        self.assertEqual(self.state['tree_writes'], [])
+        self.assertEqual(self.state['patches'], 0)
 
     def test_known_hash_table_covers_every_historical_payload_per_path(self):
         history = subprocess.check_output(['git', 'log', '-p', 'HEAD', '--', '.github/scripts/bootstrap-common-workflows.sh'], cwd=ROOT, text=True)
