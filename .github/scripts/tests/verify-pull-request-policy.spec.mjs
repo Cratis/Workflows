@@ -5,7 +5,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 const workflow = readFileSync(".github/workflows/verify-pull-request-policy.yml", "utf8");
@@ -15,7 +16,7 @@ const extract = source => Object.fromEntries(source.split("node - <<'JS'\n").sli
     return [/^\/\/ cratis:program ([\w-]+)$/m.exec(program)[1], program];
 }));
 const programs = extract(workflow);
-const root = mkdtempSync(resolve(".ai-work/policy-spec-"));
+const root = mkdtempSync(join(tmpdir(), "policy-spec-"));
 let counter = 0;
 const pull = (labels, login = "someone") => ({ number: 7, labels: labels.map(name => ({ name })), user: { login } });
 function run(name, env = {}, cwd = root) {

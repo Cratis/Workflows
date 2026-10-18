@@ -864,6 +864,7 @@ jobs:
       - name: Prepare the PR head for drift
         id: drift-tree
         if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.tools.outcome == 'success' && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 5
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -872,8 +873,9 @@ jobs:
         run: |
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
-          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-          export GIT_CONFIG_VALUE_0
+          basic="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
           history=()
           if [ "$(git rev-parse --is-shallow-repository)" = true ]; then history=(--unshallow); fi
           if ! git fetch --no-tags --filter=blob:none "${history[@]}" origin "$PR_HEAD" "+refs/heads/$BASE:refs/remotes/origin/$BASE"             || ! git worktree add --detach "$RUNNER_TEMP/pr-head" "$PR_HEAD"; then
@@ -884,6 +886,7 @@ jobs:
       - name: Compare the release notes with the diff
         id: drift
         if: ${{ !cancelled() && steps.drift-tree.outputs.ready == 'true' }}
+        timeout-minutes: 5
         continue-on-error: true
         working-directory: ${{ runner.temp }}/pr-head
         env:
@@ -897,8 +900,9 @@ jobs:
         run: |
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
-          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-          export GIT_CONFIG_VALUE_0
+          basic="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
           node - <<'JS'
           "use strict";
           // cratis:program release-notes-drift

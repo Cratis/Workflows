@@ -495,12 +495,17 @@ permissions:
 
 jobs:
   policy:
-    if: ${{ !cancelled() }}
     uses: Cratis/Workflows/.github/workflows/verify-pull-request-policy.yml@main
     with:
       runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}
       release-intent: false # A repository that does not release
 ```
+
+This sample shows only the gate job. A complete caller also declares the triggers and
+the concurrency group above and, in a releasing repository, the `dependabot-labels`
+job (with `policy` declaring `needs: dependabot-labels` and `if: ${{ !cancelled() }}`).
+Notes and intent run only for `pull_request` events; a caller on another event gets
+only the work-record policy.
 
 The merge-tree checkout uses `persist-credentials: false` and is scanned by the
 same commit- and SHA-256-pinned work-record guard. `extra-allowed` and
