@@ -32,8 +32,25 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 10
     steps:
+      # Node 24 or later already on the runner is used as is; only an older or
+      # missing Node is set up. The job itself always runs.
+      - name: Check for Node 24 or later
+        id: node-present
+        continue-on-error: true
+        shell: bash
+        run: |
+          version="$(node --version 2>/dev/null || true)"
+          major="${version#v}"
+          major="${major%%.*}"
+          if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 24 )); then
+            echo "Node $version is already installed; skipping setup."
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Node 24 or later is not installed (found: ${version:-none}); setting it up."
+          fi
       - name: Set up Node
         id: node
+        if: ${{ steps.node-present.outputs.ready != 'true' }}
         continue-on-error: true
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1099,6 +1116,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           NODE_OUTCOME: ${{ steps.node.outcome }}
+          NODE_PRESENT: ${{ steps.node-present.outputs.ready }}
           TOOLS_OUTCOME: ${{ steps.tools.outcome }}
           CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           PULL_OUTCOME: ${{ steps.pull.outcome }}
@@ -1135,7 +1153,7 @@ jobs:
               }
               rows.push(`| ${name} | ${bad ? "fail" : expected ? "pass" : "not applicable"} (${outcome || "missing"}) |`);
           }
-          gate("Node setup", env.NODE_OUTCOME);
+          gate("Node setup", env.NODE_OUTCOME, env.NODE_PRESENT !== "true");
           gate("Required tools", env.TOOLS_OUTCOME);
           gate("Merge checkout", env.CHECKOUT_OUTCOME);
           gate("Pull request read", env.PULL_OUTCOME, pr);
