@@ -1,0 +1,152 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Cache Actions
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/dotnet-cache/**
+      - .github/actions/yarn-cache/**
+      - .github/scripts/tests/cache-actions.test.py
+      - .github/scripts/tests/fixtures/cache-actions/**
+      - .github/workflows/verify-cache-actions.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/dotnet-cache/**
+      - .github/actions/yarn-cache/**
+      - .github/scripts/tests/cache-actions.test.py
+      - .github/scripts/tests/fixtures/cache-actions/**
+      - .github/workflows/verify-cache-actions.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FIXTURE: .github/scripts/tests/fixtures/cache-actions
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the cache actions offline
+        run: python3 -B .github/scripts/tests/cache-actions.test.py
+
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The selftest-* prefixes keep these tiny caches apart from any real cache.
+      - name: Create the fixture cache contents
+        run: |
+          mkdir -p "$FIXTURE/nuget" "$FIXTURE/.yarn/cache"
+          echo "${GITHUB_SHA}" > "$FIXTURE/nuget/marker"
+          echo "${GITHUB_SHA}" > "$FIXTURE/.yarn/cache/marker"
+
+      - name: dotnet-cache (auto)
+        id: dotnet
+        uses: ./.github/actions/dotnet-cache
+        with:
+          path: .github/scripts/tests/fixtures/cache-actions/nuget
+          key-files: |
+            .github/scripts/tests/fixtures/cache-actions/global.json
+            .github/scripts/tests/fixtures/cache-actions/Directory.Packages.props
+          key-prefix: selftest-nuget-v1
+
+      - name: yarn-cache (auto)
+        id: yarn
+        uses: ./.github/actions/yarn-cache
+        with:
+          working-directory: .github/scripts/tests/fixtures/cache-actions
+          key-prefix: selftest-yarn-v1
+
+      - name: dotnet-cache (explicit restore)
+        id: forced-restore
+        uses: ./.github/actions/dotnet-cache
+        with:
+          path: .github/scripts/tests/fixtures/cache-actions/nuget
+          key-files: .github/scripts/tests/fixtures/cache-actions/global.json
+          key-prefix: selftest-nuget-v1
+          mode: restore
+
+      - name: dotnet-cache (unknown mode must fail)
+        id: bad-mode
+        continue-on-error: true
+        uses: ./.github/actions/dotnet-cache
+        with:
+          path: .github/scripts/tests/fixtures/cache-actions/nuget
+          key-prefix: selftest-nuget-v1
+          mode: always
+
+      - name: Assert the resolved modes and outputs
+        env:
+          EXPECTED_MODE: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) && 'save' || 'restore' }}
+          DOTNET_MODE: ${{ steps.dotnet.outputs.mode }}
+          DOTNET_KEY: ${{ steps.dotnet.outputs.key }}
+          DOTNET_HIT: ${{ steps.dotnet.outputs.cache-hit }}
+          DOTNET_MATCHED: ${{ steps.dotnet.outputs.matched-key }}
+          YARN_MODE: ${{ steps.yarn.outputs.mode }}
+          YARN_KEY: ${{ steps.yarn.outputs.key }}
+          YARN_HIT: ${{ steps.yarn.outputs.cache-hit }}
+          YARN_MATCHED: ${{ steps.yarn.outputs.matched-key }}
+          FORCED_MODE: ${{ steps.forced-restore.outputs.mode }}
+          BAD_OUTCOME: ${{ steps.bad-mode.outcome }}
+        run: |
+          set -euo pipefail
+          failures=0
+          check() {
+            if [ "$2" = "$3" ]; then
+              echo "ok: $1 = $2"
+            else
+              echo "::error title=verify-cache-actions::$1 is '$2', expected '$3'"
+              failures=$((failures + 1))
+            fi
+          }
+          check_key() {
+            if [[ "$2" =~ ^$3-${RUNNER_OS}-[0-9a-f]{64}$ ]]; then
+              echo "ok: $1 = $2"
+            else
+              echo "::error title=verify-cache-actions::$1 is '$2', expected $3-${RUNNER_OS}-<sha256>"
+              failures=$((failures + 1))
+            fi
+          }
+          check_hit() {
+            local name="$1" hit="$2" matched="$3" key="$4" prefix="$5"
+            case "$hit" in
+              true) check "$name matched-key" "$matched" "$key" ;;
+              false)
+                if [ -n "$matched" ] && [[ "$matched" != "$prefix-${RUNNER_OS}-"* ]]; then
+                  echo "::error title=verify-cache-actions::$name matched-key '$matched' is outside the prefix"
+                  failures=$((failures + 1))
+                else
+                  echo "ok: $name cache-hit=false matched-key='$matched'"
+                fi
+                ;;
+              *)
+                echo "::error title=verify-cache-actions::$name cache-hit is '$hit', expected true or false"
+                failures=$((failures + 1))
+                ;;
+            esac
+          }
+          check "dotnet mode" "$DOTNET_MODE" "$EXPECTED_MODE"
+          check "yarn mode" "$YARN_MODE" "$EXPECTED_MODE"
+          check "explicit restore mode" "$FORCED_MODE" restore
+          check "unknown mode outcome" "$BAD_OUTCOME" failure
+          check_key "dotnet key" "$DOTNET_KEY" selftest-nuget-v1
+          check_key "yarn key" "$YARN_KEY" selftest-yarn-v1
+          check_hit dotnet "$DOTNET_HIT" "$DOTNET_MATCHED" "$DOTNET_KEY" selftest-nuget-v1
+          check_hit yarn "$YARN_HIT" "$YARN_MATCHED" "$YARN_KEY" selftest-yarn-v1
+          echo "checked 8 assertions, failures: ${failures}"
+          [ "$failures" -eq 0 ]
