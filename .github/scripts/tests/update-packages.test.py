@@ -17,6 +17,11 @@ SOURCE = (ROOT / ".github/workflows/update-packages.yml").read_text()
 STEPS = dict(re.findall(r"^      - name: ([^\n]+)\n(.*?)(?=^      - name: |\Z)", SOURCE, re.M | re.S))
 PREFLIGHT = "Check publication options and default-branch base"
 HOOK = "Run post-update command"
+CHANGES = "Detect package changes"
+CACHE_KEY = "Resolve NuGet package cache key"
+CACHE_RESTORE = "Restore NuGet package cache"
+CACHE_SAVE = "Save NuGet package cache at the end of the job"
+CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"
 FREEZE = "Freeze pull request candidate before builds"
 PUBLISH = "Publish validated pull request"
 LEGACY = "Commit and push changes"
@@ -241,6 +246,8 @@ class UpdatePackagesTests(unittest.TestCase):
             self.env.update(EXPECTED_BASE=values.get("base", ""), BASE_BRANCH=values.get("base_branch", ""))
         if name == "Snapshot NPM peer pins":
             self.env["PEER_UPDATE_DIR"] = values.get("directory", "")
+        if name == CHANGES:
+            self.package_changes = values.get("changed")
         if name == FREEZE:
             self.changed = values.get("changed") == "true"
             self.env.update(CANDIDATE_COMMIT=values.get("commit", ""), CANDIDATE_TREE=values.get("tree", ""))
@@ -266,6 +273,12 @@ class UpdatePackagesTests(unittest.TestCase):
             self.env["POST_UPDATE_COMMAND"] = hook
             if self.run_step(HOOK):
                 return False
+        if self.run_step(CHANGES):
+            return False
+        if self.package_changes == "false":
+            # Freeze, builds and publication are all gated on steps.changes.outputs.changed.
+            self.changed = False
+            return True
         if self.run_step(FREEZE):
             return False
         if builds:
@@ -296,7 +309,8 @@ class UpdatePackagesTests(unittest.TestCase):
             self.assertLess(names.index(name), names.index(HOOK))
         for before, after in zip(NPM_UPDATES, NPM_UPDATES[1:]):
             self.assertLess(names.index(before), names.index(after))
-        self.assertLess(names.index(HOOK), names.index(FREEZE))
+        self.assertLess(names.index(HOOK), names.index(CHANGES))
+        self.assertLess(names.index(CHANGES), names.index(FREEZE))
         for name in BUILDS:
             self.assertLess(names.index(FREEZE), names.index(name))
             self.assertLess(names.index(name), names.index(PUBLISH))
@@ -308,7 +322,7 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertIn("if: inputs.publication-mode == 'direct'", STEPS[LEGACY])
         self.assertNotIn("continue-on-error:", SOURCE)
         self.assertNotIn("always()", SOURCE)
-        for name in [PREFLIGHT, HOOK, FREEZE, PUBLISH, *NPM_UPDATES]:
+        for name in [PREFLIGHT, HOOK, CHANGES, FREEZE, PUBLISH, CACHE_KEY, *NPM_UPDATES]:
             self.assertNotIn("${{", shell(name))
         inputs = SOURCE.split("    inputs:\n", 1)[1].split("    secrets:", 1)[0]
         for name, default in [("publication-mode", "direct"), ("post-update-command", "''"),
@@ -323,7 +337,7 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertIsNone(re.search(r"^\s*permissions:", SOURCE, re.M))
 
     def test_shell_syntax(self):
-        for name in [PREFLIGHT, HOOK, FREEZE, PUBLISH, *NPM_UPDATES]:
+        for name in [PREFLIGHT, HOOK, CHANGES, FREEZE, PUBLISH, CACHE_KEY, *NPM_UPDATES]:
             with self.subTest(step=name):
                 result = subprocess.run(["/bin/bash", "-n"], input=shell(name), text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -560,6 +574,102 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertTrue(self.pipeline(hook=""), self.last_result.stderr)
         self.assertFalse(self.changed)
         self.assert_not_published()
+
+    def test_builds_commit_and_publication_are_gated_on_package_changes(self):
+        gate = "steps.changes.outputs.changed == 'true'"
+        for name in [FREEZE, *BUILDS, LEGACY]:
+            with self.subTest(step=name):
+                self.assertIn(gate, re.search(r"^        if: (.*)$", STEPS[name], re.M)[1])
+        # The publish step depends on the frozen candidate, which only exists after a change.
+        self.assertIn("steps.candidate.outputs.changed == 'true'", STEPS[PUBLISH])
+        # A caller's hook can produce the only change, so it is never skipped as a no-op.
+        self.assertNotIn("steps.changes", STEPS[HOOK])
+        self.assertNotIn("if:", STEPS[CHANGES].split("run:", 1)[0])
+
+    def test_no_package_changes_skips_builds_commit_and_publication(self):
+        for mode in ("pull-request", "direct"):
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                self.env.update(NO_UPDATES="1", PUBLICATION_MODE=mode)
+                self.assertTrue(self.prepare(hook=""), self.last_result.stderr)
+                self.assertEqual(self.package_changes, "false")
+                self.assertIn("No package changes; skipping builds and publication.", self.last_result.stdout)
+                self.assertFalse(self.changed)
+                self.assertFalse(any(call[:2] in (["dotnet", "build"], ["yarn", "ci"], ["gradle", "build"],
+                                                  ["mix", "compile"]) for call in self.calls()))
+                self.assertFalse(any(c[:2] == ["git", "commit"] for c in self.calls()))
+                self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+                self.assert_not_published()
+
+    def test_package_change_detection_counts_tracked_staged_and_untracked_paths(self):
+        for change in ("tracked", "staged", "untracked"):
+            with self.subTest(change=change):
+                self.git("reset", "--hard", self.base)
+                self.git("clean", "-fdq")
+                if change == "untracked":
+                    (self.repo / "new-lockfile.json").write_text("{}\n")
+                else:
+                    (self.repo / "dependencies.txt").write_text("updated\n")
+                if change == "staged":
+                    self.git("add", "dependencies.txt")
+                self.assert_step_ok(CHANGES)
+                self.assertEqual(self.package_changes, "true")
+                self.assertIn("changed 1 paths", self.last_result.stdout)
+
+    def test_package_change_detection_ignores_ignored_output(self):
+        (self.repo / "dist").mkdir()
+        (self.repo / "dist/cache").write_text("restored, not a change")
+        self.assert_step_ok(CHANGES)
+        self.assertEqual(self.package_changes, "false")
+
+    def test_package_change_detection_fails_closed_on_git_error(self):
+        self.env["GIT_DIR"] = str(self.root / "missing.git")
+        self.assertNotEqual(self.run_step(CHANGES), 0)
+        self.assertIsNone(self.package_changes)
+
+    def test_nuget_cache_is_pinned_restored_before_updates_and_saved_after_success(self):
+        names = list(STEPS)
+        self.assertLess(names.index("Setup .NET"), names.index(CACHE_KEY))
+        for name in (CACHE_RESTORE, CACHE_SAVE):
+            self.assertLess(names.index(CACHE_KEY), names.index(name))
+            # Hash and restore before any install or update writes to the checkout.
+            for later in ("Install NPM dependencies", "Install Mix dependencies", "Update NuGet packages"):
+                self.assertLess(names.index(name), names.index(later))
+        self.assertIn("if: steps.detect.outputs.update_nuget == 'true'", STEPS[CACHE_KEY])
+        self.assertIn(f"uses: actions/cache/restore@{CACHE_ACTION_SHA}\n", STEPS[CACHE_RESTORE])
+        self.assertIn(f"uses: actions/cache@{CACHE_ACTION_SHA}\n", STEPS[CACHE_SAVE])
+        self.assertIn("lookup-only: true", STEPS[CACHE_SAVE])
+        for name in (CACHE_RESTORE, CACHE_SAVE):
+            with self.subTest(step=name):
+                self.assertIn("if: steps.nuget_cache.outputs.enabled == 'true'", STEPS[name])
+                self.assertIn("path: ~/.nuget/packages\n", STEPS[name])
+                self.assertIn("key: ${{ steps.nuget_cache.outputs.key }}", STEPS[name])
+        self.assertIn("restore-keys: ${{ steps.nuget_cache.outputs.restore-key }}", STEPS[CACHE_RESTORE])
+        # The same prefix and key files as the Cratis .NET package cache used by caller builds.
+        self.assertIn("CACHE_KEY_PREFIX: nuget-v1-${{ runner.os }}-\n", STEPS[CACHE_KEY])
+        self.assertIn("CACHE_KEY_HASH: ${{ hashFiles('**/packages.lock.json', '**/*.props', '**/*.targets', "
+                      "'**/*.csproj', '**/[Nn]u[Gg]et.[Cc]onfig', '*.slnx', 'global.json') }}", STEPS[CACHE_KEY])
+        # Saving is never forced: actions/cache saves in its post step only on success.
+        self.assertNotIn("actions/cache/save", SOURCE)
+
+    def test_every_action_is_pinned_to_a_full_commit_sha(self):
+        uses = re.findall(r"^\s+uses: (\S+)", SOURCE, re.M)
+        self.assertGreater(len(uses), 5)
+        for action in uses:
+            with self.subTest(action=action):
+                self.assertRegex(action, r"@[0-9a-f]{40}$")
+
+    def test_nuget_cache_key_is_exported_with_its_restore_prefix(self):
+        self.env.update(CACHE_KEY_PREFIX="nuget-v1-Linux-", CACHE_KEY_HASH="abc123")
+        self.assert_step_ok(CACHE_KEY)
+        values = (self.root / "step-output").read_text().splitlines()
+        self.assertEqual(values, ["enabled=true", "restore-key=nuget-v1-Linux-", "key=nuget-v1-Linux-abc123"])
+
+    def test_nuget_cache_without_key_files_restores_without_the_cache(self):
+        self.env.update(CACHE_KEY_PREFIX="nuget-v1-Linux-", CACHE_KEY_HASH="")
+        self.assert_step_ok(CACHE_KEY)
+        self.assertEqual((self.root / "step-output").read_text(), "enabled=false\n")
+        self.assertIn("::notice::No NuGet cache key file matched", self.last_result.stdout)
 
     def test_hook_only_tracked_update_is_a_candidate(self):
         self.env["NO_UPDATES"] = "1"

@@ -203,6 +203,48 @@ jobs:
           # Keep the caller's roll-forward policy; never rewrite global.json.
           global-json-file: ${{ hashFiles('global.json') != '' && 'global.json' || '' }}
 
+      # Key prefix, OS segment and key files match the Cratis .NET package-cache key, so a
+      # caller whose builds cache ~/.nuget/packages the same way shares the cache. Hashed
+      # here, before any update or install, so the key describes the checked-out commit.
+      - name: Resolve NuGet package cache key
+        id: nuget_cache
+        if: steps.detect.outputs.update_nuget == 'true'
+        shell: bash
+        env:
+          CACHE_KEY_PREFIX: nuget-v1-${{ runner.os }}-
+          CACHE_KEY_HASH: ${{ hashFiles('**/packages.lock.json', '**/*.props', '**/*.targets', '**/*.csproj', '**/[Nn]u[Gg]et.[Cc]onfig', '*.slnx', 'global.json') }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CACHE_KEY_HASH" ]; then
+            echo "::notice::No NuGet cache key file matched; restoring packages without the cache."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "enabled=true"
+            echo "restore-key=${CACHE_KEY_PREFIX}"
+            echo "key=${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
+          } >> "$GITHUB_OUTPUT"
+          echo "NuGet package cache key: ${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
+
+      - name: Restore NuGet package cache
+        if: steps.nuget_cache.outputs.enabled == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ steps.nuget_cache.outputs.key }}
+          restore-keys: ${{ steps.nuget_cache.outputs.restore-key }}
+
+      # Registers the post-job save without downloading again. actions/cache saves only
+      # when the job succeeds and skips a key that already exists.
+      - name: Save NuGet package cache at the end of the job
+        if: steps.nuget_cache.outputs.enabled == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ steps.nuget_cache.outputs.key }}
+          lookup-only: true
+
       - name: Setup Node.js
         if: steps.detect.outputs.update_npm == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -679,9 +721,30 @@ jobs:
           set -euo pipefail
           bash --noprofile --norc -euo pipefail -c "$POST_UPDATE_COMMAND"
 
+      # Builds and publication exist to verify and ship a change. When the updaters and the
+      # post-update command left the checkout untouched (no tracked change, no new
+      # unignored file), there is nothing to verify: skip every build, the candidate commit
+      # and publication. The post-update command still runs above, because a caller's hook
+      # can produce the only change (for example Stage's npm and image pin synchronization).
+      - name: Detect package changes
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # git status fails the step on a Git error rather than reading it as "no changes".
+          count=$(git status --porcelain=v1 --untracked-files=all | wc -l)
+          count=$((count))
+          if [ "$count" -eq 0 ]; then
+            echo "No package changes; skipping builds and publication."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Package updates changed ${count} paths; building before publication."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Freeze pull request candidate before builds
         id: candidate
-        if: inputs.publication-mode == 'pull-request'
+        if: inputs.publication-mode == 'pull-request' && steps.changes.outputs.changed == 'true'
         shell: bash
         env:
           EXPECTED_BASE: ${{ steps.publication.outputs.base }}
@@ -715,19 +778,19 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build .NET
-        if: steps.detect.outputs.update_nuget == 'true'
+        if: steps.detect.outputs.update_nuget == 'true' && steps.changes.outputs.changed == 'true'
         run: dotnet build --configuration Release
 
       - name: Build NPM
-        if: steps.detect.outputs.update_npm == 'true'
+        if: steps.detect.outputs.update_npm == 'true' && steps.changes.outputs.changed == 'true'
         run: yarn ci
 
       - name: Build Gradle
-        if: steps.detect.outputs.update_gradle == 'true'
+        if: steps.detect.outputs.update_gradle == 'true' && steps.changes.outputs.changed == 'true'
         run: ./gradlew build --no-daemon
 
       - name: Build Mix
-        if: steps.detect.outputs.update_mix == 'true'
+        if: steps.detect.outputs.update_mix == 'true' && steps.changes.outputs.changed == 'true'
         working-directory: ${{ steps.detect.outputs.mix_dir }}
         run: mix compile
 
@@ -815,7 +878,7 @@ jobs:
           echo "$pr_url"
 
       - name: Commit and push changes
-        if: inputs.publication-mode == 'direct'
+        if: inputs.publication-mode == 'direct' && steps.changes.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
         run: |

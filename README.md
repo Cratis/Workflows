@@ -37,13 +37,29 @@ dedupe.
 
 | Optional input | Default | Contract |
 |---|---|---|
-| `post-update-command` | Empty (skipped) | Trusted Bash command in the caller root, after **all** ecosystem updates and before **any** build. Runs with `-euo pipefail`; a nonzero exit blocks both publication modes. |
+| `post-update-command` | Empty (skipped) | Trusted Bash command in the caller root, after **all** ecosystem updates and before **any** build. Runs with `-euo pipefail`; a nonzero exit blocks both publication modes. It runs even when the updaters changed nothing, because its own changes can be the update. |
 | `publication-mode` | `direct` | `direct` retains legacy publication; `pull-request` uses the validated-candidate rules below. Other values fail. |
 | `pull-request-label` | Empty (no label) | One existing, caller-chosen label, only in `pull-request` mode. Must match `[a-zA-Z0-9][a-zA-Z0-9_.:/-]*`. No comma lists, whitespace, or implicit release intent. |
 | `node-version` | `24` | Node.js version for NPM updates. Satisfies the Cratis JavaScript repositories' engine floors; a caller may override it, but the minimum is Node 22 (the peer sync script needs `fs.globSync` with array `exclude`, available from 22.14/23.7). |
 | `runs-on` | `ubuntu-latest` | Existing runner-label input; private callers should retain their approved self-hosted label. |
 | `npm-package-exclusions` | `typescript` | Existing comma-delimited exclusions, supplemented by the caller's `.github/update-packages-npm-exclusions`. |
 | `nuget-package-exclusions` | `StyleCop.Analyzers` (its 1.3.x betas fail the build of repositories on 1.2.0-beta.556; a caller that sets this input replaces the default and lists the package itself to keep it held) | Comma-delimited exact NuGet package IDs, matched case-insensitively after trimming whitespace. Applies to top-level project references, including centrally managed versions in `Directory.Packages.props`; transitive-only IDs warn as not directly referenced (updating a parent can still change transitive versions). Prerelease references retain the updater's prerelease eligibility; stable references do not gain prerelease-only candidates. Invalid/incomplete listings and divergent per-framework versions for eligible packages fail before updating. As with the default path, SDK exit 3 (no changes written) skips NuGet updates for that run. |
+
+**No-op runs cost no build.** After the updaters and the post-update command, the
+workflow checks `git status` (tracked changes plus new files that are not ignored).
+When nothing changed it logs `No package changes; skipping builds and publication.`
+and skips every ecosystem build, the candidate commit, the direct-mode push and the
+pull request; the job succeeds. A Git error in that check fails the job instead of
+reading as "no changes".
+
+**NuGet packages come from the Actions cache.** When .NET is detected, the workflow
+restores `~/.nuget/packages` with `actions/cache/restore` under
+`nuget-v1-<runner OS>-<hash>`, hashed before any update from `**/packages.lock.json`,
+`**/*.props`, `**/*.targets`, `**/*.csproj`, `**/[Nn]u[Gg]et.[Cc]onfig`, `*.slnx` and
+`global.json`, with the `nuget-v1-<runner OS>-` prefix as fallback. A caller whose own
+.NET builds cache `~/.nuget/packages` under the same key shares that cache. `actions/cache` with
+`lookup-only` saves the cache at the end of a successful job when that key does not
+exist yet. Without any key file the run restores packages from the feeds as before.
 
 An individually approved caller can use this wrapper (replace
 `REVIEWED_COMMIT_SHA` with the reviewed Workflows commit). The script path is an
@@ -96,8 +112,9 @@ or start background writers.
   This mode deliberately does not offer an unrestricted `git add` hook escape hatch.
 - All detected ecosystem builds must succeed. Tracked worktree/index changes made by
   builds invalidate the candidate instead of being committed or discarded. Ordinary
-  untracked/ignored build outputs are permitted but never published. If nothing tracked
-  changed before builds, no branch or PR is created, even if builds generate output.
+  untracked/ignored build outputs are permitted but never published. If nothing changed
+  after the updates and the hook, builds are skipped and no branch or PR is created. If
+  only untracked files changed, builds run but no branch or PR is created.
 - Immediately before/after pushing and after PR creation, the workflow checks the
   original base and candidate identities. Any observed base/default-branch change,
   candidate commit/tree/index drift, API failure, or readback mismatch fails the job.
@@ -179,7 +196,8 @@ actionlint .github/workflows/update-packages.yml .github/workflows/verify-packag
 The tests extract and execute the actual inline Bash using temporary local bare Git
 repositories and stub gh/toolchains. They cover ordering, failure gates, exact-tree
 publication, atomic expected-absent reservation (including a same-base competing
-branch race), API failure gates, default compatibility, stale bases, candidate drift,
+branch race), skipped builds and publication when nothing changed, the SHA-pinned
+NuGet cache, API failure gates, default compatibility, stale bases, candidate drift,
 labels, and unrelated output exclusion without credentials, network, or running the
 legacy rebase loop. Structural tests verify Stage ownership, retained bootstrap and
 PR-template triggers, and that the effective changed-file set avoids organization-wide
