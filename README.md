@@ -471,7 +471,57 @@ The common workflow bootstrap also propagates **`.github/codeql/codeql-config.ym
 
 ## Verifying release intent and release notes
 
-Two pull-request gates run in releasing repositories through thin callers that hold no logic:
+**`verify-pull-request-policy.yml`** combines release notes, warn-only release-note drift,
+release intent and the work-record guard into one reusable job. A caller job named
+`policy` produces the check **`policy / verify`**. Existing required-check settings
+must be migrated explicitly when replacing older callers; bootstrap does not change
+branch protection or rulesets.
+
+The caller runs on pull-request events `opened`, `edited`, `reopened`, `synchronize`,
+`labeled`, `unlabeled`, `ready_for_review`, and pushes to `main`, with one cancelling
+concurrency group per PR/ref. Push events run only the work-record policy. Intent
+applies only to PRs targeting `main` and can be disabled with `release-intent: false`.
+Notes retain the default-branch, release-label and Dependabot rules below. The
+reusable declares no permissions; callers grant `contents: read` and
+`pull-requests: read`. Releasing repositories also have a separate
+`dependabot-labels` job with `pull-requests: write`, limited to Dependabot PRs into
+`main`; `policy` runs even after skipped or failed normalization. The intent gate
+itself never mutates labels and never fails Dependabot for its labels.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  policy:
+    uses: Cratis/Workflows/.github/workflows/verify-pull-request-policy.yml@main
+    with:
+      runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}
+      release-intent: false # A repository that does not release
+```
+
+This sample shows only the gate job. A complete caller also declares the triggers and
+the concurrency group above and, in a releasing repository, the `dependabot-labels`
+job (with `policy` declaring `needs: dependabot-labels` and `if: ${{ !cancelled() }}`).
+Notes and intent run only for `pull_request` events; a caller on another event gets
+only the work-record policy.
+
+The merge-tree checkout uses `persist-credentials: false` and is scanned by the
+same commit- and SHA-256-pinned work-record guard. `extra-allowed` and
+`extra-allowed-paths` retain the guard's meanings below. Drift fetches the PR head
+and base into the shared repository and uses a separate detached worktree so its
+unchanged program sees the PR head as `HEAD`, not the merge commit. Fetch or
+worktree failure warns without failing policy. Each blocking gate runs with its
+own recorded outcome; the final step fails on a failed, unexpectedly skipped or
+missing gate, including guard exit `2` (could not run), and writes a per-gate summary.
+The job checks `node`, `git` and `curl` availability and has a ten-minute timeout.
+
+### Legacy callers (kept for pinned callers)
+
+`verify-release-notes.yml`, `verify-release-intent.yml` and
+`verify-no-work-records.yml` remain unchanged and available for pinned or
+hand-maintained callers. The older release gates behave as follows:
 
 - **`verify-release-intent.yml`** (called by each repository's `verify-semver-label.yml`) requires exactly one of `major`, `minor`, `patch` or `no-release`, and only `no-release` on a Dependabot pull request: Dependabot applies `major`/`minor`/`patch` from the dependency's own version, and release-action never releases its pull requests. It never fails a Dependabot pull request for its labels: it replaces `major`/`minor`/`patch` with `no-release` itself when its token can write, and passes with a notice when it cannot, so callers that predate the normalizer (the repositories the bootstrap ignores) keep working. **`normalize-dependabot-labels.yml`** does the same ahead of the gate in the bootstrapped caller, whose gate job only has `pull-requests: read`.
 - **`verify-release-notes.yml`** checks the pull request description, because [release-action](https://github.com/Cratis/release-action) publishes it verbatim as the GitHub release and closes every issue written as `(#n)` outside code.
@@ -487,7 +537,7 @@ The release-notes gate checks every pull request into the default branch except 
 
 Fenced code and inline code are exempt. Closed HTML comments are not shown on the release page, so the heading, keyword, link and placeholder rules ignore them, but a `(#n)` inside a comment still closes the issue and fails, so never put issue references in comments. Each violation is reported as its own error, naming the rule, the offending line and the fix. Whether a summary states a cohesive theme, whether a bullet is user-facing and whether an issue number exists cannot be decided from text; reviewers keep those.
 
-A second job, `drift`, compares the notes with the diff and only ever warns: a bullet whose code spans (paths and identifiers) the diff no longer touches, because the change landed on main another way or was dropped in conflict resolution; a version the diff only removes; a registry (PyPI, npm, NuGet, Maven Central, Docker Hub, GHCR) that no workflow publishes to; and a merge from the base branch that changed which files the pull request touches. It checks out the pull request head with full history (blobs on demand), skips Dependabot, and runs on label changes too, because the caller's concurrency group cancels the whole run when a label changes and the check would otherwise stay cancelled.
+In the legacy release-notes reusable, a second job, `drift`, compares the notes with the diff and only ever warns: a bullet whose code spans (paths and identifiers) the diff no longer touches, because the change landed on main another way or was dropped in conflict resolution; a version the diff only removes; a registry (PyPI, npm, NuGet, Maven Central, Docker Hub, GHCR) that no workflow publishes to; and a merge from the base branch that changed which files the pull request touches. It checks out the pull request head with full history (blobs on demand), skips Dependabot, and runs on label changes too, because the caller's concurrency group cancels the whole run when a label changes and the check would otherwise stay cancelled.
 
 A repository calls the gate with a job named `release-notes`, so the checks read `release-notes / verify` and `release-notes / drift` and do not collide with other `verify / verify` gates. The caller runs on `opened`, `edited`, `reopened`, `synchronize`, `labeled`, `unlabeled` and `ready_for_review`:
 
@@ -539,6 +589,11 @@ The common workflow bootstrap installs `verify-release-notes.yml` in every non-a
 A repository that keeps its own copy of one bootstrapped file, and takes every other one, is listed for that file in the script's `SKIP_FILE_REPOS`: Arc.Kotlin keeps its SHA-pinned `verify-semver-label.yml`.
 
 Repositories in `REPOS_TO_IGNORE` never receive the callers automatically and need them added through their own reviewed change. That covers the repositories that hold their own governance (AI, Templates, release-action, Stage, Dockerfiles, and Chronicle.Dapr and Chronicle.Wolverine once they release), the private repositories (Studio, Direct, Ensemble, Infrastructure, Experiments, Strategy, Identity) and the public repositories that customize `update-packages.yml` on purpose (Ante, Chronicle.Elixir, Components, Orleans). Private repositories have no GitHub-hosted Actions budget and run their wrappers on `cratis-arc`, so the bootstrap must not overwrite those wrappers with `ubuntu-latest` ones, and a repository that removed a wrapper on purpose must not get it back. Such a repository copies the canonical caller and gives the gate its own runner fallback, in the same shape as its other wrappers: `runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc' }}`, or, in Ensemble, `runs-on: ${{ vars.ENSEMBLE_RUNNER || 'cratis-arc' }}`. It does not set `RUNNER_GATE` permanently. A new private repository, or a new repository with a deliberate customization, is added to `REPOS_TO_IGNORE` with the reason in the comment beside it (the bootstrap's spec asserts that the private repositories and the customized ones stay listed). AI.Distribution is no longer in use and is ignored by both the bootstrap and template propagation. Arc.TypeScript, Chronicle.Python and the two Eventmodelers build kits were never bootstrapped, so a run would also install every standard wrapper there for the first time; they are held back until that is decided.
+
+The policy specs execute the combined inline programs, verify that the live-read,
+notes and drift copies remain byte-identical to the legacy reusable, and cover
+head-versus-merge drift, fetch failure and blocking aggregation. The bootstrap does
+not install the policy caller yet; repositories adopt it through reviewed changes.
 
 The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including a corpus of over 900 published Cratis release bodies (`.github/scripts/tests/fixtures/release-notes/corpus.json`) whose recorded rules any rule change must keep or deliberately update, and `.github/scripts/tests/verify-release-intent.spec.mjs` against the release-intent gate and the Dependabot normalizer.
 
