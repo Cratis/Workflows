@@ -209,5 +209,5 @@ test("the bootstrap installs the release-intent caller only where a repository a
     assert.equal(releases([[".github/workflows/build.yml", "uses: actions/checkout@v4\n"], ["README.md", "Cratis/release-action"]]), false, "a site, sample or tap");
     assert.equal(releases([[".github/workflows/deploy.yml", "uses: Cratis/Workflows/.github/workflows/verify-no-work-records.yml@main\n"], [".github/workflows/nested/publish.yml", "Cratis/release-action"]]), false);
     assert.equal(releases([]), false);
-    assert(/if \[ "\$file_path" = "\$SEMVER_LABEL_FILE" \]; then[\s\S]*?releases_with_release_action "\$repo" "\$subtree"/.test(BOOTSTRAP), "the file loop consults it");
+    assert(/releases_with_release_action "\$repo" "\$subtree" \|\| discovery=\$\?/.test(BOOTSTRAP), "the policy wrapper consults release discovery before writing");
 });

@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/verify-pull-request-policy.yml
       - .github/scripts/tests/verify-pull-request-policy.spec.mjs
+      - .github/scripts/tests/bootstrap-policy.test.py
       - .github/workflows/verify-release-notes.yml
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
@@ -22,6 +23,7 @@ on:
     paths:
       - .github/workflows/verify-pull-request-policy.yml
       - .github/scripts/tests/verify-pull-request-policy.spec.mjs
+      - .github/scripts/tests/bootstrap-policy.test.py
       - .github/workflows/verify-release-notes.yml
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
@@ -57,3 +59,5 @@ jobs:
         run: node --test .github/scripts/tests/verify-release-intent.spec.mjs
       - name: Exercise the combined policy programs and two-tree comparison
         run: node --test .github/scripts/tests/verify-pull-request-policy.spec.mjs
+      - name: Exercise atomic policy wrapper migration
+        run: python3 -B .github/scripts/tests/bootstrap-policy.test.py
