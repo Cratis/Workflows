@@ -139,7 +139,8 @@ or start background writers.
   its PRs a person has pushed to, is never compared, closed or deleted.
   - If one of those PRs carries a byte-identical update diff (`git diff --binary
     --full-index` against its own parent), no branch or PR is created and a notice
-    names that PR.
+    names that PR. The newest such PR is kept, and every other workflow-owned
+    package-update PR, identical or not, is superseded by it, so exactly one stays open.
   - Otherwise the new PR is created as above, and only after its readback succeeds
     are the older ones superseded.
   - Superseding a PR means commenting with a link to the kept PR, closing it, and
