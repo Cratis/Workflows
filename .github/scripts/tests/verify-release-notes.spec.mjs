@@ -816,8 +816,11 @@ test("the bootstrap leaves private and deliberately customized repositories to t
     assert(BOOTSTRAP_WORKFLOW.includes("cratis-arc") && BOOTSTRAP_WORKFLOW.includes("RUNNER_GATE"), "the reason names the private runner routing");
     assert(BOOTSTRAP_WORKFLOW.includes("vars.ENSEMBLE_RUNNER"), "Ensemble's own runner variable is named");
     assert.equal(ignored.includes("Workflows"), true);
-    // The ignore list is what keeps the overwrite semantics untouched: no repository-visibility branch is added.
-    assert.equal(/visibility|isPrivate/i.test(BOOTSTRAP_SCRIPT), false);
+    // The ignore list is what keeps the overwrite semantics untouched: visibility only chooses the policy caller's
+    // runner (public stays on ubuntu-latest, private gets cratis-arc-small), and unknown visibility skips the repository.
+    assert.equal(/isPrivate/i.test(BOOTSTRAP_SCRIPT), false);
+    assert.match(BOOTSTRAP_SCRIPT, /true\) repo_runner=cratis-arc-small ;;/);
+    assert.match(BOOTSTRAP_SCRIPT, /false\) repo_runner=ubuntu-latest ;;/);
 });
 
 test("how, where and whether a change was checked is a note, wherever it stands", () => {
