@@ -203,6 +203,48 @@ jobs:
           # Keep the caller's roll-forward policy; never rewrite global.json.
           global-json-file: ${{ hashFiles('global.json') != '' && 'global.json' || '' }}
 
+      # Key prefix, OS segment and key files match the Cratis .NET package-cache key, so a
+      # caller whose builds cache ~/.nuget/packages the same way shares the cache. Hashed
+      # here, before any update or install, so the key describes the checked-out commit.
+      - name: Resolve NuGet package cache key
+        id: nuget_cache
+        if: steps.detect.outputs.update_nuget == 'true'
+        shell: bash
+        env:
+          CACHE_KEY_PREFIX: nuget-v1-${{ runner.os }}-
+          CACHE_KEY_HASH: ${{ hashFiles('**/packages.lock.json', '**/*.props', '**/*.targets', '**/*.csproj', '**/[Nn]u[Gg]et.[Cc]onfig', '*.slnx', 'global.json') }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CACHE_KEY_HASH" ]; then
+            echo "::notice::No NuGet cache key file matched; restoring packages without the cache."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "enabled=true"
+            echo "restore-key=${CACHE_KEY_PREFIX}"
+            echo "key=${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
+          } >> "$GITHUB_OUTPUT"
+          echo "NuGet package cache key: ${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
+
+      - name: Restore NuGet package cache
+        if: steps.nuget_cache.outputs.enabled == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ steps.nuget_cache.outputs.key }}
+          restore-keys: ${{ steps.nuget_cache.outputs.restore-key }}
+
+      # Registers the post-job save without downloading again. actions/cache saves only
+      # when the job succeeds and skips a key that already exists.
+      - name: Save NuGet package cache at the end of the job
+        if: steps.nuget_cache.outputs.enabled == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ steps.nuget_cache.outputs.key }}
+          lookup-only: true
+
       - name: Setup Node.js
         if: steps.detect.outputs.update_npm == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

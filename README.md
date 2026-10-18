@@ -52,6 +52,15 @@ and skips every ecosystem build, the candidate commit, the direct-mode push and 
 pull request; the job succeeds. A Git error in that check fails the job instead of
 reading as "no changes".
 
+**NuGet packages come from the Actions cache.** When .NET is detected, the workflow
+restores `~/.nuget/packages` with `actions/cache/restore` under
+`nuget-v1-<runner OS>-<hash>`, hashed before any update from `**/packages.lock.json`,
+`**/*.props`, `**/*.targets`, `**/*.csproj`, `**/[Nn]u[Gg]et.[Cc]onfig`, `*.slnx` and
+`global.json`, with the `nuget-v1-<runner OS>-` prefix as fallback. A caller whose own
+.NET builds cache `~/.nuget/packages` under the same key shares that cache. `actions/cache` with
+`lookup-only` saves the cache at the end of a successful job when that key does not
+exist yet. Without any key file the run restores packages from the feeds as before.
+
 An individually approved caller can use this wrapper (replace
 `REVIEWED_COMMIT_SHA` with the reviewed Workflows commit). The script path is an
 example: the caller must commit its own implementation before enabling the hook.
@@ -187,7 +196,8 @@ actionlint .github/workflows/update-packages.yml .github/workflows/verify-packag
 The tests extract and execute the actual inline Bash using temporary local bare Git
 repositories and stub gh/toolchains. They cover ordering, failure gates, exact-tree
 publication, atomic expected-absent reservation (including a same-base competing
-branch race), skipped builds and publication when nothing changed, API failure gates, default compatibility, stale bases, candidate drift,
+branch race), skipped builds and publication when nothing changed, the SHA-pinned
+NuGet cache, API failure gates, default compatibility, stale bases, candidate drift,
 labels, and unrelated output exclusion without credentials, network, or running the
 legacy rebase loop. Structural tests verify Stage ownership, retained bootstrap and
 PR-template triggers, and that the effective changed-file set avoids organization-wide
