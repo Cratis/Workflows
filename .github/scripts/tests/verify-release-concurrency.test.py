@@ -73,8 +73,24 @@ class FixtureTests(unittest.TestCase):
     def test_missing_concurrency_fails(self):
         self.assertEqual(kinds(scan("no-concurrency")), [("publish.yml", "queue")])
 
-    def test_job_level_queue_max_passes(self):
+    def test_per_sha_workflow_group_with_job_queue_passes(self):
         result = scan("job-queue-max")
+        self.assertEqual((result.subjects, result.violations), (1, []))
+
+    def test_shared_workflow_group_without_queue_fails_despite_job_queue(self):
+        result = scan("shared-group-job-queue")
+        self.assertEqual(kinds(result), [("publish.yml", "queue")])
+        self.assertEqual(result.violations[0][2], checker.WORKFLOW_QUEUE_REASON)
+
+    def test_per_sha_workflow_group_without_job_queue_fails(self):
+        result = scan("per-sha-no-job-queue")
+        self.assertEqual(kinds(result), [("publish.yml", "queue")])
+        self.assertEqual(result.violations[0][2], checker.JOB_QUEUE_REASON)
+
+    def test_job_queue_without_workflow_group_passes_beside_a_latest_wins_job(self):
+        result = checker.Scan()
+        result.check("Fixture", "publish.yml", "on: push\njobs:\n  release:\n    concurrency:\n      group: r\n"
+                     "      queue: max\n  deploy:\n    concurrency:\n      group: d\n      cancel-in-progress: false\n")
         self.assertEqual((result.subjects, result.violations), (1, []))
 
     def test_deploy_needs_no_queue_when_it_does_not_cancel(self):

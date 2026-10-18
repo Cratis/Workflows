@@ -1,0 +1,19 @@
+name: Publish
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    concurrency:
+      group: publish-release-${{ github.ref }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - run: echo release

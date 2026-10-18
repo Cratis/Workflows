@@ -701,14 +701,21 @@ The checker, `.github/scripts/verify-release-concurrency.py`, looks at workflow 
 whose name contains `publish`, `release` or `deploy`. It skips `verify-*`,
 `auto-approve-*` and names containing `release-notes`, `release-intent` or
 `documentation` (a documentation workflow only triggers a site build, where the newest
-build covers the ones before it), and exempts a file whose only trigger is
-`workflow_call`, because a reusable piece runs inside its caller's group. For each remaining file:
+build covers the ones before it). A file whose `on:` lists `workflow_call` and no other
+trigger is exempt from every check, because it can only run as a reusable piece inside
+its caller's group; a file that also has its own trigger (for example `workflow_call`
+plus `workflow_dispatch`) is checked. For each remaining file:
 
 - any `cancel-in-progress` at workflow or job level that is not literally `false` is a
   violation, including an expression;
-- a publish or release workflow (name not starting with `deploy`) needs `queue: max` on
-  its workflow-level concurrency or on a job's concurrency. Deploy workflows do not:
-  deploying the newest commit covers the ones before it.
+- a publish or release workflow (name not starting with `deploy`) must queue its
+  pending runs. GitHub applies the workflow-level group before any job group, so a
+  workflow-level concurrency block needs `queue: max` itself, unless its group is unique
+  per run or commit (it contains `github.run_id` or `github.sha`); then a job's
+  concurrency needs `queue: max`. Without a workflow-level block, a job's concurrency
+  needs `queue: max`. Other job groups without a queue (for example a latest-wins deploy
+  job) are fine. Deploy workflows need no queue: deploying the newest commit covers the
+  ones before it.
 
 A workflow that deliberately keeps a single pending slot is listed in the script's
 `ALLOWLIST` with its repository, file and reason (today: Studio's `publish.yml`, which

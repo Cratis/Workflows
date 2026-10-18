@@ -38,8 +38,13 @@ ALLOWLIST = (
 ALLOWED = {(repo, name) for repo, name, _ in ALLOWLIST}
 
 CANCEL_REASON = "cancel-in-progress is not literally false ({where}); a cancelled release is lost"
-QUEUE_REASON = ("no 'queue: max' concurrency at workflow or job level; GitHub keeps one pending run "
-                "and cancels older pending releases")
+DROPS = "GitHub keeps one pending run and cancels older pending releases"
+QUEUE_REASON = f"no 'queue: max' concurrency at workflow or job level; {DROPS}"
+WORKFLOW_QUEUE_REASON = ("workflow-level concurrency group is shared between runs but has no 'queue: max' "
+                         f"(it applies before any job group); {DROPS}")
+JOB_QUEUE_REASON = ("workflow-level concurrency group is unique per run or commit, but no job has "
+                    f"'queue: max'; {DROPS}")
+UNIQUE_GROUP_MARKERS = ("github.run_id", "github.sha")
 
 
 class CouldNotRun(Exception):
@@ -104,6 +109,29 @@ def queues(concurrency):
     return isinstance(concurrency, dict) and concurrency.get("queue") == "max"
 
 
+def unique_per_run(concurrency):
+    group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
+    return isinstance(group, str) and any(marker in group for marker in UNIQUE_GROUP_MARKERS)
+
+
+def queue_problem(document):
+    """Return why pending releases can be dropped, or None.
+
+    GitHub applies the workflow-level group before any job group, so a shared workflow group must queue
+    itself. Only a group unique per run or commit (Ante's per-sha shape) hands the queue to a job.
+    """
+    jobs_queue = any(queues(concurrency) for where, concurrency in concurrency_blocks(document)
+                     if where != "workflow level")
+    if "concurrency" not in document:
+        return None if jobs_queue else QUEUE_REASON
+    workflow = document["concurrency"]
+    if queues(workflow):
+        return None
+    if not unique_per_run(workflow):
+        return WORKFLOW_QUEUE_REASON
+    return None if jobs_queue else JOB_QUEUE_REASON
+
+
 class Scan:
     """Accumulates counts and violations across repositories."""
 
@@ -125,18 +153,18 @@ class Scan:
     def check(self, repo, name, text):
         document = parse(repo, name, text)
         if triggers(document) == {"workflow_call"}:
-            return  # A reusable piece runs inside its caller's concurrency group.
+            return  # Only reachable as a reusable piece, so it runs inside its caller's concurrency group.
         self.subjects += 1
-        blocks = list(concurrency_blocks(document))
-        for where, concurrency in blocks:
+        for where, concurrency in concurrency_blocks(document):
             if cancels(concurrency):
                 self.violations.append((repo, name, CANCEL_REASON.format(where=where)))
-        if is_deploy(name) or any(queues(concurrency) for _, concurrency in blocks):
+        problem = None if is_deploy(name) else queue_problem(document)
+        if problem is None:
             return  # Latest-wins is correct for a deploy: the newest commit covers the ones before it.
         if (repo, name) in ALLOWED:
             self.allowlist_used.add((repo, name))
             return
-        self.violations.append((repo, name, QUEUE_REASON))
+        self.violations.append((repo, name, problem))
 
     def stale_allowlist(self):
         return [(repo, name, f"allowlist entry no longer needed ({reason})")
@@ -240,6 +268,8 @@ def report(scan):
 
 
 QUEUED = "concurrency:\n  group: publish\n  queue: max\n"
+PER_SHA = "concurrency:\n  group: publish-${{ github.sha }}\n"
+JOB_QUEUED = "jobs:\n  release:\n    concurrency:\n      group: release\n      queue: max\n"
 PLANTED = {
     "publish-cancel-true.yml": ("on: push\nconcurrency:\n  group: publish\n  cancel-in-progress: true\n  queue: max\n", "cancel"),
     "release-cancel-expression.yml": ("on: push\nconcurrency:\n  group: release\n  queue: max\n"
@@ -250,6 +280,8 @@ PLANTED = {
     "publish-no-concurrency.yml": ("on: push\njobs: {}\n", "queue"),
     "release-group-only.yml": ("on: push\nconcurrency: release\n", "queue"),
     "publish-single-slot.yml": ("on: push\nconcurrency:\n  group: publish\n  cancel-in-progress: false\n", "queue"),
+    "publish-shared-group-job-queue.yml": ("on: push\nconcurrency:\n  group: publish\n" + JOB_QUEUED, "queue"),
+    "release-per-sha-no-job-queue.yml": ("on: push\n" + PER_SHA + "jobs: {}\n", "queue"),
 }
 CLEAN = {
     "publish-queued.yml": "on: push\n" + QUEUED,
@@ -257,6 +289,7 @@ CLEAN = {
     "release-reusable.yml": "on: workflow_call\nconcurrency:\n  group: release\n  cancel-in-progress: true\n",
     "verify-release-notes.yml": "on: pull_request\nconcurrency:\n  group: notes\n  cancel-in-progress: true\n",
     "publish-documentation.yml": "on: push\njobs: {}\n",
+    "publish-per-sha-job-queue.yml": "on: push\n" + PER_SHA + JOB_QUEUED,
 }
 
 
