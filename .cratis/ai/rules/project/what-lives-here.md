@@ -7,6 +7,7 @@ applyTo: "**/*"
 | Path | Holds |
 | --- | --- |
 | `.github/workflows/` | the reusable (`workflow_call`) and organization-wide workflows |
+| `.github/actions/` | shared composite actions (`dotnet-cache`, `yarn-cache`) repositories call with `uses: Cratis/Workflows/.github/actions/<name>@main` |
 | `.github/templates/` | incomplete workflow examples to copy and customize in consuming repositories |
 | `.github/scripts/` | the scripts those workflows run, plus `update-ai-profile-subscription.mjs` (the subscription update controller) |
 | `.github/scripts/tests/` | script tests wired into `verify-*` workflows |

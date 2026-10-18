@@ -1,0 +1,6 @@
+<Project>
+  <!-- Fixture for verify-cache-actions.yml: hashed into the self-test cache key only. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>
