@@ -718,8 +718,10 @@ A run does not start every push-triggered workflow in every repository at once
   Repositories that need no change do not wait, and a run with nothing to change
   waits for no canary.
 
-The job has `timeout-minutes: 90`. `python3 -B .github/scripts/tests/bootstrap-rollout.test.py`
-exercises the rollout offline with a fake `gh` and a recording `SLEEP_CMD`.
+The workflow sets none of these, so the script's defaults apply; they are
+environment variables of `.github/scripts/bootstrap-common-workflows.sh`.
+`python3 -B .github/scripts/tests/bootstrap-rollout.test.py` exercises the rollout
+offline with a fake `gh` and a recording `SLEEP_CMD`.
 
 ---
 

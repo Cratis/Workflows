@@ -14,12 +14,6 @@ name: Bootstrap Common Workflows
 #   • Already-bootstrapped: updates wrappers if content has changed
 #   • Already up-to-date:   skips processing
 #
-# Rolls out without a CI storm (Cratis/Workflows#163): the first repository that
-# needs a change (Fundamentals when it does) is the canary and keeps its CI run;
-# the rollout waits for that run and stops if it does not succeed. Every later
-# commit touches only wrapper files and carries [skip ci], with STAGGER_SECONDS
-# between pushes. See .github/scripts/bootstrap-common-workflows.sh.
-#
 # Triggered automatically on push to main when the watched workflows, CodeQL
 # config or bootstrap script change. Package-update implementation changes do
 # not change the canonical wrapper and must not trigger organization-wide writes.
@@ -28,7 +22,6 @@ name: Bootstrap Common Workflows
 # Requires PAT_WORKFLOWS secret with permissions:
 #   Classic PAT:       repo + workflow scopes
 #   Fine-grained PAT:  Contents (read/write) + Workflows (read/write)
-#                      + Actions (read), to follow the canary's workflow runs
 #
 # The PAT owner must also be configured as a bypass actor on each target
 # repository's branch protection ruleset so that direct pushes to the
@@ -86,8 +79,6 @@ env:
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
-    # The canary wait alone may take CANARY_TIMEOUT_SECONDS (45 minutes), plus the staggered pushes.
-    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -130,10 +121,5 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
           REPOS_FILE: ${{ github.workspace }}/repos.json
           REPOS_IGNORE: ${{ env.REPOS_TO_IGNORE }}
-          # Canary and stagger (Cratis/Workflows#163); these are the script's defaults, stated here to tune.
-          CANARY_PREFERENCE: Fundamentals
-          CANARY_SETTLE_SECONDS: "300"
-          CANARY_TIMEOUT_SECONDS: "2700"
-          STAGGER_SECONDS: "20"
         run: |
           bash .github/scripts/bootstrap-common-workflows.sh
