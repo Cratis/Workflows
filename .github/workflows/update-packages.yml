@@ -875,6 +875,8 @@ jobs:
           owned=()
           keep_number=''
           keep_url=''
+          keep_ref=''
+          keep_sha=''
           listed=0
           # Read on fd 3 so no command in the loop can consume the listing.
           while IFS=$'\t' read -r -u 3 number url head_ref head_sha head_repo base_ref; do
@@ -899,9 +901,24 @@ jobs:
             if [ "$pr_diff" = "$candidate_diff" ] && { [ -z "$keep_number" ] || [ "$number" -gt "$keep_number" ]; }; then
               keep_number=$number
               keep_url=$url
+              keep_ref=$head_ref
+              keep_sha=$head_sha
             fi
           done 3<<< "$open_prs"
           echo "Checked $listed open PRs; ${#owned[@]} are open package-update PRs from this workflow."
+
+          # Per-pass fuse: an unexpectedly large set of PRs to close stops the run
+          # before anything is published or closed, rather than closing some.
+          max_superseded=10
+          check_fuse() {
+            local count=${#owned[@]}
+            if [ -n "$keep_number" ]; then count=$((count - 1)); fi
+            if [ "$count" -gt "$max_superseded" ]; then
+              note="Refusing to supersede $count open package-update PRs in $CALLER_REPOSITORY (limit $max_superseded); nothing was published or closed. Close them by hand, then rerun."
+              return 1
+            fi
+          }
+          check_fuse
 
           # Closes every owned PR except the one kept, with a comment naming it,
           # then deletes its branch if the branch still points at the inspected
@@ -909,6 +926,7 @@ jobs:
           # changed since the lookup is left open. Any API failure fails the job.
           close_superseded() {
             local entry number url head_ref head_sha state remote_head closed=0
+            check_fuse
             for entry in ${owned[@]+"${owned[@]}"}; do
               IFS=$'\t' read -r number url head_ref head_sha <<< "$entry"
               if [ "$number" = "$keep_number" ]; then continue; fi
@@ -923,6 +941,10 @@ jobs:
                 -f "body=Superseded by $keep_url, which carries the current package updates." --jq .id
               state=$(gh api --method PATCH "repos/$CALLER_REPOSITORY/pulls/$number" -f state=closed --jq .state)
               test "$state" = closed
+              # Neither the REST ref API nor GraphQL deleteRef accepts an expected
+              # SHA, so check-then-delete is the tightest form available: the read
+              # runs immediately before the delete. A push to this closed PR's
+              # branch in the gap between the two would be deleted with it.
               remote_head=$(git ls-remote origin "refs/heads/$head_ref")
               if [ "$remote_head" = "$head_sha"$'\t'"refs/heads/$head_ref" ]; then
                 gh api --method DELETE "repos/$CALLER_REPOSITORY/git/refs/heads/$head_ref"
@@ -936,6 +958,13 @@ jobs:
           }
 
           if [ -n "$keep_number" ]; then
+            # Only close others in favor of a PR that is still what was inspected.
+            # If it changed (closed, merged, pushed to, retargeted), fail without
+            # publishing or closing anything: the next run decides from fresh state.
+            note="$keep_url carried this exact update at lookup but changed before it could be kept; nothing was published or closed. The next run decides again."
+            state=$(gh api "repos/$CALLER_REPOSITORY/pulls/$keep_number" \
+              --jq '[.state, .head.sha, .head.ref, .base.ref] | @tsv')
+            test "$state" = "open"$'\t'"$keep_sha"$'\t'"$keep_ref"$'\t'"$BASE_BRANCH"
             echo "::notice::$keep_url already carries this exact package update; not opening another PR."
             close_superseded
             note=''
