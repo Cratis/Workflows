@@ -90,6 +90,58 @@ if name == "gh":
         ref = "refs/heads/automation/package-update-123-1"
         base = os.environ["EXPECTED_BASE"] if "EXPECTED_BASE" in os.environ else ""
         remote_git = [os.environ["REAL_GIT"], "--git-dir", os.environ["REMOTE"]]
+        pulls = "repos/Cratis/Fixture/pulls/"
+        open_prs = json.loads(Path(os.environ["OPEN_PRS"]).read_text()) if Path(os.environ["OPEN_PRS"]).exists() else []
+        closed = Path(os.environ["CLOSED_PRS"])
+        closed_numbers = [json.loads(line)["number"] for line in closed.read_text().splitlines()] if closed.exists() else []
+        if args[1] == "--paginate":
+            assert args == ["api", "--paginate", "repos/Cratis/Fixture/pulls?state=open&per_page=100", "--jq",
+                            '.[] | [.number, .html_url, .head.ref, .head.sha, (.head.repo.full_name // "-"), .base.ref] | @tsv'], args
+            if os.environ.get("FAIL_PR_LIST") == "1":
+                print("HTTP 502: Bad Gateway", file=sys.stderr)
+                sys.exit(30)
+            for pr in open_prs:
+                if pr["number"] not in closed_numbers:
+                    print("\t".join([str(pr["number"]), pr.get("url", "https://github.com/Cratis/Fixture/pull/%d" % pr["number"]),
+                                     pr["head_ref"], pr["head_sha"], pr.get("head_repo", "Cratis/Fixture"),
+                                     pr.get("base_ref", "main")]))
+            if os.environ.get("FAIL_AFTER_PR_LIST_OUTPUT") == "1":
+                sys.exit(31)
+            sys.exit(0)
+        if args[1].startswith(pulls):
+            number = int(args[1][len(pulls):])
+            pr = next(pr for pr in open_prs if pr["number"] == number)
+            assert pr.get("head_repo", "Cratis/Fixture") == "Cratis/Fixture" and pr["head_ref"].startswith("automation/"), pr
+            assert args == ["api", args[1], "--jq", "[.state, .head.sha, .head.ref, .base.ref] | @tsv"], args
+            state = "closed" if number in closed_numbers or pr.get("closed") else "open"
+            print("\t".join([state, pr.get("current_sha", pr["head_sha"]), pr["head_ref"], pr.get("base_ref", "main")]))
+            sys.exit(0)
+        if args[1:3] == ["--method", "POST"] and args[3].endswith("/comments"):
+            number = int(args[3].split("/")[-2])
+            assert args == ["api", "--method", "POST", f"repos/Cratis/Fixture/issues/{number}/comments",
+                            "-f", args[5], "--jq", ".id"], args
+            assert args[5].startswith("body=Superseded by https://github.com/Cratis/Fixture/pull/"), args
+            if os.environ.get("FAIL_COMMENT") == "1":
+                sys.exit(32)
+            print("1")
+            sys.exit(0)
+        if args[1:3] == ["--method", "PATCH"]:
+            assert args[3].startswith(pulls) and args[4:] == ["-f", "state=closed", "--jq", ".state"], args
+            number = int(args[3][len(pulls):])
+            if os.environ.get("FAIL_CLOSE") == "1":
+                sys.exit(33)
+            with closed.open("a") as record:
+                record.write(json.dumps({"number": number}) + "\n")
+            print("closed")
+            sys.exit(0)
+        if args[1:3] == ["--method", "DELETE"]:
+            prefix = "repos/Cratis/Fixture/git/refs/heads/"
+            assert len(args) == 4 and args[3].startswith(prefix + "automation/package-update-"), args
+            assert args[3] != prefix + "automation/package-update-123-1", args
+            if os.environ.get("FAIL_DELETE") == "1":
+                sys.exit(34)
+            subprocess.run([*remote_git, "update-ref", "-d", "refs/heads/" + args[3][len(prefix):]], check=True)
+            sys.exit(0)
         if args[1:3] == ["--method", "POST"]:
             assert args == ["api", "--method", "POST", "repos/Cratis/Fixture/git/refs",
                             "-f", "ref=" + ref, "-f", "sha=" + base, "--jq", query], args
@@ -210,6 +262,7 @@ class UpdatePackagesTests(unittest.TestCase):
             "CALLER_REPOSITORY": "Cratis/Fixture", "PUBLICATION_MODE": "pull-request", "PR_LABEL": "",
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "NPM_PACKAGE_EXCLUSIONS": "typescript",
             "NUGET_PACKAGE_EXCLUSIONS": "", "RUNNER_TEMP": str(self.root),
+            "OPEN_PRS": str(self.root / "open-prs.json"), "CLOSED_PRS": str(self.root / "closed-prs.jsonl"),
         }
         for name in ["git", "gh", "dotnet", "yarn", "npx", "gradle", "mix"]:
             path = self.bin / name
@@ -228,8 +281,8 @@ class UpdatePackagesTests(unittest.TestCase):
         self.git("push", "origin", "main")
         self.base = self.git("rev-parse", "HEAD")
 
-    def git(self, *args, cwd=None, input=None):
-        result = subprocess.run([REAL_GIT, *args], cwd=cwd or self.repo, env=self.env,
+    def git(self, *args, cwd=None, input=None, env=None):
+        result = subprocess.run([REAL_GIT, *args], cwd=cwd or self.repo, env={**self.env, **(env or {})},
                                 input=input, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
@@ -960,6 +1013,217 @@ class UpdatePackagesTests(unittest.TestCase):
         self.env.update(PR_LABEL="", PUBLICATION_MODE="typo")
         self.assertNotEqual(self.run_step(PREFLIGHT), 0)
         self.assert_not_published()
+
+    BOT = {"GIT_AUTHOR_NAME": "github-actions[bot]", "GIT_AUTHOR_EMAIL": "github-actions[bot]@users.noreply.github.com",
+           "GIT_COMMITTER_NAME": "github-actions[bot]",
+           "GIT_COMMITTER_EMAIL": "github-actions[bot]@users.noreply.github.com",
+           "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
+
+    def update_commit(self, files=None, tree=None, parent=None, identity=None, message="chore: update packages"):
+        """A commit shaped like an earlier run's update: one commit with the workflow's identity."""
+        parent = parent or self.base
+        if tree is None:
+            index = {"GIT_INDEX_FILE": str(self.root / "fixture-index")}
+            self.git("read-tree", parent, env=index)
+            for name, content in files.items():
+                blob = self.git("hash-object", "-w", "--stdin", input=content)
+                self.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{name}", env=index)
+            tree = self.git("write-tree", env=index)
+        return self.git("commit-tree", tree, "-p", parent, "-m", message, env=identity or self.BOT)
+
+    def open_pr(self, number, commit=None, run=None, **fields):
+        """Register an open PR and push its head branch to the caller's remote."""
+        pr = {"number": number, "head_ref": f"automation/package-update-{run or number}-1", **fields}
+        if commit:
+            pr["head_sha"] = commit
+            if pr.get("head_repo", "Cratis/Fixture") == "Cratis/Fixture":
+                self.git("push", "origin", f"{commit}:refs/heads/{pr['head_ref']}")
+        path = Path(self.env["OPEN_PRS"])
+        prs = json.loads(path.read_text()) if path.exists() else []
+        path.write_text(json.dumps([*prs, pr]))
+        return pr
+
+    def identical_commit(self):
+        return self.update_commit(tree=self.env["CANDIDATE_TREE"])
+
+    def remote_branches(self):
+        return self.git("--git-dir", str(self.remote), "for-each-ref", "--format=%(refname:short)").splitlines()
+
+    def closed(self):
+        path = Path(self.env["CLOSED_PRS"])
+        return [json.loads(line)["number"] for line in path.read_text().splitlines()] if path.exists() else []
+
+    def close_calls(self):
+        # Calls are [program, *args]: gh api --method VERB PATH ...
+        return [c for c in self.calls("gh") if c[2:4] in (["--method", "PATCH"], ["--method", "DELETE"])
+                or (c[2:4] == ["--method", "POST"] and c[4].endswith("/comments"))]
+
+    def test_identical_open_pr_suppresses_another_pr(self):
+        self.assertTrue(self.prepare())
+        self.open_pr(7, self.identical_commit())
+        self.assert_step_ok(PUBLISH)
+        self.assertIn("::notice::https://github.com/Cratis/Fixture/pull/7 already carries this exact package update",
+                      self.last_result.stdout)
+        self.assertFalse(self.pr.exists())
+        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.calls()))
+        self.assertFalse(any(c[:4] == ["gh", "api", "--method", "POST"] for c in self.calls()))
+        self.assertEqual(self.close_calls(), [])
+        self.assertNotIn("automation/package-update-123-1", self.remote_branches())
+        self.assertIn("automation/package-update-7-1", self.remote_branches())
+        self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", "main"), self.base)
+
+    def test_identical_open_pr_is_kept_and_other_workflow_prs_are_superseded(self):
+        self.assertTrue(self.prepare())
+        self.open_pr(5, self.update_commit({"dependencies.txt": "older update\n"}))
+        self.open_pr(6, self.identical_commit())
+        self.open_pr(7, self.identical_commit())
+        self.assert_step_ok(PUBLISH)
+        self.assertFalse(self.pr.exists())
+        self.assertEqual(self.closed(), [5, 6])
+        branches = self.remote_branches()
+        self.assertNotIn("automation/package-update-5-1", branches)
+        self.assertNotIn("automation/package-update-6-1", branches)
+        self.assertIn("automation/package-update-7-1", branches)
+        comments = [c for c in self.close_calls() if c[3] == "POST"]
+        self.assertEqual([c[4] for c in comments], ["repos/Cratis/Fixture/issues/5/comments",
+                                                    "repos/Cratis/Fixture/issues/6/comments"])
+        self.assertEqual([c[6] for c in comments], [
+            "body=Superseded by https://github.com/Cratis/Fixture/pull/7, which carries the current package updates."] * 2)
+        self.assertIn("Closed 2 superseded package-update PRs.", self.last_result.stdout)
+
+    def test_different_update_opens_new_pr_then_closes_the_older_one(self):
+        self.assertTrue(self.prepare())
+        self.open_pr(5, self.update_commit({"dependencies.txt": "older update\n"}))
+        self.assert_step_ok(PUBLISH)
+        self.assertTrue(self.pr.exists())
+        self.assertEqual(self.closed(), [5])
+        branches = self.remote_branches()
+        self.assertNotIn("automation/package-update-5-1", branches)
+        self.assertIn("automation/package-update-123-1", branches)
+        calls = self.calls()
+        create = calls.index(next(c for c in calls if c[:3] == ["gh", "pr", "create"]))
+        comment = calls.index(next(c for c in calls if c[4:5] == ["repos/Cratis/Fixture/issues/5/comments"]))
+        close = calls.index(next(c for c in calls if c[2:4] == ["--method", "PATCH"]))
+        delete = calls.index(next(c for c in calls if c[2:4] == ["--method", "DELETE"]))
+        self.assertLess(create, comment)
+        self.assertLess(comment, close)
+        self.assertLess(close, delete)
+        self.assertEqual(calls[comment][6], "body=Superseded by https://github.com/Cratis/Fixture/pull/1, "
+                         "which carries the current package updates.")
+        self.assertIn("Checked 1 open PRs; 1 are open package-update PRs from this workflow.", self.last_result.stdout)
+
+    def test_pr_lookup_failure_fails_before_any_publication(self):
+        for option in ("FAIL_PR_LIST", "FAIL_AFTER_PR_LIST_OUTPUT"):
+            with self.subTest(option=option):
+                self.setUp()
+                self.assertTrue(self.prepare())
+                self.open_pr(5, self.update_commit({"dependencies.txt": "older update\n"}))
+                self.env[option] = "1"
+                self.assertNotEqual(self.run_step(PUBLISH), 0)
+                self.assertIn("Looking up open package-update PRs in Cratis/Fixture failed", self.last_result.stderr)
+                self.assertFalse(self.pr.exists())
+                self.assertFalse(any(c[:2] == ["git", "push"] for c in self.calls()))
+                self.assertFalse(any(c[:4] == ["gh", "api", "--method", "POST"] for c in self.calls()))
+                self.assertEqual(self.close_calls(), [])
+                self.assertEqual(self.remote_branches(), ["automation/package-update-5-1", "main"])
+
+    def test_unexpected_pr_listing_fails_closed(self):
+        for fields in ({"head_sha": "not-a-sha"}, {"head_sha": "a" * 40, "url": "https://github.com/Other/Fixture/pull/5"}):
+            with self.subTest(fields=fields):
+                self.setUp()
+                self.assertTrue(self.prepare())
+                self.open_pr(5, **fields)
+                self.assertNotEqual(self.run_step(PUBLISH), 0)
+                self.assertFalse(self.pr.exists())
+                self.assertFalse(any(c[:2] == ["git", "push"] for c in self.calls()))
+
+    def test_only_this_workflows_own_prs_are_compared_or_closed(self):
+        self.assertTrue(self.prepare())
+        same = self.identical_commit()
+        person = {**self.BOT, "GIT_AUTHOR_NAME": "Person", "GIT_COMMITTER_NAME": "Person"}
+        side = self.update_commit({"Dockerfile": "side\n"})
+        self.open_pr(2, same, head_repo="Other/Fixture")  # fork with the run-owned name
+        self.open_pr(3, same, base_ref="release")
+        self.open_pr(4, same, head_ref="feature/package-update")
+        self.open_pr(5, self.update_commit(tree=self.env["CANDIDATE_TREE"], identity=person))
+        self.open_pr(6, self.update_commit(tree=self.env["CANDIDATE_TREE"], message="chore: tweak"))
+        self.open_pr(8, self.update_commit(tree=self.env["CANDIDATE_TREE"], parent=side))
+        self.open_pr(9, self.update_commit({"Dockerfile": "manual fix\n"}, parent=same, identity=person,
+                                           message="Fix the image"))  # a person pushed on top
+        before = self.remote_branches()
+        self.assert_step_ok(PUBLISH)
+        self.assertTrue(self.pr.exists())
+        self.assertEqual(self.close_calls(), [])
+        self.assertEqual(sorted(set(before) | {"automation/package-update-123-1"}), self.remote_branches())
+        for number in (5, 6, 8, 9):
+            self.assertIn(f"::notice::Leaving https://github.com/Cratis/Fixture/pull/{number} unchanged",
+                          self.last_result.stdout)
+        fetched = [c[-1] for c in self.calls("git") if c[1] == "fetch"]
+        self.assertEqual(fetched, [f"refs/heads/automation/package-update-{n}-1" for n in (5, 6, 8, 9)])
+
+    def test_pr_changed_after_lookup_is_left_open(self):
+        self.assertTrue(self.prepare())
+        self.open_pr(5, self.update_commit({"dependencies.txt": "older update\n"}), current_sha="f" * 40)
+        self.assert_step_ok(PUBLISH)
+        self.assertTrue(self.pr.exists())
+        self.assertIn("::warning::Leaving https://github.com/Cratis/Fixture/pull/5 unchanged", self.last_result.stdout)
+        self.assertEqual(self.close_calls(), [])
+        self.assertIn("automation/package-update-5-1", self.remote_branches())
+
+    def test_failure_to_supersede_fails_the_job_after_publishing(self):
+        for option, closed in (("FAIL_COMMENT", []), ("FAIL_CLOSE", []), ("FAIL_DELETE", [5])):
+            with self.subTest(option=option):
+                self.setUp()
+                self.assertTrue(self.prepare())
+                self.open_pr(5, self.update_commit({"dependencies.txt": "older update\n"}))
+                self.env[option] = "1"
+                self.assertNotEqual(self.run_step(PUBLISH), 0)
+                self.assertTrue(self.pr.exists())
+                self.assertIn("Superseding https://github.com/Cratis/Fixture/pull/5 failed", self.last_result.stderr)
+                self.assertEqual(self.closed(), closed)
+                self.assertIn("automation/package-update-5-1", self.remote_branches())
+                self.assertNotIn("Closed https://github.com/Cratis/Fixture/pull/5", self.last_result.stdout)
+
+    def test_fuse_refuses_to_supersede_more_than_ten_prs_before_publishing(self):
+        self.assertTrue(self.prepare())
+        for number in range(10, 21):
+            self.open_pr(number, self.update_commit({"dependencies.txt": f"older update {number}\n"}))
+        before = self.remote_branches()
+        self.assertNotEqual(self.run_step(PUBLISH), 0)
+        self.assertIn("Refusing to supersede 11 open package-update PRs in Cratis/Fixture (limit 10)",
+                      self.last_result.stderr)
+        self.assertFalse(self.pr.exists())
+        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.calls()))
+        self.assertFalse(any(c[:4] == ["gh", "api", "--method", "POST"] for c in self.calls()))
+        self.assertEqual(self.close_calls(), [])
+        self.assertEqual(self.remote_branches(), before)
+
+    def test_fuse_counts_only_prs_to_close_when_one_is_kept(self):
+        self.assertTrue(self.prepare())
+        for number in range(10, 20):
+            self.open_pr(number, self.update_commit({"dependencies.txt": f"older update {number}\n"}))
+        self.open_pr(30, self.identical_commit())
+        self.assert_step_ok(PUBLISH)
+        self.assertFalse(self.pr.exists())
+        self.assertEqual(self.closed(), list(range(10, 20)))
+        self.assertIn("Closed 10 superseded package-update PRs.", self.last_result.stdout)
+
+    def test_kept_pr_that_changed_after_lookup_fails_without_closing_or_publishing(self):
+        for fields in ({"current_sha": "f" * 40}, {"closed": True}):
+            with self.subTest(fields=fields):
+                self.setUp()
+                self.assertTrue(self.prepare())
+                self.open_pr(6, self.update_commit({"dependencies.txt": "older update\n"}))
+                self.open_pr(7, self.identical_commit(), **fields)
+                self.assertNotEqual(self.run_step(PUBLISH), 0)
+                self.assertIn("https://github.com/Cratis/Fixture/pull/7 carried this exact update at lookup but changed",
+                              self.last_result.stderr)
+                self.assertFalse(self.pr.exists())
+                self.assertFalse(any(c[:2] == ["git", "push"] for c in self.calls()))
+                self.assertEqual(self.close_calls(), [])
+                self.assertEqual(self.closed(), [])
+                reads = [c for c in self.calls("gh") if c[2:3] == ["repos/Cratis/Fixture/pulls/7"]]
+                self.assertEqual(len(reads), 1)
 
     def test_invalid_run_identity_cannot_become_branch(self):
         self.assertTrue(self.prepare())

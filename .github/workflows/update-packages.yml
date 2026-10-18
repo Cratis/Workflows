@@ -837,6 +837,141 @@ jobs:
             test "$remote_candidate" = "$CANDIDATE_COMMIT"$'\t'"refs/heads/$branch"
           }
           check_candidate_and_base
+          note=''
+          trap 'status=$?; if [ "$status" -ne 0 ] && [ -n "$note" ]; then printf "::error::%s\n" "$note" >&2; fi' EXIT
+
+          # Earlier runs' open PRs: only this workflow's own are ever compared,
+          # closed or have their branch deleted. Ours means: head branch in this
+          # repository (never a fork) named like a run-owned branch, this base,
+          # and a head that is one workflow-authored update commit whose parent is
+          # on the base. Anything else (including a bot PR a person pushed to) is
+          # left untouched. A failed or unexpected lookup fails the job: an
+          # unknown is never read as "none open".
+          note="Looking up open package-update PRs in $CALLER_REPOSITORY failed; nothing was published or closed."
+          bot_identity=$'github-actions[bot]\tgithub-actions[bot]@users.noreply.github.com'
+          bot_identity="$bot_identity"$'\t'"$bot_identity"$'\tchore: update packages'
+          # Prints "foreign" or "ours <parent>"; returns nonzero only on errors.
+          classify() {
+            local parents identity status
+            parents=$(git rev-list --parents -n 1 "$1") || return 2
+            read -ra parents <<< "$parents"
+            if [ "${#parents[@]}" -ne 2 ]; then echo foreign; return 0; fi
+            identity=$(git log -1 --format='%an%x09%ae%x09%cn%x09%ce%x09%s' "$1") || return 2
+            if [ "$identity" != "$bot_identity" ]; then echo foreign; return 0; fi
+            status=0
+            git merge-base --is-ancestor "${parents[1]}" "$EXPECTED_BASE" || status=$?
+            case "$status" in
+              0) echo "ours ${parents[1]}" ;;
+              1) echo foreign ;;
+              *) return 2 ;;
+            esac
+          }
+          diff_hash() {
+            git diff --binary --full-index "$1" "$2" | git hash-object --stdin
+          }
+          candidate_diff=$(diff_hash "$EXPECTED_BASE" "$CANDIDATE_COMMIT")
+          open_prs=$(gh api --paginate "repos/$CALLER_REPOSITORY/pulls?state=open&per_page=100" \
+            --jq '.[] | [.number, .html_url, .head.ref, .head.sha, (.head.repo.full_name // "-"), .base.ref] | @tsv')
+          owned=()
+          keep_number=''
+          keep_url=''
+          keep_ref=''
+          keep_sha=''
+          listed=0
+          # Read on fd 3 so no command in the loop can consume the listing.
+          while IFS=$'\t' read -r -u 3 number url head_ref head_sha head_repo base_ref; do
+            if [ -z "$number$url$head_ref$head_sha$head_repo$base_ref" ]; then continue; fi
+            [[ "$number" =~ ^[1-9][0-9]*$ && "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$url" == "https://github.com/$CALLER_REPOSITORY/pull/$number" ]]
+            listed=$((listed + 1))
+            if [[ "$head_repo" != "$CALLER_REPOSITORY" || "$base_ref" != "$BASE_BRANCH" ||
+                  ! "$head_ref" =~ ^automation/package-update-[0-9]+-[0-9]+$ ]]; then
+              continue
+            fi
+            git fetch --quiet --no-tags origin "refs/heads/$head_ref"
+            fetched=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
+            test "$fetched" = "$head_sha"
+            verdict=$(classify "$head_sha")
+            if [ "$verdict" = foreign ]; then
+              echo "::notice::Leaving $url unchanged: its branch is not a single workflow-authored update commit on $BASE_BRANCH."
+              continue
+            fi
+            owned+=("$number"$'\t'"$url"$'\t'"$head_ref"$'\t'"$head_sha")
+            pr_diff=$(diff_hash "${verdict#ours }" "$head_sha")
+            if [ "$pr_diff" = "$candidate_diff" ] && { [ -z "$keep_number" ] || [ "$number" -gt "$keep_number" ]; }; then
+              keep_number=$number
+              keep_url=$url
+              keep_ref=$head_ref
+              keep_sha=$head_sha
+            fi
+          done 3<<< "$open_prs"
+          echo "Checked $listed open PRs; ${#owned[@]} are open package-update PRs from this workflow."
+
+          # Per-pass fuse: an unexpectedly large set of PRs to close stops the run
+          # before anything is published or closed, rather than closing some.
+          max_superseded=10
+          check_fuse() {
+            local count=${#owned[@]}
+            if [ -n "$keep_number" ]; then count=$((count - 1)); fi
+            if [ "$count" -gt "$max_superseded" ]; then
+              note="Refusing to supersede $count open package-update PRs in $CALLER_REPOSITORY (limit $max_superseded); nothing was published or closed. Close them by hand, then rerun."
+              return 1
+            fi
+          }
+          check_fuse
+
+          # Closes every owned PR except the one kept, with a comment naming it,
+          # then deletes its branch if the branch still points at the inspected
+          # update commit (GitHub can restore it from the closed PR). A PR that
+          # changed since the lookup is left open. Any API failure fails the job.
+          close_superseded() {
+            local entry number url head_ref head_sha state remote_head closed=0
+            check_fuse
+            for entry in ${owned[@]+"${owned[@]}"}; do
+              IFS=$'\t' read -r number url head_ref head_sha <<< "$entry"
+              if [ "$number" = "$keep_number" ]; then continue; fi
+              note="Superseding $url failed; it or its branch $head_ref may remain. The current package-update PR is $keep_url. No automatic retry."
+              state=$(gh api "repos/$CALLER_REPOSITORY/pulls/$number" \
+                --jq '[.state, .head.sha, .head.ref, .base.ref] | @tsv')
+              if [ "$state" != "open"$'\t'"$head_sha"$'\t'"$head_ref"$'\t'"$BASE_BRANCH" ]; then
+                echo "::warning::Leaving $url unchanged: it changed after the lookup."
+                continue
+              fi
+              gh api --method POST "repos/$CALLER_REPOSITORY/issues/$number/comments" \
+                -f "body=Superseded by $keep_url, which carries the current package updates." --jq .id
+              state=$(gh api --method PATCH "repos/$CALLER_REPOSITORY/pulls/$number" -f state=closed --jq .state)
+              test "$state" = closed
+              # Neither the REST ref API nor GraphQL deleteRef accepts an expected
+              # SHA, so check-then-delete is the tightest form available: the read
+              # runs immediately before the delete. A push to this closed PR's
+              # branch in the gap between the two would be deleted with it.
+              remote_head=$(git ls-remote origin "refs/heads/$head_ref")
+              if [ "$remote_head" = "$head_sha"$'\t'"refs/heads/$head_ref" ]; then
+                gh api --method DELETE "repos/$CALLER_REPOSITORY/git/refs/heads/$head_ref"
+              else
+                echo "::warning::Closed $url but kept branch $head_ref: it no longer points at the inspected update commit."
+              fi
+              echo "Closed $url as superseded by $keep_url."
+              closed=$((closed + 1))
+            done
+            echo "Closed $closed superseded package-update PRs."
+          }
+
+          if [ -n "$keep_number" ]; then
+            # Only close others in favor of a PR that is still what was inspected.
+            # If it changed (closed, merged, pushed to, retargeted), fail without
+            # publishing or closing anything: the next run decides from fresh state.
+            note="$keep_url carried this exact update at lookup but changed before it could be kept; nothing was published or closed. The next run decides again."
+            state=$(gh api "repos/$CALLER_REPOSITORY/pulls/$keep_number" \
+              --jq '[.state, .head.sha, .head.ref, .base.ref] | @tsv')
+            test "$state" = "open"$'\t'"$keep_sha"$'\t'"$keep_ref"$'\t'"$BASE_BRANCH"
+            echo "::notice::$keep_url already carries this exact package update; not opening another PR."
+            close_superseded
+            note=''
+            exit 0
+          fi
+          note=''
+
           # Never reuse a branch, including on reruns (which have a new attempt).
           existing_branch=$(git ls-remote origin "refs/heads/$branch")
           test -z "$existing_branch"
@@ -844,7 +979,7 @@ jobs:
           # existing ref (422), including one created after the advisory lookup.
           # Never PATCH, force, or retry. A failed response may still have created
           # the ref, and later failures can leave our reservation at the base.
-          trap 'status=$?; if [ "$status" -ne 0 ]; then printf "::error::Reservation/publication failed for %s branch %s; a branch (possibly base-only) or PR may remain. Inspect ownership before manual recovery; no automatic cleanup or retry.\n" "$CALLER_REPOSITORY" "$branch" >&2; fi' EXIT
+          printf -v note 'Reservation/publication failed for %s branch %s; a branch (possibly base-only) or PR may remain. Inspect ownership before manual recovery; no automatic cleanup or retry.' "$CALLER_REPOSITORY" "$branch"
           reserved_ref=$(gh api --method POST "repos/$CALLER_REPOSITORY/git/refs" \
             -f "ref=refs/heads/$branch" -f "sha=$EXPECTED_BASE" \
             --jq '[.ref, .object.sha, .object.type] | @tsv')
@@ -876,6 +1011,9 @@ jobs:
             --jq '[.headRefOid, .baseRefOid, .headRefName, .baseRefName] | @tsv')
           test "$pr_refs" = "$CANDIDATE_COMMIT"$'\t'"$EXPECTED_BASE"$'\t'"$branch"$'\t'"$BASE_BRANCH"
           echo "$pr_url"
+          keep_url=$pr_url
+          close_superseded
+          note=''
 
       - name: Commit and push changes
         if: inputs.publication-mode == 'direct' && steps.changes.outputs.changed == 'true'

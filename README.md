@@ -131,6 +131,25 @@ or start background writers.
   does not implicitly push/fork or prompt. It creates an ordinary PR against the
   default branch, with only the optional caller-selected label. The body is a
   user-facing `## Changed` release note, not an internal validation narrative.
+- **At most one open package-update PR.** Before reserving a branch, the workflow lists
+  the caller's open PRs and considers only its own: head branch in the caller
+  repository (never a fork) named `automation/package-update-<run>-<attempt>`, the
+  same base, and a head that is a single `chore: update packages` commit by
+  `github-actions[bot]` whose parent is on the base. Any other PR, including one of
+  its PRs a person has pushed to, is never compared, closed or deleted.
+  - If one of those PRs carries a byte-identical update diff (`git diff --binary
+    --full-index` against its own parent), no branch or PR is created and a notice
+    names that PR. The newest such PR is kept, and every other workflow-owned
+    package-update PR, identical or not, is superseded by it, so exactly one stays open.
+  - Otherwise the new PR is created as above, and only after its readback succeeds
+    are the older ones superseded.
+  - Superseding a PR means commenting with a link to the kept PR, closing it, and
+    deleting its branch when that branch still points at the inspected commit
+    (GitHub's **Restore branch** on the closed PR undoes this). A PR whose state, head
+    or base changed after the lookup is left open with a warning.
+  - A failed or unexpected lookup fails the job before anything is published; a
+    failed comment, close or branch deletion fails the job after naming the PR. No
+    step is retried.
 
 These stronger staging and identity guarantees do **not** retrofit legacy `direct`
 mode's inherited `git add -A` and rebase loop. Use `pull-request` for reviewed delivery.
@@ -145,7 +164,9 @@ ecosystem prerequisites.
 - A classic PAT needs `repo`; a fine-grained PAT needs repository **Contents: write**,
   **Pull requests: write**, and **Metadata: read**, including access to the selected
   existing PR label. Repository branch/ruleset policies must allow the new automation
-  branch. PR mode does not require default-branch bypass.
+  branch, and deleting a superseded one. PR mode does not require default-branch
+  bypass. The same permissions cover listing, commenting on and closing superseded
+  PRs; no further permission is needed.
 - `GITHUB_TOKEN` needs caller-granted `contents: write` and `pull-requests: write`.
   The caller cannot elevate beyond organization/repository policy, and the existing
   **Allow GitHub Actions to create and approve pull requests** policy must permit PR
@@ -165,10 +186,14 @@ an exclusive lock against later writers. A failed API response can be ambiguous;
 reservation/readback/push failure can leave a **base-only branch** without a PR.
 Later races, failed PR/label operations, or inconsistent readback can leave a
 candidate branch or ordinary PR while the job fails. The job reports these possible
-leftovers loudly. Inspect ownership and state before any manual recovery; no
-automatic cleanup, branch reuse, deduplication, or retry occurs.
-A rerun starts from a fresh checkout and validates anew on a new attempt branch; it
-can open another PR. The workflow never makes an old PR eligible for automatic merge.
+leftovers loudly. Inspect ownership and state before any manual recovery; such
+failed-run leftovers are never cleaned up automatically, no branch is reused, and
+nothing is retried. The only automatic cleanup is superseding the workflow's own
+earlier open PRs described above; a base-only reservation branch without a PR is
+not considered. A rerun starts from a fresh checkout and validates anew on a new
+attempt branch; it skips publication when an open PR already carries the same
+update, and otherwise supersedes it. The workflow never makes an old PR eligible
+for automatic merge.
 
 **Deployment boundary:** package-update implementation changes are excluded from
 `Bootstrap Common Workflows` push paths: the canonical wrapper template is unchanged,
@@ -196,7 +221,8 @@ actionlint .github/workflows/update-packages.yml .github/workflows/verify-packag
 The tests extract and execute the actual inline Bash using temporary local bare Git
 repositories and stub gh/toolchains. They cover ordering, failure gates, exact-tree
 publication, atomic expected-absent reservation (including a same-base competing
-branch race), skipped builds and publication when nothing changed, the SHA-pinned
+branch race), skipping or superseding the workflow's own open PRs (and leaving every
+other PR alone), skipped builds and publication when nothing changed, the SHA-pinned
 NuGet cache, API failure gates, default compatibility, stale bases, candidate drift,
 labels, and unrelated output exclusion without credentials, network, or running the
 legacy rebase loop. Structural tests verify Stage ownership, retained bootstrap and
