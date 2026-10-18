@@ -62,6 +62,7 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
             "Automation", ".github", "Dockerfiles", "AI", "Templates", "Dockerfiles",
             "release-action", "Chronicle.Dapr", "Chronicle.Wolverine", "Stage",
             "Studio", "Direct", "Ensemble", "Infrastructure", "Experiments", "Strategy", "Identity",
+            "KeldaKraft", "studio-cluster-verification",
             "Ante", "Chronicle.Elixir", "Components", "Orleans", "AI.Distribution",
             "Arc.TypeScript", "Chronicle.Python", "Eventmodelers-Build-Kit-Java", "Eventmodelers-Build-Kit-Kotlin",
             "Chronicle.Go", "Arc.Go", "Fundamentals.Go",
