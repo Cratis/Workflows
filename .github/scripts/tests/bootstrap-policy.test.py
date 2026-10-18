@@ -119,7 +119,7 @@ else:
 
 class BootstrapPolicyTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='bootstrap-policy-', dir=ROOT / '.ai-work')
+        self.temp = tempfile.TemporaryDirectory(prefix='bootstrap-policy-')
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.state_file = self.directory / 'state.json'
