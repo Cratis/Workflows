@@ -241,6 +241,10 @@ done
 
 render_policy_wrapper() {
   local file_content="$1" releases="$2" normalizer="" needs=""
+  # Bash 5.2+ expands an unquoted & in a substitution replacement to the match; the
+  # fragments contain &&. Quoting the replacement instead is not portable: Bash 3.2
+  # keeps the quotes literally.
+  shopt -u patsub_replacement 2>/dev/null || true
   if [ "$releases" = true ]; then
     normalizer='  dependabot-labels:
     if: github.event.pull_request.user.login == '\''dependabot[bot]'\'' && github.event.pull_request.base.ref == '\''main'\''
@@ -253,9 +257,9 @@ render_policy_wrapper() {
     if: ${{ !cancelled() }}
 '
   fi
-  file_content="${file_content/__DEPENDABOT_JOB__/"$normalizer"}"
-  file_content="${file_content/__POLICY_NEEDS__/"$needs"}"
-  printf '%s\n' "${file_content/__RELEASE_INTENT__/"$releases"}"
+  file_content="${file_content/__DEPENDABOT_JOB__/$normalizer}"
+  file_content="${file_content/__POLICY_NEEDS__/$needs}"
+  printf '%s\n' "${file_content/__RELEASE_INTENT__/$releases}"
 }
 
 # .github/codeql/codeql-config.yml — shared CodeQL configuration
