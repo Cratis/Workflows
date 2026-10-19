@@ -112,7 +112,7 @@ class Context:
         else:
             value = source.get(name)
             if value is None:
-                raise Unresolved(f"matrix.{name} is not a literal list in strategy.matrix")
+                raise Unresolved(f"matrix.{name} is not defined in strategy.matrix")
         if isinstance(value, Unresolved):
             raise value
         values = value if isinstance(value, list) else [value]
@@ -151,19 +151,52 @@ def resolve_text(value, context):
     return []
 
 
-def matrix_values(job):
-    """Map each literal-list matrix key of a job to its values, including `include` entries."""
-    matrix = (job.get("strategy") or {}).get("matrix") if isinstance(job.get("strategy"), dict) else None
-    if not isinstance(matrix, dict):
+class UnknownMatrix(dict):
+    """A matrix that is itself an expression: no key can be resolved."""
+
+    def __init__(self, reason):
+        super().__init__()
+        self.reason = reason
+
+    def get(self, key, default=None):
+        return Unresolved(f"matrix.{key} is unknown: {self.reason}")
+
+
+def flatten_labels(value, context):
+    """Resolve a matrix value to flat labels; a mapping or an unresolvable expression raises Unresolved."""
+    if isinstance(value, list):
+        return [label for item in value for label in flatten_labels(item, context)]
+    if isinstance(value, dict):
+        raise Unresolved("a matrix value is a mapping, not a label")
+    return resolve_text(value, context)
+
+
+def matrix_values(job, context):
+    """Map each matrix key of a job to its resolved labels (or an Unresolved), including `include` entries."""
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if matrix is None:
         return {}
-    values = {key: list(item) for key, item in matrix.items()
-              if key not in ("include", "exclude") and isinstance(item, list)}
-    for entry in matrix.get("include") or []:
-        if isinstance(entry, dict):
-            for key, item in entry.items():
+    if not isinstance(matrix, dict):
+        return UnknownMatrix("strategy.matrix is an expression")
+    include = matrix.get("include") or []
+    exclude = matrix.get("exclude") or []
+    if not isinstance(include, list) or not isinstance(exclude, list) or \
+            not all(isinstance(entry, dict) for entry in include):
+        return UnknownMatrix("matrix include or exclude is an expression")
+    entries = [{key: item} for key, item in matrix.items() if key not in ("include", "exclude")]
+    entries += [{key: item} for entry in include for key, item in entry.items()]
+    values = {}
+    for entry in entries:
+        for key, item in entry.items():
+            try:
+                resolved = flatten_labels(item, context)
+            except Unresolved as error:
+                values[key] = error
+                continue
+            if not isinstance(values.get(key), Unresolved):
                 values.setdefault(key, [])
-                if item not in values[key]:
-                    values[key].append(item)
+                values[key] += [label for label in resolved if label not in values[key]]
     return values
 
 
@@ -258,7 +291,7 @@ class Scan:
         self.findings.append((repo, name, f"{' > '.join([*chain[1:], f'job {job_id}'])}: {problem}"))
 
     def check_job(self, repo, name, job_id, job, context, source, chain):
-        matrix = matrix_values(job)
+        matrix = matrix_values(job, context)
         job_context = Context(context.variables, context.inputs, matrix)
         if "uses" in job:
             self.follow_reusable(repo, name, job_id, job, job_context, source, chain)
@@ -394,14 +427,14 @@ def workflow_loaders(get, owner, repo):
 
 
 def repository_variables(get, owner, repo):
-    """Repository and organization variables, or None when the token cannot read them."""
+    """Repository and organization variables; a missing endpoint (404) yields what was read, any other error stops the run."""
     variables = {}
     for endpoint in (f"repos/{owner}/{repo}/actions/organization-variables", f"repos/{owner}/{repo}/actions/variables"):
         for page in range(1, 11):
             try:
                 response = get(f"{endpoint}?per_page=30&page={page}")
-            except (NotFound, CouldNotRun):
-                return None
+            except NotFound:
+                break
             batch = response.get("variables", []) if isinstance(response, dict) else []
             variables.update({item["name"]: item["value"] for item in batch})
             if len(batch) < 30:
@@ -417,7 +450,6 @@ def scan_organization(get=gh_api, owner=OWNER, local_repos=None):
     if not repositories:
         raise CouldNotRun(f"no non-archived repositories found in {owner}")
     scan = Scan()
-    scan.unreadable_variables = []
 
     def fetch_remote(repo, path, ref):
         return fetch_text(get, owner, repo, path, ref)
@@ -425,8 +457,6 @@ def scan_organization(get=gh_api, owner=OWNER, local_repos=None):
     for name, public in repositories:
         loaders = workflow_loaders(get, owner, name) if public else {}
         variables = repository_variables(get, owner, name) if public else {}
-        if variables is None:
-            scan.unreadable_variables.append(name)
         scan.add_repository(name, public, loaders, variables, local_repos, fetch_remote)
     return scan
 
@@ -438,10 +468,6 @@ def report(scan, require_subjects=False):
         raise CouldNotRun(f"no pull_request jobs among {scan.files} workflow files; nothing was checked")
     for repo, name, reason in scan.findings:
         print(f"{repo}/{name}: {reason}")
-    unreadable = getattr(scan, "unreadable_variables", [])
-    if unreadable:
-        print(f"note: repository variables were not readable for {len(unreadable)} public repositories "
-              f"({', '.join(unreadable[:5])}{'...' if len(unreadable) > 5 else ''}); fallbacks were used")
     print(f"checked {scan.repositories} repositories ({scan.private} private skipped), {scan.files} workflow files, "
           f"{scan.subjects} pull_request jobs, {scan.external} external reusable workflows not followed, "
           f"{len(scan.findings)} violations")
@@ -464,6 +490,8 @@ PLANTED = {
     "reusable-default.yml": (CALLER, "self-hosted"),
     "callee.yml": (CALLEE_DEFAULT.format(default="cratis-arc"), None),
     "pull-request-target.yml": ("on: pull_request_target\njobs:\n  build:\n    runs-on: cratis-arc\n", "self-hosted"),
+    "matrix-nested.yml": ("on: pull_request\njobs:\n  build:\n    strategy:\n      matrix:\n"
+                          "        r: [[self-hosted, linux]]\n    runs-on: ${{ matrix.r }}\n", "self-hosted"),
     "unresolved.yml": ("on: pull_request\njobs:\n  build:\n    runs-on: ${{ github.event.repository.name }}\n",
                        "unresolved"),
 }

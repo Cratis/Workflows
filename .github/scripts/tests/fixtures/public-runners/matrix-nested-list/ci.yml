@@ -1,0 +1,8 @@
+name: CI
+on: pull_request
+jobs:
+  build:
+    strategy:
+      matrix:
+        r: [[self-hosted, linux]]
+    runs-on: ${{ matrix.r }}

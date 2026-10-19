@@ -89,6 +89,27 @@ class LiteralTests(unittest.TestCase):
     def test_matrix_include_can_select_self_hosted(self):
         self.assertEqual(files_of(scan("matrix-self-hosted")), ["ci.yml"])
 
+    def test_matrix_values_are_flattened_and_checked(self):
+        self.assertIn("self-hosted label 'self-hosted'", scan("matrix-nested-list").findings[0][2])
+        self.assertIn("self-hosted label 'self-hosted'", scan("matrix-include-list").findings[0][2])
+
+    def test_matrix_expression_value_is_resolved(self):
+        self.assertEqual(scan("matrix-expression-value").findings, [])  # an unset variable is empty
+        self.assertEqual(scan("matrix-expression-value", variables={"R": "cratis-arc"}).findings[0][2].count("cratis-arc"), 1)
+        self.assertEqual(scan("matrix-expression-value", variables={"R": "ubuntu-latest"}).findings, [])
+        self.assertEqual(scan("matrix-expression-hosted").findings, [])
+        self.assertIn("unresolved runner", scan("matrix-expression-unresolved").findings[0][2])
+
+    def test_matrix_include_expression_makes_every_key_unresolved(self):
+        self.assertIn("unresolved runner", scan("matrix-include-expression").findings[0][2])
+
+    def test_matrix_that_is_an_expression_is_unresolved(self):
+        result = checker.Scan()
+        result.check_workflow("Fixture", "ci.yml", checker.parse("Fixture", "ci.yml",
+                              "jobs:\n  b:\n    strategy:\n      matrix: ${{ fromJSON(vars.M) }}\n"
+                              "    runs-on: ${{ matrix.r }}\n"), checker.Context(), checker.Source({}), ["ci.yml"])
+        self.assertIn("unresolved runner", result.findings[0][2])
+
     def test_private_repository_is_never_reported(self):
         result = scan("literal-self-hosted", public=False)
         self.assertEqual((result.repositories, result.private, result.subjects, result.findings), (1, 1, 0, []))
@@ -174,13 +195,23 @@ class OrganizationTests(unittest.TestCase):
         result = checker.scan_organization(api)
         self.assertEqual([(repo, name) for repo, name, _ in result.findings], [("Public", "ci.yml")])
 
-    def test_unreadable_variables_use_the_fallback_and_are_noted(self):
-        output = io.StringIO()
-        result = checker.scan_organization(FakeAPI(LISTING[:1], {"Public": WORKFLOWS}))
-        with redirect_stdout(output):
-            self.assertEqual(checker.report(result, require_subjects=True), 0)
-        self.assertEqual(result.unreadable_variables, ["Public"])
-        self.assertIn("variables were not readable for 1 public repositories", output.getvalue())
+    def test_variable_endpoint_error_could_not_run(self):
+        # The fake has no variable endpoints for this repository, so the read fails like a rate limit or 5xx.
+        with self.assertRaises(checker.CouldNotRun):
+            checker.scan_organization(FakeAPI(LISTING[:1], {"Public": WORKFLOWS}))
+
+    def test_missing_variable_endpoint_keeps_the_fallback_and_org_variables(self):
+        api = FakeAPI(LISTING[:1], {"Public": WORKFLOWS}, {"Public": {}})
+        api.responses.pop("repos/Cratis/Public/actions/variables?per_page=30&page=1")
+        api.responses["repos/Cratis/Public/actions/organization-variables?per_page=30&page=1"] = {
+            "variables": [{"name": "RUNNER_GATE", "value": "cratis-arc"}]}
+        original = api.__call__
+
+        def get(endpoint):
+            if endpoint.endswith("/actions/variables?per_page=30&page=1"):
+                raise checker.NotFound(endpoint)
+            return original(endpoint)
+        self.assertEqual(files_of(checker.scan_organization(get)), ["ci.yml"])
 
     def test_remote_cratis_callee_is_fetched_with_its_ref(self):
         caller = "on: pull_request\njobs:\n  g:\n    uses: Cratis/Workflows/.github/workflows/gate.yml@main\n"

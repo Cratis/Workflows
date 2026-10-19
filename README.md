@@ -853,6 +853,12 @@ callers, this repository's own workflows) and `--self-test` on pull requests and
 every public Cratis repository weekly with `PAT_WORKFLOWS`, also treating a set variable such as
 `RUNNER_GATE` that points at a self-hosted label as a finding. Other repositories can call
 `check-public-runners.yml@main`, which checks their own workflows when the repository is public.
+The reusable gate (`--dir` mode) does not read repository, organization or environment variables:
+it treats `vars.X` as unset and uses the fallback, so a set `RUNNER_GATE` is caught only by the weekly
+sweep (which reads repository and organization variables, not environment-level ones). Set
+`workflows-ref` to the same ref the caller pins for `check-public-runners.yml`, so the checker and the
+reusable workflows it follows match.
+
 Run it with `--dir <workflows directory> [--repo <name>] [--visibility public|private]
 [--local-repo Workflows=<directory>] [--fetch-remote]`, `--org` (needs `GH_TOKEN`) or `--self-test`.
 Exit codes: `0` ran clean, `1` found violations, `2` could not run.
