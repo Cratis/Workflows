@@ -63,6 +63,35 @@ class Discoverability(unittest.TestCase):
         self.assertNotIn("file=index.html", ignored.stdout)
         self.assertEqual(self.run_script(FIXTURES / "bad", "--ignore", "**/*.html,docs.*").returncode, 0)
 
+    def test_minified_html_with_unquoted_and_single_quoted_attributes_is_clean(self):
+        # Unquoted lang/description/canonical, single-quoted og:image:alt and ld+json type, an inline <svg><title>,
+        # and sitemap URLs without a trailing slash that map to <path>.html and <path>/index.html while <path>/ is a directory.
+        result = self.run_script(FIXTURES / "minified", "--fail-on", "error")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("4 indexable page(s), 4 sitemap URL(s): **0 error(s)**, **0 warning(s)**", result.stdout)
+
+    def test_only_head_titles_count(self):
+        with tempfile.TemporaryDirectory() as site:
+            (Path(site) / "index.html").write_text(
+                "<!doctype html><html lang=en><head></head><body><svg><title>Icon</title></svg></body></html>")
+            result = self.run_script(site)
+            self.assertIn("::error file=index.html::missing or empty <title>", result.stdout)
+
+    def test_malformed_sitemap_url_and_unreadable_files_are_findings_not_crashes(self):
+        with tempfile.TemporaryDirectory() as site:
+            root = Path(site)
+            (root / "sitemap.xml").write_text(
+                "<urlset><url><loc>https://example.cratis.io/%E0%A4%A</loc></url></urlset>")
+            (root / "robots.txt").write_text("Sitemap: https://example.cratis.io/sitemap.xml\n")
+            (root / "locked.html").write_text("<html lang=en></html>")
+            (root / "locked.html").chmod(0)
+            result = self.run_script(site, "--fail-on", "error")
+            (root / "locked.html").chmod(0o644)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("is not a valid URL path", result.stdout)
+            if os.geteuid() != 0:
+                self.assertIn("::error file=locked.html::cannot read file", result.stdout)
+
     def test_missing_files_are_errors(self):
         with tempfile.TemporaryDirectory() as empty:
             result = self.run_script(empty, "--fail-on", "error")

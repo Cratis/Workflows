@@ -50,16 +50,25 @@ function globToRegExp(glob) {
     return new RegExp(`^${source}$`);
 }
 
-const attribute = (tag, name) => tag.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i'))?.slice(1).find(value => value !== undefined);
+// Attribute values may be double-quoted, single-quoted or unquoted (minified HTML).
+const attribute = (tag, name) => tag.match(new RegExp(`(?<=[\\s"'/])${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\`]+))`, 'i'))?.slice(1).find(value => value !== undefined);
+const isFile = path => { try { return statSync(path).isFile(); } catch { return false; } };
+const isDirectory = path => { try { return statSync(path).isDirectory(); } catch { return false; } };
+// Reads a file; an unreadable one becomes a finding instead of a crash.
+const readText = (path, file, add) => {
+    try { return readFileSync(path, 'utf8'); } catch (error) { add('error', file, `cannot read file: ${error.code ?? error.message}`); return undefined; }
+};
 const tagsOf = (html, name) => [...html.matchAll(new RegExp(`<${name}\\b[^>]*>`, 'gi'))].map(match => match[0]);
 const metaContent = (metas, key, value) => metas.filter(tag => attribute(tag, key)?.toLowerCase() === value).map(tag => attribute(tag, 'content') ?? '');
 
-function* htmlFiles(directory, root, ignored) {
-    for (const name of readdirSync(directory).sort()) {
+function* htmlFiles(directory, root, ignored, add) {
+    let names;
+    try { names = readdirSync(directory).sort(); } catch (error) { add('error', relative(root, directory) || '.', `cannot read directory: ${error.code ?? error.message}`); return; }
+    for (const name of names) {
         const path = join(directory, name);
         const relativePath = relative(root, path).split(sep).join('/');
         if (ignored.some(pattern => pattern.test(relativePath))) continue;
-        if (statSync(path).isDirectory()) yield* htmlFiles(path, root, ignored);
+        if (isDirectory(path)) yield* htmlFiles(path, root, ignored, add);
         else if (name.endsWith('.html')) yield relativePath;
     }
 }
@@ -68,7 +77,7 @@ function* htmlFiles(directory, root, ignored) {
 const candidates = path => {
     const clean = decodeURIComponent(path).replace(/^\/+/, '');
     if (clean === '') return ['index.html'];
-    return clean.endsWith('/') ? [`${clean}index.html`] : [clean, `${clean}.html`, `${clean}/index.html`];
+    return clean.endsWith('/') ? [`${clean}index.html`] : [`${clean}.html`, `${clean}/index.html`, clean];
 };
 
 function checkPage(relativePath, html, base) {
@@ -79,7 +88,9 @@ function checkPage(relativePath, html, base) {
     if (/http-equiv\s*=\s*["']?refresh/i.test(html)) return { findings, indexable: false };
 
     if (!attribute(html.match(/<html\b[^>]*>/i)?.[0] ?? '', 'lang')) add('error', 'missing <html lang>');
-    const titles = [...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)].map(match => match[1].trim());
+    // Only <title> elements of the document head count; inline <svg> titles do not.
+    const head = (html.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i)?.[1] ?? html.split(/<body\b/i)[0]).replace(/<svg\b[\s\S]*?<\/svg>/gi, '');
+    const titles = [...head.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)].map(match => match[1].trim());
     if (titles.length === 0 || !titles[0]) add('error', 'missing or empty <title>');
     else if (titles.length > 1) add('error', `${titles.length} <title> elements; expected one`);
     else if ([...titles[0]].length > maxTitle) add('warning', `title is ${[...titles[0]].length} characters; keep it within ${maxTitle}`);
@@ -100,9 +111,10 @@ function checkPage(relativePath, html, base) {
         }
     }
 
-    for (const block of html.matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    for (const block of html.matchAll(/(<script\b[^>]*>)([\s\S]*?)<\/script>/gi)) {
+        if (attribute(block[1], 'type')?.toLowerCase() !== 'application/ld+json') continue;
         try {
-            JSON.parse(block[1]);
+            JSON.parse(block[2]);
         } catch (error) {
             add('error', `JSON-LD does not parse: ${error.message}`);
         }
@@ -119,24 +131,30 @@ function checkSite(root, base, ignore = []) {
     const findings = [];
     const add = (level, file, message) => findings.push({ level, file, message });
     const pages = new Set();
-    for (const path of htmlFiles(root, root, ignored)) {
-        const result = checkPage(path, readFileSync(join(root, path), 'utf8'), base);
+    for (const path of htmlFiles(root, root, ignored, add)) {
+        const html = readText(join(root, path), path, add);
+        if (html === undefined) continue;
+        const result = checkPage(path, html, base);
         findings.push(...result.findings);
         if (result.indexable) pages.add(path);
     }
 
     const robotsPath = join(root, 'robots.txt');
-    if (!existsSync(robotsPath)) add('error', 'robots.txt', 'missing robots.txt');
-    else if (!/^\s*sitemap\s*:\s*\S/im.test(readFileSync(robotsPath, 'utf8'))) add('error', 'robots.txt', 'robots.txt has no Sitemap line');
+    if (!isFile(robotsPath)) add('error', 'robots.txt', 'missing robots.txt');
+    else {
+        const robots = readText(robotsPath, 'robots.txt', add);
+        if (robots !== undefined && !/^\s*sitemap\s*:\s*\S/im.test(robots)) add('error', 'robots.txt', 'robots.txt has no Sitemap line');
+    }
 
     const sitemaps = [];
-    const sitemapPaths = ['sitemap.xml', 'sitemap-index.xml'].filter(name => existsSync(join(root, name)));
+    const sitemapPaths = ['sitemap.xml', 'sitemap-index.xml'].filter(name => isFile(join(root, name)));
     if (sitemapPaths.length === 0) add('error', 'sitemap.xml', 'no sitemap.xml or sitemap-index.xml at the site root');
     const queue = [...sitemapPaths];
     const seen = new Set(queue);
     while (queue.length > 0) {
         const name = queue.shift();
-        const xml = readFileSync(join(root, name), 'utf8');
+        const xml = readText(join(root, name), name, add);
+        if (xml === undefined) continue;
         const urls = [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map(match => match[1].replaceAll('&amp;', '&'));
         const isIndex = /<sitemapindex\b/i.test(xml);
         for (const location of urls) {
@@ -144,7 +162,8 @@ function checkSite(root, base, ignore = []) {
             try { url = new URL(location); } catch { add('error', name, `sitemap entry is not an absolute URL: ${location}`); continue; }
             if (url.host !== base.host) { add('error', name, `sitemap entry ${location} is not on ${base.host}`); continue; }
             const local = url.pathname.startsWith(base.pathname) ? url.pathname.slice(base.pathname.length) : url.pathname;
-            const found = candidates(local).find(candidate => existsSync(join(root, candidate)));
+            let found;
+            try { found = candidates(local).find(candidate => isFile(join(root, candidate))); } catch { add('error', name, `sitemap entry ${location} is not a valid URL path`); continue; }
             if (isIndex) {
                 if (found && !seen.has(found)) { seen.add(found); queue.push(found); } else if (!found) add('error', name, `sitemap index entry ${location} has no built file`);
             } else if (!found) add('error', name, `sitemap URL ${location} does not map to a built page`);
@@ -152,7 +171,7 @@ function checkSite(root, base, ignore = []) {
         }
     }
     const llmsPath = join(root, 'llms.txt');
-    if (!existsSync(llmsPath)) add('warning', 'llms.txt', 'missing llms.txt');
+    if (!isFile(llmsPath)) add('warning', 'llms.txt', 'missing llms.txt');
     return { findings, pages: pages.size, sitemapUrls: sitemaps.length };
 }
 
