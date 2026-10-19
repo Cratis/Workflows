@@ -1,0 +1,5 @@
+# Example
+
+> Fixture site.
+
+- [Guide](https://example.cratis.io/docs/guide/)

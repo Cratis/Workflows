@@ -790,6 +790,67 @@ Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one d
 
 ---
 
+### `verify-discoverability.yml`
+
+A reusable check that reads a built static site and reports search (SEO), answer-engine (AEO) and generative (GEO) discoverability findings in the job summary and as workflow annotations. It is warn-only by default; set `fail-on: error` to fail the job on error-level findings.
+
+Per HTML page (pages with `noindex` or a meta-refresh redirect are skipped):
+
+| Check | Level |
+|---|---|
+| `<html lang>` present | error |
+| exactly one non-empty `<title>`; more than 60 characters | error; warning |
+| meta description present; more than 160 characters | warning |
+| `<link rel="canonical">` is an absolute URL on the `base-url` host | error |
+| every `application/ld+json` block parses as JSON | error |
+| `og:image` present, with `og:image:alt` | warning |
+
+Per site: `robots.txt` exists and has a `Sitemap:` line (error); `sitemap.xml` or `sitemap-index.xml` exists, and every URL in it (following sitemap indexes) is on the `base-url` host and maps to a built page (error); `llms.txt` exists (warning).
+
+Inputs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `site-path` | required | Directory holding the built site, relative to the repository root |
+| `base-url` | required | Production origin, for example `https://blog.cratis.io` |
+| `fail-on` | `none` | `none` reports only; `error` fails when any error-level finding exists |
+| `ignore` | empty | Comma- or newline-separated globs relative to `site-path` (`*` and `?` stay in one segment, `**` crosses directories), for example `404.html,drafts/**` |
+| `build-command` | empty | Command that builds the site into `site-path`; leave empty for plain-HTML or prebuilt sites |
+| `node-version` | `24` | Node.js version for the build and the check |
+| `runs-on` | `ubuntu-latest` | Runner label; private repositories pass their scale-set label |
+
+Caller:
+
+```yaml
+name: Verify Discoverability
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discoverability:
+    uses: Cratis/Workflows/.github/workflows/verify-discoverability.yml@main
+    with:
+      site-path: dist
+      base-url: https://blog.cratis.io
+      build-command: npm ci && npm run build
+      ignore: 404.html
+      # fail-on: error   # once the site is clean
+```
+
+Exit codes of the checker: `0` no failing findings, `1` errors with `fail-on: error`, `2` could not run (bad arguments, missing site directory, download or checksum failure).
+
+The checker is `.github/scripts/verify-discoverability.mjs`, Node built-ins only. Like the work-record guard, the reusable workflow downloads it from an immutable Workflows commit and verifies its SHA-256 before running it; when changing the script, commit it first and update the workflow's pin and checksum. `verify-discoverability-check.yml` runs `.github/scripts/tests/verify-discoverability.test.py` on every change: it checks a good and a bad fixture site (`.github/scripts/tests/fixtures/discoverability/`), the summary output, `fail-on`, ignore globs, the exit codes, and the pinned download step.
+
+---
+
 ### `verify-release-concurrency.yml`
 
 **Triggers:** `pull_request` and `push` to `main` when the checker, its tests and
