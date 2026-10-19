@@ -35,8 +35,9 @@ ALLOWLIST = (
     ("Arc", "chronicle-published.yml",
      "dependency bump per Chronicle version, one group per version; not a release of Arc"),
     *(("Chronicle", f"publish-{client}-client.yml",
-       "reusable workflow; concurrency inherited from caller publish.yml, and a group of its own "
-       "could deadlock against the calling run (manual dispatch is the only other trigger)")
+       "reusable workflow; concurrency inherited from caller publish.yml (a group derived from "
+       "github.workflow would collide with the caller's); a manual dispatch runs ungrouped - ends when "
+       "the file gets a uniquely named group with queue: max")
       for client in ("elixir", "kotlin", "python", "typescript")),
 )
 ALLOWED = {(repo, name) for repo, name, _ in ALLOWLIST}
