@@ -841,8 +841,8 @@ that does not parse). A clean run prints
 ### `verify-docker-cleanup.yml`
 
 **Triggers:** `pull_request` and `push` to `main` when the checker, its tests and
-fixtures or the workflow change; weekly `schedule`; `workflow_dispatch`; and
-`workflow_call`.
+fixtures, the workflow or `docker-cleanup-gate.yml` change; weekly `schedule`; and
+`workflow_dispatch`.
 
 Fails on Docker cleanup that is not scoped to a run. Each `cratis-arc` job has its own
 Docker daemon, but an unscoped prune inside a job still removes containers that parallel
@@ -860,17 +860,26 @@ stop|rmi` (or `volume rm`, `network rm`) fed by `$(docker ps|ls|images ...)` or
 a cleanup. A deliberate exception goes in the script's `ALLOWLIST` with its reason; the
 sweep fails an entry once its file no longer has a violation.
 
-Another repository gates its own checkout by calling the workflow:
+Another repository gates its own checkout by calling the reusable
+`docker-cleanup-gate.yml` (a reusable workflow sees the caller's event, so the gate is its
+own file, with only a `workflow_call` trigger). The caller names its job `docker-cleanup`,
+so the check reads `docker-cleanup / gate`:
 
 ```yaml
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   docker-cleanup:
-    uses: Cratis/Workflows/.github/workflows/verify-docker-cleanup.yml@main
+    uses: Cratis/Workflows/.github/workflows/docker-cleanup-gate.yml@main
 ```
 
 The gate checks out the calling repository and `Cratis/Workflows` (into
 `.cratis-workflows`, excluded from the scan) and runs the checker with `--root .`; the
-optional `runs-on` input names the runner label. Exit codes: `0` clean, `1` violations
+optional `runs-on` input (default `ubuntu-latest`) names the runner label. Exit codes: `0` clean, `1` violations
 (`<repository>:<path>:<line>: <reason>` each), `2` could not run (a repository that cannot
 be cloned, no repositories, or no files to scan). A clean run prints
 `Scanned <n> files in <m> repositories, found 0 violations`.
