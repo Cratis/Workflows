@@ -1,0 +1,9 @@
+name: CI
+on: push
+jobs:
+  build:
+    runs-on: cratis-arc
+    steps:
+      - name: Clean up
+        run: |
+          docker system prune -af --volumes

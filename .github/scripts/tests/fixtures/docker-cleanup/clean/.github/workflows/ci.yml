@@ -1,0 +1,9 @@
+name: CI
+on: push
+jobs:
+  build:
+    runs-on: cratis-arc
+    steps:
+      # docker system prune -af would break parallel steps
+      - run: docker system prune -af --filter "label=run=${{ github.run_id }}"
+      - run: docker rm -f $(docker ps -aq --filter label=run=${{ github.run_id }})
