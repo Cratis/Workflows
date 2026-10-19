@@ -865,6 +865,54 @@ Exit codes: `0` ran clean, `1` found violations, `2` could not run.
 
 ---
 
+### `verify-docker-cleanup.yml`
+
+**Triggers:** `pull_request` and `push` to `main` when the checker, its tests and
+fixtures, the workflow or `docker-cleanup-gate.yml` change; weekly `schedule`; and
+`workflow_dispatch`.
+
+Fails on Docker cleanup that is not scoped to a run. Each `cratis-arc` job has its own
+Docker daemon, but an unscoped prune inside a job still removes containers that parallel
+steps or Testcontainers in the same job need (Cratis/StudioIssues#905). Pull requests and
+pushes run `.github/scripts/tests/verify-docker-cleanup.test.py` and the checker's
+`--self-test`. The schedule and manual runs clone every non-archived Cratis repository
+shallowly with `PAT_WORKFLOWS` (used read-only; the token itself has write access) and scan it.
+
+The checker, `.github/scripts/verify-docker-cleanup.py`, reads workflow files, composite
+actions, `.sh .bash .ps1 .py .mjs .js .ts .cs` scripts, `Dockerfile*`, `Makefile` and
+`justfile` by logical line (comments ignored). It fails on `docker system|container|image|
+volume|network|builder|buildx prune` without `--filter label=...`, and on `docker rm|kill|
+stop|rmi` (or `volume rm`, `network rm`) fed by `$(docker ps|ls|images ...)` or
+`| xargs` without `--filter label=...` on the listing. `label!=` and `until=` do not scope
+a cleanup. A deliberate exception goes in the script's `ALLOWLIST` with its reason; the
+sweep fails an entry once its file no longer has a violation.
+
+Another repository gates its own checkout by calling the reusable
+`docker-cleanup-gate.yml` (a reusable workflow sees the caller's event, so the gate is its
+own file, with only a `workflow_call` trigger). The caller names its job `docker-cleanup`,
+so the check reads `docker-cleanup / gate`:
+
+```yaml
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-cleanup:
+    uses: Cratis/Workflows/.github/workflows/docker-cleanup-gate.yml@main
+```
+
+The gate checks out the calling repository and `Cratis/Workflows` (into
+`.cratis-workflows`, excluded from the scan) and runs the checker with `--root .`; the
+optional `runs-on` input (default `ubuntu-latest`) names the runner label. Exit codes: `0` clean, `1` violations
+(`<repository>:<path>:<line>: <reason>` each), `2` could not run (a repository that cannot
+be cloned, no repositories, or no files to scan). A clean run prints
+`Scanned <n> files in <m> repositories, found 0 violations`.
+
+---
+
 ### `bootstrap-common-workflows.yml`
 
 **Triggers:** `push` to `main` when a watched reusable workflow (including

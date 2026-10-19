@@ -1,0 +1,6 @@
+name: cleanup
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: docker rm -f $(docker ps -aq)

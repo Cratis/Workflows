@@ -1,0 +1,36 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Docker Cleanup Gate
+
+# Reusable gate: fails when the calling repository has Docker cleanup that is not scoped to a run
+# (Cratis/Workflows#166). It checks out the caller and runs the checker from Cratis/Workflows.
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the gate job
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    steps:
+      - name: Check out the calling repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          path: .cratis-workflows
+          persist-credentials: false
+      - name: Fail on unscoped Docker cleanup
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: python3 -B .cratis-workflows/.github/scripts/verify-docker-cleanup.py --root . --repo "${REPOSITORY#*/}" --exclude .cratis-workflows
