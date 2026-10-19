@@ -85,12 +85,12 @@ jobs:
           fi
           script="$RUNNER_TEMP/verify-discoverability.mjs"
           if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
-            'https://raw.githubusercontent.com/Cratis/Workflows/593878df0a8760e2d08bdb7d2819f276498a0c2b/.github/scripts/verify-discoverability.mjs' \
+            'https://raw.githubusercontent.com/Cratis/Workflows/05ea1683cb69ed5c474e53cb5858a77ad6427f40/.github/scripts/verify-discoverability.mjs' \
             --output "$script"; then
             echo 'could not run: downloading the pinned discoverability check failed' >&2
             exit 2
           fi
-          script_sha256='5fa852da91ab941e5e6bcc53d2187e18f77c15cf3070f298cbcbf258b3942a7a'
+          script_sha256='53f21d229985c3f12b88d8a4c22faddd6c488212d582f575bc65da6cf5bf1740'
           if ! node --input-type=module --eval '
             import { createHash } from "node:crypto";
             import { readFileSync } from "node:fs";
