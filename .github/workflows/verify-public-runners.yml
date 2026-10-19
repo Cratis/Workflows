@@ -1,0 +1,67 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Public Runners
+
+# A public repository's pull_request jobs must never run on a self-hosted runner: any fork could run
+# code on our infrastructure (Cratis/Workflows#161). Pull requests and pushes test the checker offline
+# against its fixtures, the bootstrap's rendered public callers and this repository's own workflows.
+# The weekly sweep runs it over every public, non-archived Cratis repository, including set
+# repository variables such as RUNNER_GATE. Other repositories call check-public-runners.yml.
+on:
+  pull_request:
+    paths:
+      - .github/scripts/verify-public-runners.py
+      - .github/scripts/tests/verify-public-runners.test.py
+      - .github/scripts/tests/fixtures/public-runners/**
+      - .github/scripts/bootstrap-common-workflows.sh
+      - .github/workflows/**
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/verify-public-runners.py
+      - .github/scripts/tests/verify-public-runners.test.py
+      - .github/scripts/tests/fixtures/public-runners/**
+      - .github/scripts/bootstrap-common-workflows.sh
+      - .github/workflows/**
+  schedule:
+    - cron: "23 5 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The sweep has its own group so a push to main never cancels a running organization sweep.
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'sweep' || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the checker against its fixtures and the rendered bootstrap callers
+        run: python3 -B .github/scripts/tests/verify-public-runners.test.py
+      - name: Prove the checker still finds planted violations
+        run: python3 -B .github/scripts/verify-public-runners.py --self-test
+      - name: Check this repository's own workflows as a public repository
+        run: >-
+          python3 -B .github/scripts/verify-public-runners.py --dir .github/workflows --repo Workflows
+          --visibility public --local-repo Workflows=.github/workflows
+
+  sweep:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check every public Cratis repository
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+        run: python3 -B .github/scripts/verify-public-runners.py --org
