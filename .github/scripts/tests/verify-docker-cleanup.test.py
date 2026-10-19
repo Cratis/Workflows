@@ -86,6 +86,18 @@ class BulkRemovalTests(unittest.TestCase):
     def test_negated_label_does_not_scope(self):
         self.assertEqual(kinds("a.sh", d("rm -f $(") + d('ps -aq --filter "label!=keep")')), [BULK])
 
+    def test_sudo_in_the_listing_fails(self):
+        self.assertEqual(kinds("a.sh", "sudo " + d("rm -f $(sudo -n ") + d("ps -aq)")), [BULK])
+        self.assertEqual(kinds("a.sh", d("rm -f `sudo ") + d("ps -aq`")), [BULK])
+
+    def test_sudo_listing_with_label_filter_passes(self):
+        self.assertEqual(kinds("a.sh", d("rm -f $(sudo ") + d("ps -aq --filter label=run=1)")), [])
+
+    def test_variable_before_the_substitution_does_not_hide_it(self):
+        self.assertEqual(kinds("a.sh", d("rm -f $FLAGS $(") + d("ps -aq)")), [BULK])
+        self.assertEqual(kinds("a.yml", d("rm -f ${{ env.X }} $(") + d("ps -aq)")), [BULK])
+        self.assertEqual(kinds("a.sh", d("rm -f ${FLAGS} $(") + d("ps -aq --filter label=run=1)")), [])
+
     def test_removal_by_name_is_not_bulk(self):
         self.assertEqual(kinds("a.sh", d("rm -f my-container")), [])
 
@@ -112,6 +124,21 @@ class DirectoryTests(unittest.TestCase):
             (".github/actions/cleanup/action.yml", 6), (".github/workflows/ci.yml", 9),
             ("Dockerfile", 2), ("Makefile", 2), ("scripts/continued.sh", 2), ("scripts/xargs.sh", 2)])
         self.assertEqual((result.repositories, result.files), (1, 6))
+
+    def test_scripts_under_actions_are_subjects(self):
+        for path in [".github/actions/x/action.yml", ".github/actions/x/cleanup.sh", ".github/actions/x/Dockerfile"]:
+            self.assertTrue(checker.is_subject(path), path)
+        self.assertFalse(checker.is_subject(".github/actions/x/readme.md"))
+        self.assertFalse(checker.is_subject(".github/actions/x/other.yml"))
+
+    def test_only_this_checkers_fixtures_are_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for relative in [".github/scripts/tests/fixtures/docker-cleanup/a.sh", ".github/scripts/tests/fixtures/other/b.sh"]:
+                target = Path(directory) / relative
+                target.parent.mkdir(parents=True)
+                target.write_text("echo\n")
+            self.assertEqual([path for path, _ in checker.subject_files(directory)],
+                             [".github/scripts/tests/fixtures/other/b.sh"])
 
     def test_clean_fixture_passes(self):
         result = scan("clean")
@@ -161,7 +188,10 @@ class Completed:
 class OrganizationTests(unittest.TestCase):
     def sweep(self, names, clone_files, failing=()):
         """Run the sweep with `gh` and `git` stubbed; `clone_files` maps a relative path to its text."""
+        self.calls = []
+
         def fake(arguments, environment=None, timeout=300):
+            self.calls.append(list(arguments))
             if arguments[0] == "gh":
                 return Completed(stdout=str([{"name": name} for name in names]).replace("'", '"'))
             repo = arguments[-1].rsplit("/", 1)[-1]
@@ -190,6 +220,17 @@ class OrganizationTests(unittest.TestCase):
             self.sweep(["Arc", "Broken"], {"ok.sh": "echo ok\n"}, failing=("Broken",))
         self.assertIn("Broken: could not clone", str(raised.exception))
         self.assertNotIn("secret-token", str(raised.exception))
+
+    def test_token_never_appears_in_command_lines(self):
+        import base64
+        encoded = base64.b64encode(b"x-access-token:secret-token").decode()
+        self.sweep(["Arc"], {"ok.sh": "echo ok\n"})
+        self.assertTrue(any(call[0] == "git" for call in self.calls))
+        self.assertTrue(any(call[0] == "gh" for call in self.calls))
+        for arguments in self.calls:
+            joined = " ".join(arguments)
+            self.assertNotIn("secret-token", joined)
+            self.assertNotIn(encoded, joined)
 
     def test_no_repositories_could_not_run(self):
         with self.assertRaises(checker.CouldNotRun):

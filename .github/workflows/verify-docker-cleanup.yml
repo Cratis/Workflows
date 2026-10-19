@@ -32,7 +32,7 @@ permissions:
 # The sweep has its own group so a push to main never cancels a running organization sweep.
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'sweep' || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   verify:

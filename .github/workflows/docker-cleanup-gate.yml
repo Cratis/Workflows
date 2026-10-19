@@ -32,5 +32,5 @@ jobs:
           persist-credentials: false
       - name: Fail on unscoped Docker cleanup
         env:
-          REPOSITORY: ${{ github.event.repository.name }}
-        run: python3 -B .cratis-workflows/.github/scripts/verify-docker-cleanup.py --root . --repo "$REPOSITORY" --exclude .cratis-workflows
+          REPOSITORY: ${{ github.repository }}
+        run: python3 -B .cratis-workflows/.github/scripts/verify-docker-cleanup.py --root . --repo "${REPOSITORY#*/}" --exclude .cratis-workflows

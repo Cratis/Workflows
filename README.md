@@ -849,7 +849,7 @@ Docker daemon, but an unscoped prune inside a job still removes containers that 
 steps or Testcontainers in the same job need (Cratis/StudioIssues#905). Pull requests and
 pushes run `.github/scripts/tests/verify-docker-cleanup.test.py` and the checker's
 `--self-test`. The schedule and manual runs clone every non-archived Cratis repository
-shallowly with `PAT_WORKFLOWS` (read only) and scan it.
+shallowly with `PAT_WORKFLOWS` (used read-only; the token itself has write access) and scan it.
 
 The checker, `.github/scripts/verify-docker-cleanup.py`, reads workflow files, composite
 actions, `.sh .bash .ps1 .py .mjs .js .ts .cs` scripts, `Dockerfile*`, `Makefile` and

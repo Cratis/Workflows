@@ -26,8 +26,8 @@ SCRIPT_SUFFIXES = (".sh", ".bash", ".ps1", ".py", ".mjs", ".js", ".ts", ".cs")
 SLASH_COMMENT_SUFFIXES = (".mjs", ".js", ".ts", ".cs")
 SPECIAL_NAMES = ("makefile", "justfile")
 SKIPPED_DIRECTORIES = {"node_modules", "bin", "obj", "dist", ".git", "vendor", "vendored", "third_party"}
-# Relative directories (from the scan root) that hold planted violations on purpose.
-SKIPPED_PATHS = (".github/scripts/tests/fixtures",)
+# Relative directories (from the scan root) that hold this checker's own planted violations on purpose.
+SKIPPED_PATHS = (".github/scripts/tests/fixtures/docker-cleanup",)
 
 # (repository, path, reason). The sweep fails an entry once the file no longer has a violation.
 # Empty: the 2026-10-18 search of every Cratis repository found no unscoped cleanup.
@@ -38,7 +38,7 @@ PRUNE = re.compile(D + r"(?:system|container|image|volume|network|builder|buildx
 PRUNE_FILTER = re.compile(r"--filter(?:\s+|=)[\"']?label=", re.IGNORECASE)
 REMOVE = r"(?:(?:container|volume|network|image)\s+)?(?:rm|kill|stop|rmi)\b"
 LISTING = r"docker\s+(?:\w+\s+)*?(?:ls|ps|images)\b"
-SUBSTITUTION = re.compile(D + REMOVE + r"[^$`]*(?:\$\(|`)\s*(" + LISTING + r"[^)`]*)", re.IGNORECASE)
+SUBSTITUTION = re.compile(D + REMOVE + r"(?:[^$`]|\$(?!\())*(?:\$\(|`)\s*(?:sudo\s+(?:-\S+\s+)*)?(" + LISTING + r"[^)`]*)", re.IGNORECASE)
 XARGS = re.compile(r"(" + LISTING + r"[^|]*)\|\s*xargs\b[^|]*" + D + REMOVE, re.IGNORECASE)
 LISTING_FILTER = re.compile(r"(?:--filter|-f)(?:\s+|=)[\"']?label=", re.IGNORECASE)
 SEPARATORS = re.compile(r"&&|\|\||;")
@@ -57,8 +57,8 @@ def is_subject(relative):
     name = parts[-1].lower()
     if relative.startswith(".github/workflows/") and len(parts) == 3:
         return name.endswith((".yml", ".yaml"))
-    if relative.startswith(".github/actions/"):
-        return name in ("action.yml", "action.yaml")
+    if relative.startswith(".github/actions/") and name in ("action.yml", "action.yaml"):
+        return True
     return name.endswith(SCRIPT_SUFFIXES) or name.startswith("dockerfile") or name in SPECIAL_NAMES
 
 
