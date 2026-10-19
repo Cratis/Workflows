@@ -99,7 +99,7 @@ class Context:
     def __init__(self, variables=None, inputs=None, matrix=None):
         self.variables = {key.lower(): value for key, value in (variables or {}).items()}
         self.inputs = inputs or {}
-        self.matrix = matrix or {}
+        self.matrix = matrix if matrix is not None else {}
 
     def lookup(self, scope, name):
         """Return the value(s) of a name as a list of strings; empty means unset. May raise Unresolved."""
@@ -168,7 +168,10 @@ def flatten_labels(value, context):
         return [label for item in value for label in flatten_labels(item, context)]
     if isinstance(value, dict):
         raise Unresolved("a matrix value is a mapping, not a label")
-    return resolve_text(value, context)
+    labels = resolve_text(value, context)
+    if not labels:
+        raise Unresolved(f"matrix value {value!r} resolves to no label")
+    return labels
 
 
 def matrix_values(job, context):

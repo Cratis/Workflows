@@ -94,7 +94,7 @@ class LiteralTests(unittest.TestCase):
         self.assertIn("self-hosted label 'self-hosted'", scan("matrix-include-list").findings[0][2])
 
     def test_matrix_expression_value_is_resolved(self):
-        self.assertEqual(scan("matrix-expression-value").findings, [])  # an unset variable is empty
+        self.assertIn("unresolved runner", scan("matrix-expression-value").findings[0][2])  # an unset variable leaves the cell's runner unknown
         self.assertEqual(scan("matrix-expression-value", variables={"R": "cratis-arc"}).findings[0][2].count("cratis-arc"), 1)
         self.assertEqual(scan("matrix-expression-value", variables={"R": "ubuntu-latest"}).findings, [])
         self.assertEqual(scan("matrix-expression-hosted").findings, [])
