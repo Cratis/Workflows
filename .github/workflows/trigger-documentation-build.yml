@@ -37,4 +37,4 @@ jobs:
           event-type: ${{ inputs.event-type }}
           # Names the source so the documentation build recompiles only this repository's API
           # and reuses cached builds of the others (Cratis/Documentation#198).
-          client-payload: '{"repo": ${{ toJSON(github.event.repository.name) }}, "sha": ${{ toJSON(github.sha) }}}'
+          client-payload: '{"repo": ${{ toJSON(github.repository) }}, "sha": ${{ toJSON(github.sha) }}}'
