@@ -1,0 +1,103 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Discoverability
+
+# Reusable check of a built static site for search (SEO), answer-engine (AEO) and
+# generative (GEO) discoverability. Findings go to the job summary; it only fails when
+# `fail-on` is `error`. The script is fetched at an immutable Workflows commit because
+# checkout below contains the caller's repo, not this repository. Update the script pin
+# and checksum whenever the script changes.
+# Exit codes: 0 no failing findings, 1 errors with fail-on: error, 2 could not run.
+
+on:
+  workflow_call:
+    inputs:
+      site-path:
+        description: Directory holding the built site, relative to the repository root (the repository root itself for plain-HTML sites)
+        type: string
+        required: true
+      base-url:
+        description: Production origin of the site, for example https://blog.cratis.io; canonical and sitemap URLs are checked against it
+        type: string
+        required: true
+      fail-on:
+        description: "`none` reports findings only (default, adoption mode); `error` fails the job when any error-level finding exists"
+        type: string
+        required: false
+        default: none
+      ignore:
+        description: Comma- or newline-separated globs, relative to site-path, of files and directories to skip (`*` and `?` stay within a path segment, `**` crosses directories)
+        type: string
+        required: false
+        default: ""
+      build-command:
+        description: Command that builds the site into site-path; leave empty when the site is already built or is plain HTML
+        type: string
+        required: false
+        default: ""
+      node-version:
+        description: Node.js version used for the build command and the check
+        type: string
+        required: false
+        default: "24"
+      runs-on:
+        description: >-
+          Runner label the job runs on. Callers in private repositories should pass
+          their self-hosted scale-set label (for example cratis-arc) so the check does
+          not consume billed GitHub-hosted minutes.
+        type: string
+        required: false
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Build the site
+        if: inputs.build-command != ''
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: bash -euo pipefail -c "$BUILD_COMMAND"
+
+      - name: Check discoverability
+        env:
+          SITE_PATH: ${{ inputs.site-path }}
+          BASE_URL: ${{ inputs.base-url }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          IGNORE: ${{ inputs.ignore }}
+        run: |
+          set -euo pipefail
+          if ! command -v curl >/dev/null || ! command -v node >/dev/null; then
+            echo 'could not run: curl and node are required' >&2
+            exit 2
+          fi
+          script="$RUNNER_TEMP/verify-discoverability.mjs"
+          if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            'https://raw.githubusercontent.com/Cratis/Workflows/593878df0a8760e2d08bdb7d2819f276498a0c2b/.github/scripts/verify-discoverability.mjs' \
+            --output "$script"; then
+            echo 'could not run: downloading the pinned discoverability check failed' >&2
+            exit 2
+          fi
+          script_sha256='5fa852da91ab941e5e6bcc53d2187e18f77c15cf3070f298cbcbf258b3942a7a'
+          if ! node --input-type=module --eval '
+            import { createHash } from "node:crypto";
+            import { readFileSync } from "node:fs";
+            const digest = createHash("sha256").update(readFileSync(process.argv[1])).digest("hex");
+            if (digest !== process.argv[2]) process.exit(2);
+          ' "$script" "$script_sha256"; then
+            echo 'could not run: pinned discoverability check checksum mismatch' >&2
+            exit 2
+          fi
+          node "$script" --root "$SITE_PATH" --base-url "$BASE_URL" --fail-on "$FAIL_ON" --ignore "$IGNORE"
