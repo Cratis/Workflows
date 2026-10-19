@@ -35,3 +35,6 @@ jobs:
           token: ${{ secrets.PAT_DOCUMENTATION }}
           repository: ${{ inputs.repository }}
           event-type: ${{ inputs.event-type }}
+          # Names the source so the documentation build recompiles only this repository's API
+          # and reuses cached builds of the others (Cratis/Documentation#198).
+          client-payload: '{"repo": ${{ toJSON(github.repository) }}, "sha": ${{ toJSON(github.sha) }}}'
