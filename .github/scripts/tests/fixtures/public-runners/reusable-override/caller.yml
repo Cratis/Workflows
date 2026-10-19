@@ -1,0 +1,7 @@
+name: Caller
+on: pull_request
+jobs:
+  gate:
+    uses: ./.github/workflows/gate.yml
+    with:
+      runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc' }}

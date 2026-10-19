@@ -1,0 +1,7 @@
+name: Caller
+on: pull_request
+jobs:
+  gate:
+    uses: other/repo/.github/workflows/x.yml@v1
+    with:
+      runs-on: cratis-arc
