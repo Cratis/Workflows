@@ -1,0 +1,62 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Check Public Runners
+
+# Reusable gate for the caller's own workflows: when the calling repository is public, fails if any
+# pull_request or pull_request_target job resolves to a self-hosted runner (Cratis/Workflows#161).
+# A private repository passes without being checked. The checker is read from Cratis/Workflows at
+# `workflows-ref`; the caller's workflows are only parsed, never executed.
+# Exit codes: 0 clean, 1 violations, 2 could not run.
+#
+#   on: pull_request
+#   permissions:
+#     contents: read
+#   jobs:
+#     public-runners:
+#       uses: Cratis/Workflows/.github/workflows/check-public-runners.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label the gate job runs on; keep it hosted in a public repository.
+        type: string
+        required: false
+        default: ubuntu-latest
+      workflows-ref:
+        description: Cratis/Workflows ref the checker and the reusable workflows it follows are read from.
+        type: string
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
+      - name: Check that pull_request jobs stay off self-hosted runners
+        env:
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
+          IS_PRIVATE: ${{ github.event.repository.private }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          visibility=public
+          if [ "$IS_PRIVATE" = true ]; then visibility=private; fi
+          python3 -B .cratis-workflows/.github/scripts/verify-public-runners.py \
+            --dir .github/workflows --repo "$REPOSITORY_NAME" --visibility "$visibility" \
+            --local-repo Workflows=.cratis-workflows/.github/workflows --fetch-remote

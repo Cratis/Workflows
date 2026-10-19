@@ -838,6 +838,33 @@ that does not parse). A clean run prints
 
 ---
 
+### `verify-public-runners.yml` and `check-public-runners.yml`
+
+Fails when a public repository's `pull_request` or `pull_request_target` job resolves to a
+self-hosted runner (`self-hosted`, `cratis-arc*`, or a runner group), because any fork could then
+run code on our infrastructure. The checker, `.github/scripts/verify-public-runners.py`, follows
+literal `runs-on`, `${{ vars.X || 'label' }}` and `${{ inputs.X || 'label' }}` fallbacks, `matrix`
+lists and reusable workflows (`./` and `Cratis/<repo>/...@ref`) with the caller's `with:` inputs and
+the callee's input defaults. An expression it cannot resolve is reported as `unresolved runner` and
+fails: unknown is not pass. Private repositories are never reported.
+
+`verify-public-runners.yml` runs the checker's tests (fixtures, the bootstrap's rendered public
+callers, this repository's own workflows) and `--self-test` on pull requests and pushes, and sweeps
+every public Cratis repository weekly with `PAT_WORKFLOWS`, also treating a set variable such as
+`RUNNER_GATE` that points at a self-hosted label as a finding. Other repositories can call
+`check-public-runners.yml@main`, which checks their own workflows when the repository is public.
+The reusable gate (`--dir` mode) does not read repository, organization or environment variables:
+it treats `vars.X` as unset and uses the fallback, so a set `RUNNER_GATE` is caught only by the weekly
+sweep (which reads repository and organization variables, not environment-level ones). Set
+`workflows-ref` to the same ref the caller pins for `check-public-runners.yml`, so the checker and the
+reusable workflows it follows match.
+
+Run it with `--dir <workflows directory> [--repo <name>] [--visibility public|private]
+[--local-repo Workflows=<directory>] [--fetch-remote]`, `--org` (needs `GH_TOKEN`) or `--self-test`.
+Exit codes: `0` ran clean, `1` found violations, `2` could not run.
+
+---
+
 ### `verify-docker-cleanup.yml`
 
 **Triggers:** `pull_request` and `push` to `main` when the checker, its tests and

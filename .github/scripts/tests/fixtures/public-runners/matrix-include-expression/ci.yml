@@ -1,0 +1,9 @@
+name: CI
+on: pull_request
+jobs:
+  build:
+    strategy:
+      matrix:
+        r: [ubuntu-latest]
+        include: ${{ fromJSON(vars.EXTRA) }}
+    runs-on: ${{ matrix.r }}

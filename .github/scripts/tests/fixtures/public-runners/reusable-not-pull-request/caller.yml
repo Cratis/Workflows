@@ -1,0 +1,5 @@
+name: Caller
+on: push
+jobs:
+  gate:
+    uses: ./.github/workflows/gate.yml

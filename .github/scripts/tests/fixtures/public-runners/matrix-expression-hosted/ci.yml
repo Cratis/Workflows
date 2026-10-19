@@ -1,0 +1,8 @@
+name: CI
+on: pull_request
+jobs:
+  build:
+    strategy:
+      matrix:
+        r: [ubuntu-latest, '${{ vars.R || ''ubuntu-24.04'' }}']
+    runs-on: ${{ matrix.r }}

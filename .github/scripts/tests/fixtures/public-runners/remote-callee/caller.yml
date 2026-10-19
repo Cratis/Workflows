@@ -1,0 +1,5 @@
+name: Caller
+on: pull_request
+jobs:
+  gate:
+    uses: Cratis/Workflows/.github/workflows/gate.yml@main

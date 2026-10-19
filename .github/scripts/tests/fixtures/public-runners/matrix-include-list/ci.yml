@@ -1,0 +1,10 @@
+name: CI
+on: pull_request
+jobs:
+  build:
+    strategy:
+      matrix:
+        r: [ubuntu-latest]
+        include:
+          - r: [self-hosted]
+    runs-on: ${{ matrix.r }}
