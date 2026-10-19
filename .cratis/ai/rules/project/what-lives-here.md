@@ -20,8 +20,9 @@ Key workflows: `cleanup-pr-artifacts`,
 `auto-approve-publish-deployments`, `bootstrap-common-workflows` (installs the
 common wrappers organization-wide), `propagate-pr-templates`, `verify-*` gates
 (including `verify-bootstrap-schedules.yml` for deterministic weekly package-update
-schedules and `verify-release-concurrency.yml`, which fails when any Cratis release
-workflow can cancel or drop a release), and `update-ai-profile-subscription.yml` (reviewed Cratis AI profile updates —
+schedules, `verify-release-concurrency.yml`, which fails when any Cratis release
+workflow can cancel or drop a release, and `verify-docker-cleanup.yml`, which fails on
+unscoped Docker prune or bulk removal), and `update-ai-profile-subscription.yml` (reviewed Cratis AI profile updates —
 see README's *Reviewed Cratis AI profile updates*).
 
 The legacy Copilot synchronization system (all-to-all propagation,
