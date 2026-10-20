@@ -479,7 +479,7 @@ actionlint .github/workflows/cleanup-pr-artifacts.yml \
 The regression suite extracts the actual inline production program and substitutes
 an in-memory HTTP API. It checks Bash syntax and positive/negative inventory,
 scoping, pagination, approval, deletion/readback, and redaction behavior without
-GitHub credentials or network requests. `Verify PR Artifact Cleanup` runs it on
+GitHub credentials or network requests. `Verify Workflow Programs` runs it on
 relevant pull requests and main pushes; it never invokes live cleanup.
 
 ---
