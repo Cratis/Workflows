@@ -473,7 +473,7 @@ They must invoke cleanup only for the intended closed PR.
 ```bash
 python3 .github/scripts/tests/cleanup-pr-artifacts.test.py
 actionlint .github/workflows/cleanup-pr-artifacts.yml \
-  .github/workflows/verify-pr-artifact-cleanup.yml
+  .github/workflows/verify-workflow-programs.yml
 ```
 
 The regression suite extracts the actual inline production program and substitutes
@@ -786,7 +786,7 @@ Exit codes: `0` ran and found nothing, `1` ran and found violations (one line pe
 
 The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. The downloaded script's SHA-256 must match the workflow's reviewed checksum before execution. When changing the script, commit it first and update the workflow's script pin and checksum. Offline tests compare the checksum with the tested source without needing the script commit in a shallow or squash-merged checkout.
 
-Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-work-record-guard.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
+Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-workflow-programs.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
 
 ---
 
