@@ -19,6 +19,7 @@ PREFLIGHT = "Check publication options and default-branch base"
 HOOK = "Run post-update command"
 CHANGES = "Detect package changes"
 CACHE_KEY = "Resolve NuGet package cache key"
+PACKAGES_ON_SCRATCH = "Keep NuGet packages on the scratch volume"
 CACHE_RESTORE = "Restore NuGet package cache"
 CACHE_SAVE = "Save NuGet package cache at the end of the job"
 CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"
@@ -695,7 +696,7 @@ class UpdatePackagesTests(unittest.TestCase):
         for name in (CACHE_RESTORE, CACHE_SAVE):
             with self.subTest(step=name):
                 self.assertIn("if: steps.nuget_cache.outputs.enabled == 'true'", STEPS[name])
-                self.assertIn("path: ~/.nuget/packages\n", STEPS[name])
+                self.assertIn("path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}\n", STEPS[name])
                 self.assertIn("key: ${{ steps.nuget_cache.outputs.key }}", STEPS[name])
         self.assertIn("restore-keys: ${{ steps.nuget_cache.outputs.restore-key }}", STEPS[CACHE_RESTORE])
         # The same prefix and key files as the Cratis .NET package cache used by caller builds.
@@ -704,6 +705,17 @@ class UpdatePackagesTests(unittest.TestCase):
                       "'**/*.csproj', '**/[Nn]u[Gg]et.[Cc]onfig', '*.slnx', 'global.json') }}", STEPS[CACHE_KEY])
         # Saving is never forced: actions/cache saves in its post step only on success.
         self.assertNotIn("actions/cache/save", SOURCE)
+
+    def test_self_hosted_runners_keep_nuget_packages_on_the_scratch_volume(self):
+        names = list(STEPS)
+        step = STEPS[PACKAGES_ON_SCRATCH]
+        # Set before .NET or any cache step reads it; hosted runners keep ~/.nuget/packages.
+        for later in ("Setup .NET", CACHE_KEY, CACHE_RESTORE, CACHE_SAVE, "Update NuGet packages"):
+            self.assertLess(names.index(PACKAGES_ON_SCRATCH), names.index(later))
+        self.assertIn("if: runner.environment == 'self-hosted'\n", step)
+        self.assertIn('echo "NUGET_PACKAGES=$(dirname "$GITHUB_WORKSPACE")/.nuget-packages" >> "$GITHUB_ENV"', step)
+        # actions/cache refuses a path containing '..'.
+        self.assertNotIn("..", step.split("run:", 1)[1].replace(".nuget-packages", ""))
 
     def test_every_action_is_pinned_to_a_full_commit_sha(self):
         uses = re.findall(r"^\s+uses: (\S+)", SOURCE, re.M)
