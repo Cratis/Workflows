@@ -107,6 +107,14 @@ jobs:
           token: ${{ secrets.PAT_WORKFLOWS || github.token }}
           fetch-depth: 0
 
+      # On a self-hosted runner, keep NuGet packages on the runner's scratch volume beside the
+      # checkout, not on the node's small ephemeral storage, where the kubelet evicts the runner
+      # under disk pressure. Hosted runners keep ~/.nuget/packages, and its cache, unchanged.
+      - name: Keep NuGet packages on the scratch volume
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "NUGET_PACKAGES=$(dirname "$GITHUB_WORKSPACE")/.nuget-packages" >> "$GITHUB_ENV"
+
       - name: Check publication options and default-branch base
         id: publication
         shell: bash
@@ -231,7 +239,7 @@ jobs:
         if: steps.nuget_cache.outputs.enabled == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.nuget/packages
+          path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
           key: ${{ steps.nuget_cache.outputs.key }}
           restore-keys: ${{ steps.nuget_cache.outputs.restore-key }}
 
@@ -241,7 +249,7 @@ jobs:
         if: steps.nuget_cache.outputs.enabled == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.nuget/packages
+          path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
           key: ${{ steps.nuget_cache.outputs.key }}
           lookup-only: true
 
