@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 OWNER = "Cratis"
 PUBLISH_PATH = ".github/workflows/publish.yml"
@@ -121,10 +121,18 @@ def fetch_releases(repo):
     return json.loads(out or "[]")
 
 
-def fetch_merged_pulls(repo, branch, releases, now):
+def merged_pulls_query(repo, branch, releases):
+    """Search query for merges that may still be pending. Without a published release every merge is a
+    candidate, so there is no lower bound (a date cut-off would hide an overdue first release)."""
+    query = f"repo:{OWNER}/{repo} is:pr is:merged base:{branch}"
     created = [parse_time(r["created_at"]) for r in releases if not r.get("draft")]
-    since = (max(created) if created else now - timedelta(days=90)).date().isoformat()
-    query = f"repo:{OWNER}/{repo} is:pr is:merged base:{branch} merged:>={since}"
+    if created:
+        query += f" merged:>={max(created).date().isoformat()}"
+    return query
+
+
+def fetch_merged_pulls(repo, branch, releases):
+    query = merged_pulls_query(repo, branch, releases)
     out = gh("api", "-X", "GET", "search/issues", "-f", f"q={query}", "-F", "per_page=100", "--paginate",
              "--jq", ".items[] | {number, labels: [.labels[].name], merged_at: .pull_request.merged_at}")
     return [json.loads(line) for line in out.splitlines() if line]
@@ -137,7 +145,7 @@ def sweep(now):
         if window <= 0:
             continue
         releases = fetch_releases(repo)
-        pulls = fetch_merged_pulls(repo, branch, releases, now)
+        pulls = fetch_merged_pulls(repo, branch, releases)
         verdicts.append(evaluate(repo, window, releases, pulls, now))
     return verdicts
 

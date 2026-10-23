@@ -114,5 +114,20 @@ class StalenessDecision(unittest.TestCase):
         self.assertEqual(staleness.parse_window("          release-window: 0\n"), 0)
 
 
+class MergedPullsQuery(unittest.TestCase):
+    def test_starts_at_the_latest_published_release(self):
+        draft = {"created_at": "2026-03-01T00:00:00Z", "draft": True}
+        query = staleness.merged_pulls_query("Repo", "main", [RELEASE, draft])
+        self.assertTrue(query.endswith("base:main merged:>=2026-01-01"))
+
+    def test_has_no_lower_bound_before_the_first_release(self):
+        query = staleness.merged_pulls_query("Repo", "main", [])
+        self.assertNotIn("merged:", query)
+
+    def test_an_old_merge_awaiting_the_first_release_is_stale(self):
+        verdict = staleness.evaluate("Repo", 60, [], [pull(1, "2025-06-01T09:00:00Z", "patch")], NOW)
+        self.assertTrue(verdict.stale)
+
+
 if __name__ == "__main__":
     unittest.main()
