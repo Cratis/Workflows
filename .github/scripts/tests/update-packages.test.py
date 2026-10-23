@@ -273,6 +273,10 @@ class UpdatePackagesTests(unittest.TestCase):
         upload = next(step for step in jobs["update"]["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
         self.assertEqual(upload["with"]["retention-days"], 1)
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertIs(upload["with"]["overwrite"], True)
+        download = next(step for step in jobs["publish"]["steps"] if step.get("uses", "").startswith("actions/download-artifact@"))
+        self.assertEqual(upload["with"]["name"], "package-candidate-${{ github.run_id }}")
+        self.assertEqual(download["with"]["name"], upload["with"]["name"])
 
     def assert_publication_step(self, step):
         self.assertNotIn("post-update-command", json.dumps(step))
@@ -369,6 +373,126 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotEqual(self.run_step(APPLY), 0)
         self.assert_not_published()
 
+    def test_protected_checks_precede_export_and_checkout(self):
+        diff = "git diff --no-ext-diff --no-textconv --name-only --no-renames -z"
+        for name, boundary in ((EXPORT, "git bundle create"), (APPLY, "checkout --detach")):
+            with self.subTest(step=name):
+                script = shell(name)
+                self.assertLess(script.index(diff), script.index(boundary))
+                self.assertIn("while IFS= read -r -d '' path", script)
+                self.assertIn('test "$blocked" -eq 0', script)
+
+    def test_update_rejects_tracked_workflow_edits_in_both_modes(self):
+        for mode in ("pull-request", "direct"):
+            with self.subTest(mode=mode):
+                self.env["PUBLICATION_MODE"] = mode
+                self.assertTrue(self.prepare(hook="printf 'malicious workflow\\n' > .github/workflows/x.yml"))
+                self.assertNotEqual(self.run_step(EXPORT), 0)
+                self.assertIn(".github/workflows/x.yml", self.last_result.stderr)
+                self.assert_not_published()
+                # Export fails before writing a bundle; its empty directory is
+                # reused by the next independent mode fixture.
+                (self.root / "package-candidate").rmdir()
+                self.git("checkout", "--detach", self.base)
+                self.git("switch", "-C", "main")
+
+    def forge_artifact_candidate(self):
+        # Deliberately bypass export's defense: publish must inspect the bundle
+        # itself even when the update job and all its outputs are compromised.
+        self.git("add", "-A")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "candidate")
+        commit = self.git("rev-parse", "HEAD")
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        self.env.update(CANDIDATE_COMMIT=commit, CANDIDATE_TREE=tree)
+        directory = self.root / "package-candidate"
+        fields = (directory / "metadata").read_text().splitlines()
+        fields[2:5] = [commit, tree, self.env["PUBLICATION_MODE"]]
+        (directory / "metadata").write_text("\n".join(fields) + "\n")
+        self.git("bundle", "create", str(directory / "candidate.bundle"), f"{self.base}..HEAD")
+        self.git("checkout", "--detach", self.base)
+
+    def assert_protected_candidate_rejected(self, path):
+        self.forge_artifact_candidate()
+        self.assertNotEqual(self.run_step(APPLY), 0)
+        self.assertIn("Refusing protected candidate path:", self.last_result.stderr)
+        self.assertIn(path, self.last_result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+        self.assert_not_published()
+
+    def test_publish_rejects_workflow_edits_in_both_modes_despite_forged_artifact(self):
+        self.export_to_fresh_checkout()
+        for mode in ("pull-request", "direct"):
+            with self.subTest(mode=mode):
+                self.env["PUBLICATION_MODE"] = mode
+                (self.repo / ".github/workflows/x.yml").write_text("malicious workflow\n")
+                self.assert_protected_candidate_rejected(".github/workflows/x.yml")
+
+    def test_publish_rejects_all_protected_path_families(self):
+        self.export_to_fresh_checkout()
+        for path in (".github/actions/x/action.yml", ".github/CODEOWNERS", ".github/dependabot.yml",
+                     ".cratis/ai/hooks/x.sh", ".pi/x.json", ".claude/x.json", ".mcp.json",
+                     ".vscode/mcp.json", ".gitattributes", ".gitmodules", ".gitconfig",
+                     ".githooks/pre-push", "nested/.gitconfig", "nested/.githooks/pre-commit",
+                     ".github/workflows/line\nbreak.yml"):
+            with self.subTest(path=path):
+                target = self.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("malicious configuration\n")
+                # Paths are shell-escaped in diagnostics (including newlines).
+                self.assert_protected_candidate_rejected(path.split("\n")[0])
+
+    def test_publish_rejects_symlink_replacement_of_protected_ancestors(self):
+        self.export_to_fresh_checkout()
+        for path in (".cratis", ".cratis/ai", ".vscode"):
+            with self.subTest(path=path):
+                target = self.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to("external-configuration")
+                self.assert_protected_candidate_rejected(path)
+
+    def test_publish_reports_every_protected_path(self):
+        self.export_to_fresh_checkout()
+        for path in (".mcp.json", ".gitconfig"):
+            (self.repo / path).write_text("malicious configuration\n")
+        self.assert_protected_candidate_rejected(".mcp.json")
+        self.assertIn(".gitconfig", self.last_result.stderr)
+
+    def test_publish_rejects_protected_deletion_rename_and_mode_changes(self):
+        self.export_to_fresh_checkout()
+        for operation in ("delete", "rename-out", "rename-in", "executable", "symlink"):
+            with self.subTest(operation=operation):
+                self.change_protected_fixture(operation)
+                self.assert_protected_candidate_rejected(".github/workflows/x.yml")
+
+    def change_protected_fixture(self, operation):
+        path = self.repo / ".github/workflows/x.yml"
+        if operation == "delete":
+            path.unlink()
+        elif operation == "rename-out":
+            path.rename(self.repo / "innocent.yml")
+        elif operation == "rename-in":
+            (self.repo / "Dockerfile").rename(path)
+        elif operation == "executable":
+            path.chmod(0o755)
+        else:
+            path.unlink()
+            path.symlink_to("../../Dockerfile")
+
+    def assert_manifest_only_candidate_publishes(self, mode):
+        # The build stub normally leaves an untracked artifact, which direct
+        # mode intentionally stages. Ignore it locally for a manifest-only case.
+        (self.repo / ".git/info/exclude").write_text("unrelated-output.tmp\n")
+        self.env["PUBLICATION_MODE"] = mode
+        self.assertTrue(self.pipeline(hook=""), self.last_result.stderr)
+        self.assertEqual(self.git("diff", "--name-only", self.base, "HEAD"), "dependencies.txt")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.env["CANDIDATE_COMMIT"])
+
+    def test_manifest_only_candidate_publishes_in_direct_mode(self):
+        self.assert_manifest_only_candidate_publishes("direct")
+
+    def test_manifest_only_candidate_publishes_in_pull_request_mode(self):
+        self.assert_manifest_only_candidate_publishes("pull-request")
+
     def test_noop_artifact_records_no_changes_without_bundle(self):
         self.assert_step_ok(PREFLIGHT)
         self.env["CHANGED"] = "false"
@@ -418,6 +542,9 @@ class UpdatePackagesTests(unittest.TestCase):
                               ".gitignore": ".ai-work/\ndist/\n", "gradlew": "#!/bin/bash\nexec gradle \"$@\"\n"}.items():
             (self.repo / name).write_text(content)
         (self.repo / "gradlew").chmod(0o755)
+        workflow = self.repo / ".github/workflows/x.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("original workflow\n")
         self.git("add", "--all")
         self.git("commit", "-m", "fixture base")
         self.git("push", "origin", "main")

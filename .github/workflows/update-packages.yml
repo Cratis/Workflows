@@ -876,6 +876,22 @@ jobs:
             # already committed its post-build tree, just as before the split.
             git diff --exit-code
             git diff --cached --exit-code
+            # No rename detection: both the old and new paths are inspected,
+            # including deletions, type changes and executable-bit changes.
+            git diff --no-ext-diff --no-textconv --name-only --no-renames -z "$EXPECTED_BASE" "$commit" > "$RUNNER_TEMP/package-candidate-paths"
+            checked=0
+            blocked=0
+            while IFS= read -r -d '' path; do
+              checked=$((checked + 1))
+              case "$path" in
+                .github|.github/*|.cratis|.cratis/ai|.cratis/ai/hooks|.cratis/ai/hooks/*|.pi|.pi/*|.claude|.claude/*|.mcp.json|.vscode|.vscode/mcp.json|.git*|*/.git*)
+                  printf 'Refusing protected candidate path: %q\n' "$path" >&2
+                  blocked=1 ;;
+              esac
+            done < "$RUNNER_TEMP/package-candidate-paths"
+            test "$checked" -gt 0
+            test "$blocked" -eq 0
+            echo "Checked $checked candidate paths for protected configuration changes."
             git bundle create "$directory/candidate.bundle" "$EXPECTED_BASE..HEAD"
           fi
           printf '%s\n' "$EXPECTED_BASE" "$BASE_BRANCH" "$commit" "$tree" \
@@ -891,8 +907,9 @@ jobs:
       - name: Upload validated candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: package-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: package-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/package-candidate/
+          overwrite: true
           retention-days: 1
           if-no-files-found: error
 
@@ -912,7 +929,7 @@ jobs:
       - name: Download validated candidate
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: package-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          name: package-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/package-candidate/
 
       # No repository scripts or package tooling may run in this job. A bundle
@@ -967,6 +984,24 @@ jobs:
           tree=$(git rev-parse "$fetched^{tree}")
           test "$parent" = "$EXPECTED_BASE"
           test "$tree" = "$CANDIDATE_TREE"
+          # This independent check is the credential boundary: never trust the
+          # update job to keep workflow, agent or Git hook configuration intact.
+          # --no-renames reports both sides of moves, including moves out of a
+          # protected directory. NUL delimiters preserve every byte of each path.
+          git diff --no-ext-diff --no-textconv --name-only --no-renames -z "$EXPECTED_BASE" "$fetched" > "$RUNNER_TEMP/package-candidate-paths"
+          checked=0
+          blocked=0
+          while IFS= read -r -d '' path; do
+            checked=$((checked + 1))
+            case "$path" in
+              .github|.github/*|.cratis|.cratis/ai|.cratis/ai/hooks|.cratis/ai/hooks/*|.pi|.pi/*|.claude|.claude/*|.mcp.json|.vscode|.vscode/mcp.json|.git*|*/.git*)
+                printf 'Refusing protected candidate path: %q\n' "$path" >&2
+                blocked=1 ;;
+            esac
+          done < "$RUNNER_TEMP/package-candidate-paths"
+          test "$checked" -gt 0
+          test "$blocked" -eq 0
+          echo "Checked $checked candidate paths for protected configuration changes."
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git -c core.hooksPath=/dev/null checkout --detach "$fetched"
