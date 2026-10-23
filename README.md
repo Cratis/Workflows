@@ -252,6 +252,9 @@ a partial configuration fails `publish` with a configuration error, in either mo
 With neither present, the existing `PAT_WORKFLOWS || github.token` path is unchanged.
 With both present, only `publication-mode: pull-request` mints an installation token;
 `direct` still uses the existing PAT/token path, never the App.
+Set the variable per repository while piloting: an organization-level variable reaches
+every caller, and bootstrapped wrappers do not pass the key, so their `publish` jobs
+would fail until each wrapper passes it.
 
 Install the App on the approved caller repository with **Contents: write** and
 **Pull requests: write** (Metadata: read is implicit). The mint requests only that
