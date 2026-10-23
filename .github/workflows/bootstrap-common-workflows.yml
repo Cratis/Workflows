@@ -7,15 +7,14 @@ name: Bootstrap Common Workflows
 #   • auto-approve-publish-deployments.yml — approves npm/nuget trusted publishing deployments
 #   • verify-no-work-records.yml           — fails PRs that track AI session work records
 #   • verify-release-notes.yml             — fails release-bound PRs whose description breaks the release-note contract
-#   • .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Handles both initial bootstrap (new repos) and ongoing updates:
 #   • New repos:            adds missing wrapper workflows
 #   • Already-bootstrapped: updates wrappers if content has changed
 #   • Already up-to-date:   skips processing
 #
-# Triggered automatically on push to main when the watched workflows, CodeQL
-# config or bootstrap script change. Package-update implementation changes do
+# Triggered automatically on push to main when the watched workflows or the
+# bootstrap script change. Package-update implementation changes do
 # not change the canonical wrapper and must not trigger organization-wide writes.
 # Can also be run manually via workflow_dispatch.
 #
@@ -33,7 +32,6 @@ on:
     paths:
       - ".github/workflows/cleanup-pr-artifacts.yml"
       - ".github/workflows/auto-approve-publish-deployments.yml"
-      - ".github/codeql/codeql-config.yml"
       - ".github/scripts/bootstrap-common-workflows.sh"
   workflow_dispatch:
 

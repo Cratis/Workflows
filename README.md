@@ -251,7 +251,7 @@ for automatic merge.
 existing callers already reference the reused implementation, and an implementation
 update must not rewrite unrelated repositories. The bootstrap workflow itself is not
 in those paths either, so this narrowly scoped rollout triggers no organization-wide
-write workflow. All other watched workflow/template, CodeQL and bootstrap-script
+write workflow. All other watched workflow/template and bootstrap-script
 triggers remain intact; changing those still requires separate deployment approval.
 Stage is explicitly excluded from bootstrap because it owns its reviewed
 package-update/kernel guard workflow and pin, which bootstrap must not overwrite.
@@ -557,12 +557,6 @@ This workflow is included in the common workflow bootstrap process and is automa
 > See [publish.template.yml](/.github/templates/publish.template.yml) for an example of a publish workflow that this auto-approve workflow will watch. Copy it to `.github/workflows/publish.yml` in the consuming repository and replace the placeholder package-publishing steps. It lives outside `.github/workflows` here because it is an incomplete example, not an executable workflow.
 >
 > The template never cancels or drops a release. `cratis/release-action` releases one merged pull request per run, and GitHub's default concurrency keeps a single pending run per group and cancels any older pending one, so merges in quick succession would lose releases. Its concurrency group therefore uses `queue: max`, which keeps up to 100 pending runs and starts them in order, and leaves `cancel-in-progress` out (GitHub rejects it together with `queue: max`). A pull request closed without merging gets a group of its own, so it never takes a place in front of a real release. Keep this block when customizing the copy; [`verify-release-concurrency.yml`](#verify-release-concurrencyyml) checks it across the organization.
-
----
-
-## Shared CodeQL configuration
-
-The common workflow bootstrap also propagates **`.github/codeql/codeql-config.yml`** to repositories. The shared config currently excludes rule `ca1031`.
 
 ---
 
@@ -1101,7 +1095,7 @@ be cloned, no repositories, or no files to scan). A clean run prints
 ### `bootstrap-common-workflows.yml`
 
 **Triggers:** `push` to `main` when a watched reusable workflow (including
-`cleanup-pr-artifacts.yml`), CodeQL config, or bootstrap script changes; also
+`cleanup-pr-artifacts.yml`) or bootstrap script changes; also
 `workflow_dispatch`.
 
 Maintains common wrappers across non-archived Cratis repositories, subject to its
