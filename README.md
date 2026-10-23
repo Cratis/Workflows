@@ -15,20 +15,22 @@ version. Titles such as `Bump Arc from 19.0 to 19.1 and Chronicle to 19.2` and
 
 | Input | Default | Purpose |
 |---|---|---|
-| `branch-prefixes` | `align-versions/` | Space-separated prefixes permitting same-repository head branch deletion after closure. |
+| `branch-prefixes` | `align-versions/` | Space-separated head branch prefixes required for replacements, closure, and branch deletion. An empty list permits none of these. |
 | `authors` | `github-actions[bot]` | Space-separated trusted bot/PAT logins whose superseded PRs may be closed. |
 | `dry-run` | `false` | Print planned actions without any writes. |
 | `runs-on` | `ubuntu-latest` | Runner label; use a self-hosted runner for private repositories. |
 | `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the program, not a PR head ref. |
 
-Unlisted authors (including human-authored bumps) receive only one
-`Superseded by #Q` comment per replacement, even if their branch matches a prefix.
-Only explicitly trusted bot/PAT authors may be closed; a prefix alone never
-permits closure. Do not add human contributors to `authors`. Dependabot PRs and
-`keep-open` PRs are never closed. A closed PR's branch is deleted only when it is
-in the caller repository and matches a configured prefix. API failures fail the
-job. The workflow **never checks out PR code**: it checks out only Cratis/Workflows
-at `workflows-ref` to run the supporting program.
+A replacement PR must have an author listed in `authors`, a head in the caller
+repository, and a branch matching a configured prefix. Untrusted PRs, including
+forks and non-prefix branches, never trigger comments, closure, or deletion.
+The same three checks are required to close an older PR and delete its branch.
+Other older PRs superseded by a trusted replacement (including human-authored
+bumps) receive only one `Superseded by #Q` comment per replacement. An empty prefix
+list permits no replacements or closures. Do not add human contributors to
+`authors`. Dependabot PRs and `keep-open` PRs are never closed. API failures fail
+the job. The workflow **never checks out PR code**: it checks out only
+Cratis/Workflows at `workflows-ref` to run the supporting program.
 
 Example caller (choose a repository-specific, nonzero schedule minute):
 

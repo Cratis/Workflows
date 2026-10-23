@@ -84,17 +84,20 @@ const words = value => value.split(/\s+/).filter(Boolean);
 export function planActions(pulls, { repository, authors = 'github-actions[bot]', branchPrefixes = 'align-versions/' }) {
     const allowedAuthors = words(authors).map(author => author.toLowerCase());
     const prefixes = words(branchPrefixes);
+    const trusted = pull => allowedAuthors.includes(pull.user.login.toLowerCase()) &&
+        pull.head.repo?.full_name.toLowerCase() === repository.toLowerCase() &&
+        prefixes.some(prefix => pull.head.ref.startsWith(prefix));
     const candidates = pulls.filter(pull => pull.state === 'open' && !dependabot(pull))
         .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.number - a.number);
+    const replacements = candidates.filter(trusted);
     return candidates.flatMap(pull => {
         if (pull.labels.some(label => label.name.toLowerCase() === 'keep-open')) return [];
-        const replacement = candidates.find(candidate => supersedes(candidate, pull));
+        const replacement = replacements.find(candidate => supersedes(candidate, pull));
         if (!replacement) return [];
-        // Prefixes never authorize closing an unlisted (human) author's PR.
-        const close = allowedAuthors.includes(pull.user.login.toLowerCase());
+        // Replacements, closure and deletion all require the same trust boundary.
+        const close = trusted(pull);
         return [{ number: pull.number, supersededBy: replacement.number, body: `Superseded by #${replacement.number}`,
-            close, deleteBranch: close && pull.head.repo?.full_name.toLowerCase() === repository.toLowerCase() &&
-                prefixes.some(prefix => pull.head.ref.startsWith(prefix)) ? pull.head.ref : null }];
+            close, deleteBranch: close ? pull.head.ref : null }];
     });
 }
 

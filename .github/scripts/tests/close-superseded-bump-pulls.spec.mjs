@@ -9,7 +9,7 @@ const options = { repository };
 const branch = 'align-versions/stage-4.1.0-scene-4.2.0-screenplay-4.3.0';
 function pull(number, title, overrides = {}) {
     return { number, title, state: 'open', created_at: `2026-10-${String(number).padStart(2, '0')}T00:00:00Z`,
-        base: { ref: 'main' }, head: { ref: `bump/${number}`, repo: { full_name: repository } },
+        base: { ref: 'main' }, head: { ref: `align-versions/bump-${number}`, repo: { full_name: repository } },
         user: { login: 'github-actions[bot]' }, labels: [], ...overrides };
 }
 const oldPull = () => pull(1, 'Bump Stage to 4.1.0');
@@ -119,12 +119,46 @@ test('closes configured bot/PAT authors and deletes only same-repo prefixed bran
             head: { ref, repo: repo ? { full_name: repo } : null } };
         const api = fakeApi([older, newPull()]);
         await run({ api, ...options, authors: 'github-actions[bot] service-account', log() {} });
-        assert.deepEqual(api.writes.slice(0, 2), [['comment', 1, 'Superseded by #2'], ['close', 1]]);
-        assert.deepEqual(api.writes.slice(2), deleteExpected ? [['deleteBranch', ref]] : []);
+        assert.deepEqual(api.writes, [['comment', 1, 'Superseded by #2'],
+            ...(deleteExpected ? [['close', 1], ['deleteBranch', ref]] : [])]);
+        assert.equal(older.state, deleteExpected ? 'closed' : 'open');
     }
     const older = { ...oldPull(), head: { ref: 'custom/bump', repo: { full_name: repository } } };
-    assert.equal(planActions([older, newPull()], { ...options, branchPrefixes: 'other/ custom/' })[0].deleteBranch, 'custom/bump');
-    assert.equal(planActions([older, newPull()], { ...options, branchPrefixes: '' })[0].deleteBranch, null);
+    const newer = { ...newPull(), head: { ref: 'custom/next', repo: { full_name: repository } } };
+    assert.equal(planActions([older, newer], { ...options, branchPrefixes: 'other/ custom/' })[0].deleteBranch, 'custom/bump');
+});
+
+test('untrusted replacements trigger no actions, including stranger forks with crafted higher titles', async () => {
+    for (const overrides of [
+        { user: { login: 'stranger' }, head: { ref: 'align-versions/crafted', repo: { full_name: 'stranger/fork' } } },
+        { user: { login: 'stranger' } },
+        { head: { ref: 'align-versions/crafted', repo: { full_name: 'stranger/fork' } } },
+        { head: { ref: 'untrusted/crafted', repo: { full_name: repository } } },
+        { head: { ref: 'align-versions/crafted', repo: null } },
+    ]) {
+        const api = fakeApi([oldPull(), pull(2, 'Bump Stage to 99.0.0', overrides)]);
+        assert.deepEqual(await run({ api, ...options, log() {} }), []);
+        assert.deepEqual(api.writes, []);
+    }
+});
+
+test('allowed authors on non-prefix branches receive only one comment from a trusted replacement', async () => {
+    const older = { ...oldPull(), head: { ref: 'manual/bump', repo: { full_name: repository } } };
+    const api = fakeApi([older, newPull()]);
+    await run({ api, ...options, log() {} });
+    await run({ api, ...options, log() {} });
+    assert.deepEqual(api.writes, [['comment', 1, 'Superseded by #2']]);
+    assert.equal(older.state, 'open');
+});
+
+test('empty or whitespace-only prefixes authorize no replacements or closures', async () => {
+    for (const branchPrefixes of ['', '   ']) {
+        const older = oldPull();
+        const api = fakeApi([older, newPull()]);
+        assert.deepEqual(await run({ api, ...options, branchPrefixes, log() {} }), []);
+        assert.deepEqual(api.writes, []);
+        assert.equal(older.state, 'open');
+    }
 });
 
 test('dry-run logs the plan and makes no writes', async () => {
