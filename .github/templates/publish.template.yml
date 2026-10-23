@@ -52,6 +52,15 @@ on:
       - "**"
     paths:
       - "Source/**"
+  # Batched releases (opt-in, see the Batched releases section of the Workflows README): instead of one
+  # release per merged pull request, release everything merged since the last release once the oldest
+  # pending merge is older than `release-window` minutes. To opt in, uncomment this trigger with a minute
+  # list from .github/scripts/batched-release-cron.sh <repository-name> (so repositories do not all tick
+  # together) and uncomment `release-window` on the Release step below. A `hotfix` label releases on its
+  # merge push; a manual run with the version left empty or 0.0.0 releases everything pending. Keep the
+  # concurrency group above constant and keep `queue: max`.
+  # schedule:
+  #   - cron: "6,21,36,51 * * * *"
 
 permissions:
   issues: write
@@ -76,6 +85,8 @@ jobs:
         with:
           version: ${{ github.event.inputs.version }}
           release-notes: ${{ github.event.inputs.release-notes }}
+          # Opt in to batched releases together with the schedule trigger above.
+          # release-window: 60
 
   publish-dotnet-packages:
     if: needs.release.outputs.publish == 'true'
