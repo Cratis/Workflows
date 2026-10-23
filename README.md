@@ -560,6 +560,49 @@ This workflow is included in the common workflow bootstrap process and is automa
 
 ---
 
+## Batched releases
+
+By default `cratis/release-action` releases every merged pull request on its own. A repository can opt in to **batched releases** instead: the publish workflow also runs on a schedule, and a run releases everything merged since the last release once the oldest pending merge is older than a window. Many small merges then become one release. A scheduled run with nothing pending, or a window that has not elapsed, ends in seconds without releasing. Behavior is unchanged until a repository opts in; the [publish template](/.github/templates/publish.template.yml) carries the opt-in as a commented-out block (Stage is the pilot).
+
+### Opting in
+
+Two edits to `publish.yml` (the template shows both, commented out):
+
+```yaml
+on:
+  schedule:
+    - cron: "6,21,36,51 * * * *"   # minutes from the helper below
+# ...
+      - uses: cratis/release-action@v1
+        with:
+          release-window: 60   # minutes; 0 (the default) releases per merge as before
+```
+
+Keep the concurrency group constant (no per-run or per-commit key) and keep `queue: max`.
+
+### Choosing the minutes
+
+Repositories must not all tick at the same minutes. Run the helper with the repository name and use the line it prints:
+
+```bash
+.github/scripts/batched-release-cron.sh Chronicle
+# 12,27,42,57 * * * *
+```
+
+It derives an offset from 0 to 14 from the name (a checksum, like the weekly package-update schedule) and ticks four times an hour at the offset, +15, +30 and +45. Stage predates the helper and keeps its `7,22,37,52`.
+
+### Releasing sooner
+
+- A pull request labelled `hotfix` releases on its own merge push, without waiting for the window.
+- A manual `workflow_dispatch` run with the version left empty or `0.0.0` releases everything pending now.
+- If a hotfix merges while a `major` pull request is pending, the run started by the hotfix's own merge fails, because the pending major cannot ship inside a hotfix; the other runs only warn.
+
+### Staleness check
+
+GitHub cron is best effort and can skip or lag. [`check-batched-releases.yml`](#check-batched-releasesyml) sweeps hourly and fails when a pending merge is older than the window plus 60 minutes.
+
+---
+
 ## Shared CodeQL configuration
 
 The common workflow bootstrap also propagates **`.github/codeql/codeql-config.yml`** to repositories. The shared config currently excludes rule `ca1031`.
@@ -1020,6 +1063,29 @@ Run it with `--dir <workflows directory> [--repo <name>]`, `--org` (needs `GH_TO
 repositories, no workflow files or release subjects to check, or a release workflow
 that does not parse). A clean run prints
 `checked <n> repositories, <m> workflow files, <k> release subjects, 0 violations`.
+
+---
+
+### `check-batched-releases.yml`
+
+**Triggers:** `pull_request` and `push` to `main` when the check, the cron helper, their
+tests, the publish template or the workflow change; hourly `schedule`; and
+`workflow_dispatch`.
+
+Fails when a repository that releases in [batches](#batched-releases) has releasable
+merges waiting too long. Pull requests and pushes run
+`.github/scripts/tests/batched-releases.test.py` (the template's opt-in block, the cron
+helper and the staleness decision) and the check's `--self-test`. The schedule and manual
+runs sweep every non-archived Cratis repository with `PAT_WORKFLOWS` (read only, no
+writes or dispatches).
+
+The check, `.github/scripts/check-batched-releases.py`, looks for repositories whose
+default-branch `.github/workflows/publish.yml` sets `release-window:` above 0. For each it
+lists the pull requests labelled `major`, `minor` or `patch` merged after the latest
+non-draft release. If the oldest is older than the window plus 60 minutes it prints an
+`::error::` naming the repository, the pull requests and the age; otherwise it prints one
+summary line. Exit codes: `0` ran clean, `1` found a stale repository, `2` could not run
+(GitHub API error, or no repository opts in, so nothing was checked).
 
 ---
 
