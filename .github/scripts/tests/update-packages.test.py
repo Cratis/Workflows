@@ -12,6 +12,8 @@ import tempfile
 import textwrap
 import unittest
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = (ROOT / ".github/workflows/update-packages.yml").read_text()
 STEPS = dict(re.findall(r"^      - name: ([^\n]+)\n(.*?)(?=^      - name: |\Z)", SOURCE, re.M | re.S))
@@ -26,6 +28,9 @@ CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0"
 FREEZE = "Freeze pull request candidate before builds"
 PUBLISH = "Publish validated pull request"
 LEGACY = "Commit and push changes"
+DIRECT_FREEZE = "Freeze direct candidate after builds"
+EXPORT = "Export validated candidate"
+APPLY = "Apply validated candidate"
 NPM_UPDATES = ["Snapshot NPM peer pins", "Update NPM packages", "Synchronize NPM peers and install"]
 UPDATES = ["Update NuGet packages", *NPM_UPDATES, "Update Gradle packages", "Update Mix packages"]
 BUILDS = ["Build .NET", "Build NPM", "Build Gradle", "Build Mix"]
@@ -64,14 +69,24 @@ args = sys.argv[1:]
 with open(os.environ["COMMAND_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\n")
 if name == "git":
-    forbidden = {"rebase", "reset", "--amend", "--force", "--force-with-lease", "-f", "pull"}
+    forbidden = {"reset", "--amend", "--force", "--force-with-lease", "-f"}
+    if os.environ.get("PUBLICATION_MODE") != "direct":
+        forbidden.update({"rebase", "pull"})
     assert not forbidden.intersection(args), args
     if args[0] == "push":
         assert len(args) == 3 and args[1] == "origin", args
-        assert args[2].endswith(":refs/heads/automation/package-update-123-1"), args
-        assert not args[2].startswith("+"), args
+        if os.environ.get("PUBLICATION_MODE") == "direct":
+            assert args[2] == "HEAD", args
+        else:
+            assert args[2].endswith(":refs/heads/automation/package-update-123-1"), args
+            assert not args[2].startswith("+"), args
         if os.environ.get("FAIL_PUSH") == "1":
             sys.exit(24)
+        if os.environ.get("REJECT_FIRST_PUSH") == "1":
+            marker = Path(os.environ["RUNNER_TEMP"]) / "rejected-push"
+            if not marker.exists():
+                marker.touch()
+                sys.exit(24)
     if args[0] == "ls-remote" and os.environ.get("FAIL_BRANCH_LOOKUP") == "1" and "--exit-code" not in args:
         sys.exit(17)
     status = subprocess.run([os.environ["REAL_GIT"], *args]).returncode
@@ -95,6 +110,10 @@ if name == "gh":
         open_prs = json.loads(Path(os.environ["OPEN_PRS"]).read_text()) if Path(os.environ["OPEN_PRS"]).exists() else []
         closed = Path(os.environ["CLOSED_PRS"])
         closed_numbers = [json.loads(line)["number"] for line in closed.read_text().splitlines()] if closed.exists() else []
+        if args[1] == "repos/Cratis/Fixture/git/ref/heads/main":
+            assert args == ["api", args[1], "--jq", ".object.sha"], args
+            print(subprocess.check_output([*remote_git, "rev-parse", "refs/heads/main"], text=True).strip())
+            sys.exit(0)
         if args[1] == "--paginate":
             assert args == ["api", "--paginate", "repos/Cratis/Fixture/pulls?state=open&per_page=100", "--jq",
                             '.[] | [.number, .html_url, .head.ref, .head.sha, (.head.repo.full_name // "-"), .base.ref] | @tsv'], args
@@ -236,6 +255,128 @@ else:
 
 
 class UpdatePackagesTests(unittest.TestCase):
+    def assert_credential_boundary(self, workflow):
+        jobs = workflow["jobs"]
+        self.assertEqual(set(jobs), {"update", "publish"})
+        self.assertNotIn("PAT_WORKFLOWS", json.dumps(jobs["update"]))
+        for job in jobs.values():
+            self.assertEqual(job["runs-on"], "${{ inputs.runs-on }}")
+        update_checkout = jobs["update"]["steps"][0]
+        self.assertIs(update_checkout["with"]["persist-credentials"], False)
+        self.assertEqual(update_checkout["with"]["token"], "${{ github.token }}")
+        self.assertEqual(jobs["publish"]["needs"], "update")
+        self.assertEqual(jobs["publish"]["if"], "needs.update.outputs.changed == 'true'")
+        checkout = jobs["publish"]["steps"][0]
+        self.assertEqual(checkout["with"]["ref"], "${{ needs.update.outputs.base }}")
+        for step in jobs["publish"]["steps"]:
+            self.assert_publication_step(step)
+        upload = next(step for step in jobs["update"]["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["with"]["retention-days"], 1)
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def assert_publication_step(self, step):
+        self.assertNotIn("post-update-command", json.dumps(step))
+        self.assertNotRegex(step.get("run", ""), r"(?im)(?:^|[\s/;|&])(dotnet|yarn|npm|npx|gradlew?|mix|bash|sh|python3?|node|source|eval|curl|wget)\b")
+        self.assertNotRegex(step.get("run", ""), r"(?m)^\s*(?:\./|scripts/)")
+        if "uses" in step:
+            self.assertRegex(step["uses"], r"^actions/(checkout|download-artifact)@[0-9a-f]{40}$")
+
+    def test_yaml_credential_boundary(self):
+        self.assert_credential_boundary(yaml.safe_load(SOURCE))
+
+    def test_credential_boundary_detects_seeded_violations(self):
+        # Plant each forbidden behavior independently: this guard must fail red.
+        for violation in ("secret", "persist", "toolchain", "hook", "script"):
+            with self.subTest(violation=violation):
+                workflow = yaml.safe_load(SOURCE)
+                if violation == "secret":
+                    workflow["jobs"]["update"]["env"] = {"GH_TOKEN": "${{ secrets.PAT_WORKFLOWS }}"}
+                elif violation == "persist":
+                    workflow["jobs"]["update"]["steps"][0]["with"]["persist-credentials"] = True
+                else:
+                    command = {"toolchain": "dotnet build", "hook": "${{ inputs.post-update-command }}",
+                               "script": "./publish.sh"}[violation]
+                    workflow["jobs"]["publish"]["steps"].append({"run": command})
+                with self.assertRaises(AssertionError):
+                    self.assert_credential_boundary(workflow)
+
+    def test_direct_bundle_round_trip_preserves_postbuild_tree_and_message(self):
+        self.env.update(PUBLICATION_MODE="direct", DIRTY_BUILD="1")
+        self.assertTrue(self.pipeline(), self.last_result.stderr)
+        self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", "main"), self.env["CANDIDATE_COMMIT"])
+        self.assertEqual(self.git("show", "HEAD:Dockerfile"), "unvalidated build mutation")
+        self.assertEqual(self.git("show", "HEAD:unrelated-output.tmp"), "not for publication")
+        self.assertEqual(self.git("log", "-1", "--format=%s"), "chore: update NuGet and NPM and Gradle and Mix packages")
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.base)
+        self.assertFalse(self.pr.exists())
+
+    def test_direct_mode_retries_rejected_push_after_bundle_round_trip(self):
+        self.env.update(PUBLICATION_MODE="direct", REJECT_FIRST_PUSH="1")
+        self.assertTrue(self.pipeline(), self.last_result.stderr)
+        self.assertEqual(len([c for c in self.calls("git") if c[1] == "push"]), 2)
+        self.assertIn(["git", "pull", "--rebase", "origin", "main"], self.calls("git"))
+
+    def export_to_fresh_checkout(self):
+        self.assertTrue(self.prepare(), self.last_result.stderr)
+        self.assert_step_ok(EXPORT)
+        self.update_repo = self.repo
+        self.repo = self.root / "publisher"
+        self.git("clone", str(self.remote), str(self.repo), cwd=self.root)
+        self.git("checkout", "--detach", self.base)
+
+    def test_artifact_metadata_mismatches_fail_before_publication(self):
+        self.export_to_fresh_checkout()
+        metadata = self.root / "package-candidate/metadata"
+        original = metadata.read_text()
+        for index in range(7):
+            with self.subTest(field=index):
+                fields = original.splitlines()
+                fields[index] = "mismatch"
+                metadata.write_text("\n".join(fields) + "\n")
+                self.assertNotEqual(self.run_step(APPLY), 0)
+                self.assert_not_published()
+        metadata.write_text(original)
+        self.assert_step_ok(APPLY)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.env["CANDIDATE_COMMIT"])
+
+    def test_artifact_corrupt_bundle_fails_before_publication(self):
+        self.export_to_fresh_checkout()
+        (self.root / "package-candidate/candidate.bundle").write_text("not a bundle\n")
+        self.assertNotEqual(self.run_step(APPLY), 0)
+        self.assert_not_published()
+
+    def test_bundle_commit_and_tree_must_match_metadata_and_outputs(self):
+        self.export_to_fresh_checkout()
+        metadata = self.root / "package-candidate/metadata"
+        original = metadata.read_text()
+        for index, output in ((2, "CANDIDATE_COMMIT"), (3, "CANDIDATE_TREE")):
+            with self.subTest(output=output):
+                fields = original.splitlines()
+                expected = self.env[output]
+                self.env[output] = fields[index] = "f" * 40
+                metadata.write_text("\n".join(fields) + "\n")
+                self.assertNotEqual(self.run_step(APPLY), 0)
+                self.assert_not_published()
+                self.env[output] = expected
+        metadata.write_text(original)
+        self.assert_step_ok(APPLY)
+
+    def test_artifact_requires_exact_checkout_base(self):
+        self.export_to_fresh_checkout()
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("commit", "--allow-empty", "-m", "wrong base")
+        self.assertNotEqual(self.run_step(APPLY), 0)
+        self.assert_not_published()
+
+    def test_noop_artifact_records_no_changes_without_bundle(self):
+        self.assert_step_ok(PREFLIGHT)
+        self.env["CHANGED"] = "false"
+        self.assert_step_ok(EXPORT)
+        directory = self.root / "package-candidate"
+        self.assertEqual((directory / "metadata").read_text().splitlines()[-1], "false")
+        self.assertFalse((directory / "candidate.bundle").exists())
+
     def test_setup_installs_caller_sdk_pin_without_changing_selection_policy(self):
         setup = STEPS["Setup .NET"]
         self.assertIn("dotnet-version: ${{ env.DOTNET_VERSION }}", setup)
@@ -288,7 +429,20 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
+    def ensure_publisher(self):
+        if hasattr(self, "update_repo"):
+            return True
+        if self.run_step(EXPORT):
+            return False
+        self.update_repo = self.repo
+        self.repo = self.root / "publisher"
+        self.git("clone", str(self.remote), str(self.repo), cwd=self.root)
+        self.git("checkout", "--detach", self.env["EXPECTED_BASE"])
+        return self.run_step(APPLY) == 0
+
     def run_step(self, name):
+        if name in (PUBLISH, LEGACY) and not self.ensure_publisher():
+            return self.last_result.returncode
         output = self.root / "step-output"
         output.write_text("")
         result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", shell(name)],
@@ -296,16 +450,21 @@ class UpdatePackagesTests(unittest.TestCase):
                                 text=True, capture_output=True)
         self.last_result = result
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.record_outputs(name, values)
+        return result.returncode
+
+    def record_outputs(self, name, values):
         if name == PREFLIGHT:
             self.env.update(EXPECTED_BASE=values.get("base", ""), BASE_BRANCH=values.get("base_branch", ""))
         if name == "Snapshot NPM peer pins":
             self.env["PEER_UPDATE_DIR"] = values.get("directory", "")
         if name == CHANGES:
             self.package_changes = values.get("changed")
-        if name == FREEZE:
+        if name in (FREEZE, DIRECT_FREEZE):
             self.changed = values.get("changed") == "true"
+            self.env["CHANGED"] = "true" if self.changed else "false"
+        if name in (FREEZE, EXPORT):
             self.env.update(CANDIDATE_COMMIT=values.get("commit", ""), CANDIDATE_TREE=values.get("tree", ""))
-        return result.returncode
 
     def assert_step_ok(self, name):
         status = self.run_step(name)
@@ -318,11 +477,16 @@ class UpdatePackagesTests(unittest.TestCase):
                 return status
         return 0
 
-    def prepare(self, hook="printf 'updated image\\n' > Dockerfile", builds=True):
-        # Model Actions' default success() gate; structural tests below protect that gate.
-        for name in [PREFLIGHT, *UPDATES]:
+    def run_steps(self, names):
+        for name in names:
             if self.run_step(name):
                 return False
+        return True
+
+    def prepare(self, hook="printf 'updated image\\n' > Dockerfile", builds=True):
+        # Model Actions' default success() gate; structural tests below protect that gate.
+        if not self.run_steps([PREFLIGHT, *UPDATES]):
+            return False
         if hook:
             self.env["POST_UPDATE_COMMAND"] = hook
             if self.run_step(HOOK):
@@ -333,18 +497,23 @@ class UpdatePackagesTests(unittest.TestCase):
             # Freeze, builds and publication are all gated on steps.changes.outputs.changed.
             self.changed = False
             return True
-        if self.run_step(FREEZE):
+        return self.prepare_changed(builds)
+
+    def prepare_changed(self, builds):
+        if self.env["PUBLICATION_MODE"] == "pull-request" and self.run_step(FREEZE):
             return False
-        if builds:
-            for name in BUILDS:
-                if self.run_step(name):
-                    return False
+        if builds and not self.run_steps(BUILDS):
+            return False
+        if self.env["PUBLICATION_MODE"] == "direct":
+            self.env.update(UPDATE_NUGET="true", UPDATE_NPM="true", UPDATE_GRADLE="true", UPDATE_MIX="true")
+            return self.run_step(DIRECT_FREEZE) == 0
         return True
 
     def pipeline(self, **kwargs):
         if not self.prepare(**kwargs):
             return False
-        return not self.changed or self.run_step(PUBLISH) == 0
+        publish = LEGACY if self.env["PUBLICATION_MODE"] == "direct" else PUBLISH
+        return not self.changed or self.run_step(publish) == 0
 
     def calls(self, name=None):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
@@ -372,11 +541,11 @@ class UpdatePackagesTests(unittest.TestCase):
             self.assertIn("if: steps.detect.outputs.update_", STEPS[name])
         self.assertIn("if: inputs.post-update-command != ''", STEPS[HOOK])
         self.assertIn("if: inputs.publication-mode == 'pull-request'", STEPS[FREEZE])
-        self.assertIn("if: success() && inputs.publication-mode == 'pull-request' && steps.candidate.outputs.changed == 'true'", STEPS[PUBLISH])
+        self.assertIn("if: inputs.publication-mode == 'pull-request'", STEPS[PUBLISH])
         self.assertIn("if: inputs.publication-mode == 'direct'", STEPS[LEGACY])
         self.assertNotIn("continue-on-error:", SOURCE)
         self.assertNotIn("always()", SOURCE)
-        for name in [PREFLIGHT, HOOK, CHANGES, FREEZE, PUBLISH, CACHE_KEY, *NPM_UPDATES]:
+        for name in [PREFLIGHT, HOOK, CHANGES, FREEZE, DIRECT_FREEZE, EXPORT, APPLY, PUBLISH, LEGACY, CACHE_KEY, *NPM_UPDATES]:
             self.assertNotIn("${{", shell(name))
         inputs = SOURCE.split("    inputs:\n", 1)[1].split("    secrets:", 1)[0]
         for name, default in [("publication-mode", "direct"), ("post-update-command", "''"),
@@ -387,11 +556,12 @@ class UpdatePackagesTests(unittest.TestCase):
             block = re.split(r"\n      [a-z]", inputs.split(f"      {name}:\n", 1)[1])[0]
             self.assertIn(f"default: {default}", block)
         self.assertIn("runs-on: ${{ inputs.runs-on }}", SOURCE)
-        self.assertIn("token: ${{ secrets.PAT_WORKFLOWS || github.token }}", STEPS["Checkout repository"])
+        self.assertIn("token: ${{ github.token }}", STEPS["Checkout repository"])
+        self.assertIn("token: ${{ secrets.PAT_WORKFLOWS || github.token }}", STEPS["Checkout publication base"])
         self.assertIsNone(re.search(r"^\s*permissions:", SOURCE, re.M))
 
     def test_shell_syntax(self):
-        for name in [PREFLIGHT, HOOK, CHANGES, FREEZE, PUBLISH, CACHE_KEY, *NPM_UPDATES]:
+        for name in [PREFLIGHT, HOOK, CHANGES, FREEZE, DIRECT_FREEZE, EXPORT, APPLY, PUBLISH, LEGACY, CACHE_KEY, *NPM_UPDATES]:
             with self.subTest(step=name):
                 result = subprocess.run(["/bin/bash", "-n"], input=shell(name), text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -539,12 +709,13 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
         self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
 
-    def test_direct_default_preflight_has_no_git_or_api_effects(self):
+    def test_direct_default_preflight_only_records_git_base(self):
         self.env["PUBLICATION_MODE"] = "direct"
         self.assert_step_ok(PREFLIGHT)
-        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.calls("gh"), [])
         self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
-        # Never execute the inherited legacy push/rebase loop locally.
+        self.assertEqual(self.env["EXPECTED_BASE"], self.base)
+        self.assertEqual(self.env["BASE_BRANCH"], "main")
 
     def test_exact_candidate_contains_hook_and_updates_but_not_artifacts(self):
         (self.repo / "unrelated-before.tmp").write_text("unrelated")
@@ -557,10 +728,11 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", "main"), self.base)
         self.assertEqual(self.git("diff", "--name-only", self.base, commit), "Dockerfile\ndependencies.txt")
         self.assertEqual(self.git("show", f"{commit}:Dockerfile"), "updated image")
-        self.assertTrue((self.repo / "unrelated-before.tmp").exists())
-        self.assertTrue((self.repo / "unrelated-output.tmp").exists())
-        self.assertTrue((self.repo / ".ai-work/notes").exists())
-        self.assertTrue((self.repo / "dist/cache").exists())
+        self.assertTrue((self.update_repo / "unrelated-before.tmp").exists())
+        self.assertTrue((self.update_repo / "unrelated-output.tmp").exists())
+        self.assertTrue((self.update_repo / ".ai-work/notes").exists())
+        self.assertTrue((self.update_repo / "dist/cache").exists())
+        self.assertFalse((self.repo / "unrelated-output.tmp").exists())
         calls = self.calls()
         push = next(i for i, c in enumerate(calls) if c[:2] == ["git", "push"])
         for command in [["dotnet", "build", "--configuration", "Release"], ["yarn", "ci"],
@@ -631,11 +803,11 @@ class UpdatePackagesTests(unittest.TestCase):
 
     def test_builds_commit_and_publication_are_gated_on_package_changes(self):
         gate = "steps.changes.outputs.changed == 'true'"
-        for name in [FREEZE, *BUILDS, LEGACY]:
+        for name in [FREEZE, *BUILDS, DIRECT_FREEZE]:
             with self.subTest(step=name):
                 self.assertIn(gate, re.search(r"^        if: (.*)$", STEPS[name], re.M)[1])
-        # The publish step depends on the frozen candidate, which only exists after a change.
-        self.assertIn("steps.candidate.outputs.changed == 'true'", STEPS[PUBLISH])
+        # Publication depends on a successfully exported, changed candidate.
+        self.assertIn("if: needs.update.outputs.changed == 'true'", SOURCE)
         # A caller's hook can produce the only change, so it is never skipped as a no-op.
         self.assertNotIn("steps.changes", STEPS[HOOK])
         self.assertNotIn("if:", STEPS[CHANGES].split("run:", 1)[0])
@@ -1170,7 +1342,7 @@ class UpdatePackagesTests(unittest.TestCase):
         for number in (5, 6, 8, 9):
             self.assertIn(f"::notice::Leaving https://github.com/Cratis/Fixture/pull/{number} unchanged",
                           self.last_result.stdout)
-        fetched = [c[-1] for c in self.calls("git") if c[1] == "fetch"]
+        fetched = [c[-1] for c in self.calls("git") if c[1] == "fetch" and "origin" in c]
         self.assertEqual(fetched, [f"refs/heads/automation/package-update-{n}-1" for n in (5, 6, 8, 9)])
 
     def test_pr_changed_after_lookup_is_left_open(self):

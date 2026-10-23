@@ -207,10 +207,25 @@ mode's inherited `git add -A` and rebase loop. Use `pull-request` for reviewed d
 
 ### Tokens, permissions and operational limits
 
-The secret remains optional: checkout and gh use `PAT_WORKFLOWS || github.token`.
+The secret remains optional and the caller interface is unchanged. Only the
+`publish` job uses `PAT_WORKFLOWS || github.token`, for its fresh checkout and GitHub
+writes. The `update` job checks out with `github.token` and
+`persist-credentials: false`; its API reads use that built-in token, never the PAT.
+All package tooling, the post-update command and builds stay in `update`. A
+one-day artifact carries the frozen commit as a Git bundle plus base, branch,
+publication options and PR text. After a successful update with changes, `publish`
+checks out the recorded base and verifies the artifact's metadata, parent, commit
+and tree before applying it. It runs only inline Git/gh publication logic, never
+repository scripts or package tooling. Direct mode still commits after builds and
+retries rejected pushes with its existing rebase loop; PR mode still freezes before
+builds and never rebases.
+
 No permissions block or repository/organization setting is changed by the reusable
-workflow. Provision Bash, Git and `gh` on the chosen runner in addition to the existing
-ecosystem prerequisites.
+workflow. The built-in token must have repository read access even when publishing
+uses a PAT. Provision Bash, Git and `gh` on the chosen runner in addition to the
+existing ecosystem prerequisites. Use isolated, ephemeral runners: splitting jobs
+does not make a persistent self-hosted runner safe if dependency code can leave
+processes or alter tools for a later job.
 
 - A classic PAT needs `repo`; a fine-grained PAT needs repository **Contents: write**,
   **Pull requests: write**, and **Metadata: read**, including access to the selected

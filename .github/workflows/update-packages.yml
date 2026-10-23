@@ -93,18 +93,21 @@ on:
         required: false
 
 jobs:
-  update-packages:
+  update:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 60
+    outputs:
+      changed: ${{ steps.export.outputs.changed }}
+      base: ${{ steps.publication.outputs.base }}
+      base_branch: ${{ steps.publication.outputs.base_branch }}
+      commit: ${{ steps.export.outputs.commit }}
+      tree: ${{ steps.export.outputs.tree }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Callers pass PAT_WORKFLOWS where the organization secret is
-          # available. Private repositories on plans without organization-level
-          # secret support cannot resolve it (it evaluates to an empty string),
-          # so fall back to the workflow's own GITHUB_TOKEN there.
-          token: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          token: ${{ github.token }}
+          persist-credentials: false
           fetch-depth: 0
 
       # On a self-hosted runner, keep NuGet packages on the runner's scratch volume beside the
@@ -121,13 +124,17 @@ jobs:
         env:
           PUBLICATION_MODE: ${{ inputs.publication-mode }}
           PR_LABEL: ${{ inputs.pull-request-label }}
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          GH_TOKEN: ${{ github.token }}
           CALLER_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           case "$PUBLICATION_MODE" in
             direct)
               test -z "$PR_LABEL" || { echo "Labels require pull-request mode" >&2; exit 1; }
+              base=$(git rev-parse HEAD)
+              base_branch=$(git rev-parse --abbrev-ref HEAD)
+              echo "base=$base" >> "$GITHUB_OUTPUT"
+              echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
               exit 0 ;;
             pull-request) ;;
             *) echo "Invalid publication-mode" >&2; exit 1 ;;
@@ -140,8 +147,10 @@ jobs:
           base_branch=$(gh api "repos/$CALLER_REPOSITORY" --jq .default_branch)
           git check-ref-format "refs/heads/$base_branch"
           base=$(git rev-parse HEAD)
-          remote_base=$(git ls-remote --exit-code origin "refs/heads/$base_branch")
-          test "$remote_base" = "$base"$'\t'"refs/heads/$base_branch"
+          # Checkout deliberately leaves no Git credential behind. Use the
+          # step-scoped built-in token for this read, including private callers.
+          remote_base=$(gh api "repos/$CALLER_REPOSITORY/git/ref/heads/$base_branch" --jq .object.sha)
+          test "$remote_base" = "$base"
           git diff --exit-code
           git diff --cached --exit-code
           echo "base=$base" >> "$GITHUB_OUTPUT"
@@ -802,16 +811,181 @@ jobs:
         working-directory: ${{ steps.detect.outputs.mix_dir }}
         run: mix compile
 
+      # Direct mode historically commits after builds, including their tracked and
+      # unignored output. Keep that behavior; only PR mode freezes before builds.
+      - name: Freeze direct candidate after builds
+        id: direct_candidate
+        if: inputs.publication-mode == 'direct' && steps.changes.outputs.changed == 'true'
+        shell: bash
+        env:
+          UPDATE_NUGET: ${{ steps.detect.outputs.update_nuget }}
+          UPDATE_NPM: ${{ steps.detect.outputs.update_npm }}
+          UPDATE_GRADLE: ${{ steps.detect.outputs.update_gradle }}
+          UPDATE_MIX: ${{ steps.detect.outputs.update_mix }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No package updates found. Nothing to commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          updated_types=""
+          if [ "$UPDATE_NUGET" == "true" ]; then updated_types="NuGet"; fi
+          if [ "$UPDATE_NPM" == "true" ]; then
+            updated_types="${updated_types:+$updated_types and }NPM"
+          fi
+          if [ "$UPDATE_GRADLE" == "true" ]; then
+            updated_types="${updated_types:+$updated_types and }Gradle"
+          fi
+          if [ "$UPDATE_MIX" == "true" ]; then
+            updated_types="${updated_types:+$updated_types and }Mix"
+          fi
+          git add -A
+          git commit -m "chore: update ${updated_types} packages"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Export validated candidate
+        id: export
+        shell: bash
+        env:
+          EXPECTED_BASE: ${{ steps.publication.outputs.base }}
+          BASE_BRANCH: ${{ steps.publication.outputs.base_branch }}
+          PUBLICATION_MODE: ${{ inputs.publication-mode }}
+          PR_LABEL: ${{ inputs.pull-request-label }}
+          CHANGED: ${{ inputs.publication-mode == 'pull-request' && steps.candidate.outputs.changed || steps.direct_candidate.outputs.changed || 'false' }}
+          CANDIDATE_COMMIT: ${{ steps.candidate.outputs.commit }}
+          CANDIDATE_TREE: ${{ steps.candidate.outputs.tree }}
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/package-candidate"
+          mkdir "$directory"
+          commit=''
+          tree=''
+          if [ "$CHANGED" = true ]; then
+            commit=$(git rev-parse HEAD)
+            tree=$(git rev-parse 'HEAD^{tree}')
+            parent=$(git rev-parse HEAD^)
+            test "$parent" = "$EXPECTED_BASE"
+            if [ "$PUBLICATION_MODE" = pull-request ]; then
+              test "$commit" = "$CANDIDATE_COMMIT"
+              test "$tree" = "$CANDIDATE_TREE"
+            fi
+            # Builds must not mutate a PR candidate or its index. Direct mode has
+            # already committed its post-build tree, just as before the split.
+            git diff --exit-code
+            git diff --cached --exit-code
+            git bundle create "$directory/candidate.bundle" "$EXPECTED_BASE..HEAD"
+          fi
+          printf '%s\n' "$EXPECTED_BASE" "$BASE_BRANCH" "$commit" "$tree" \
+            "$PUBLICATION_MODE" "$PR_LABEL" "$CHANGED" > "$directory/metadata"
+          printf '%s\n' 'chore: update packages' > "$directory/title"
+          printf '%s\n' $'## Changed\n\n- Update dependency versions and required runtime compatibility settings.' > "$directory/body"
+          {
+            echo "changed=$CHANGED"
+            echo "commit=$commit"
+            echo "tree=$tree"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload validated candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/package-candidate/
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout publication base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          ref: ${{ needs.update.outputs.base }}
+          fetch-depth: 0
+
+      - name: Download validated candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/package-candidate/
+
+      # No repository scripts or package tooling may run in this job. A bundle
+      # preserves the exact validated commit, unlike a patch re-created by git am.
+      - name: Apply validated candidate
+        shell: bash
+        env:
+          EXPECTED_BASE: ${{ needs.update.outputs.base }}
+          BASE_BRANCH: ${{ needs.update.outputs.base_branch }}
+          CANDIDATE_COMMIT: ${{ needs.update.outputs.commit }}
+          CANDIDATE_TREE: ${{ needs.update.outputs.tree }}
+          PUBLICATION_MODE: ${{ inputs.publication-mode }}
+          PR_LABEL: ${{ inputs.pull-request-label }}
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/package-candidate"
+          [[ "$EXPECTED_BASE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_TREE" =~ ^[0-9a-f]{40}$ ]]
+          git check-ref-format "refs/heads/$BASE_BRANCH"
+          {
+            read -r base
+            read -r branch
+            read -r commit
+            read -r tree
+            read -r mode
+            read -r label
+            read -r changed
+            if read -r _; then
+              echo "Unexpected candidate metadata" >&2
+              exit 1
+            fi
+          } < "$directory/metadata"
+          test "$base" = "$EXPECTED_BASE"
+          test "$branch" = "$BASE_BRANCH"
+          test "$commit" = "$CANDIDATE_COMMIT"
+          test "$tree" = "$CANDIDATE_TREE"
+          test "$mode" = "$PUBLICATION_MODE"
+          test "$label" = "$PR_LABEL"
+          test "$changed" = true
+          title=$(< "$directory/title")
+          body=$(< "$directory/body")
+          test "$title" = 'chore: update packages'
+          test "$body" = $'## Changed\n\n- Update dependency versions and required runtime compatibility settings.'
+          head=$(git rev-parse HEAD)
+          test "$head" = "$EXPECTED_BASE"
+          git bundle verify "$directory/candidate.bundle"
+          git fetch "$directory/candidate.bundle" HEAD
+          fetched=$(git rev-parse FETCH_HEAD)
+          test "$fetched" = "$CANDIDATE_COMMIT"
+          parent=$(git rev-parse "$fetched^")
+          tree=$(git rev-parse "$fetched^{tree}")
+          test "$parent" = "$EXPECTED_BASE"
+          test "$tree" = "$CANDIDATE_TREE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git -c core.hooksPath=/dev/null checkout --detach "$fetched"
+          if [ "$PUBLICATION_MODE" = direct ] && [ "$BASE_BRANCH" != HEAD ]; then
+            git -c core.hooksPath=/dev/null switch -C "$BASE_BRANCH"
+          fi
+          git diff --exit-code
+          git diff --cached --exit-code
+
       - name: Publish validated pull request
-        if: success() && inputs.publication-mode == 'pull-request' && steps.candidate.outputs.changed == 'true'
+        if: inputs.publication-mode == 'pull-request'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
           CALLER_REPOSITORY: ${{ github.repository }}
-          BASE_BRANCH: ${{ steps.publication.outputs.base_branch }}
-          EXPECTED_BASE: ${{ steps.publication.outputs.base }}
-          CANDIDATE_COMMIT: ${{ steps.candidate.outputs.commit }}
-          CANDIDATE_TREE: ${{ steps.candidate.outputs.tree }}
+          BASE_BRANCH: ${{ needs.update.outputs.base_branch }}
+          EXPECTED_BASE: ${{ needs.update.outputs.base }}
+          CANDIDATE_COMMIT: ${{ needs.update.outputs.commit }}
+          CANDIDATE_TREE: ${{ needs.update.outputs.tree }}
           PR_LABEL: ${{ inputs.pull-request-label }}
         run: |
           set -euo pipefail
@@ -1024,50 +1198,11 @@ jobs:
           note=''
 
       - name: Commit and push changes
-        if: inputs.publication-mode == 'direct' && steps.changes.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
+        if: inputs.publication-mode == 'direct'
+        shell: bash
         run: |
-          # Check if there are any changes
-          if git diff --quiet && git diff --cached --quiet; then
-            echo "No package updates found. Nothing to commit."
-            exit 0
-          fi
-
-          # Configure git identity
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Build commit message from what was updated
-          updated_types=""
-          if [ "${{ steps.detect.outputs.update_nuget }}" == "true" ]; then
-            updated_types="NuGet"
-          fi
-          if [ "${{ steps.detect.outputs.update_npm }}" == "true" ]; then
-            if [ -n "$updated_types" ]; then
-              updated_types="$updated_types and NPM"
-            else
-              updated_types="NPM"
-            fi
-          fi
-          if [ "${{ steps.detect.outputs.update_gradle }}" == "true" ]; then
-            if [ -n "$updated_types" ]; then
-              updated_types="$updated_types and Gradle"
-            else
-              updated_types="Gradle"
-            fi
-          fi
-          if [ "${{ steps.detect.outputs.update_mix }}" == "true" ]; then
-            if [ -n "$updated_types" ]; then
-              updated_types="$updated_types and Mix"
-            else
-              updated_types="Mix"
-            fi
-          fi
-
-          git add -A
-          git commit -m "chore: update ${updated_types} packages"
-
+          set -euo pipefail
+          # The frozen direct-mode commit was built and transferred by update.
           # The default branch can move between checkout and push - especially while
           # many repositories run this workflow around the same time. A plain push then
           # fails with a non-fast-forward rejection, losing the whole update run. Rebase
