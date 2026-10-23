@@ -31,6 +31,7 @@ LEGACY = "Commit and push changes"
 DIRECT_FREEZE = "Freeze direct candidate after builds"
 EXPORT = "Export validated candidate"
 APPLY = "Apply validated candidate"
+AUTH = "Check publication authentication"
 NPM_UPDATES = ["Snapshot NPM peer pins", "Update NPM packages", "Synchronize NPM peers and install"]
 UPDATES = ["Update NuGet packages", *NPM_UPDATES, "Update Gradle packages", "Update Mix packages"]
 BUILDS = ["Build .NET", "Build NPM", "Build Gradle", "Build Mix"]
@@ -258,7 +259,9 @@ class UpdatePackagesTests(unittest.TestCase):
     def assert_credential_boundary(self, workflow):
         jobs = workflow["jobs"]
         self.assertEqual(set(jobs), {"update", "publish"})
-        self.assertNotIn("PAT_WORKFLOWS", json.dumps(jobs["update"]))
+        for credential in ("PAT_WORKFLOWS", "AUTOMATION_APP_PRIVATE_KEY", "CRATIS_AUTOMATION_APP_ID", "app-token"):
+            self.assertNotIn(credential, json.dumps(jobs["update"]))
+        self.assertNotIn("outputs", jobs["publish"])
         for job in jobs.values():
             self.assertEqual(job["runs-on"], "${{ inputs.runs-on }}")
         update_checkout = jobs["update"]["steps"][0]
@@ -266,7 +269,7 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertEqual(update_checkout["with"]["token"], "${{ github.token }}")
         self.assertEqual(jobs["publish"]["needs"], "update")
         self.assertEqual(jobs["publish"]["if"], "needs.update.outputs.changed == 'true'")
-        checkout = jobs["publish"]["steps"][0]
+        checkout = next(step for step in jobs["publish"]["steps"] if step["name"] == "Checkout publication base")
         self.assertEqual(checkout["with"]["ref"], "${{ needs.update.outputs.base }}")
         for step in jobs["publish"]["steps"]:
             self.assert_publication_step(step)
@@ -283,18 +286,20 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotRegex(step.get("run", ""), r"(?im)(?:^|[\s/;|&])(dotnet|yarn|npm|npx|gradlew?|mix|bash|sh|python3?|node|source|eval|curl|wget)\b")
         self.assertNotRegex(step.get("run", ""), r"(?m)^\s*(?:\./|scripts/)")
         if "uses" in step:
-            self.assertRegex(step["uses"], r"^actions/(checkout|download-artifact)@[0-9a-f]{40}$")
+            self.assertRegex(step["uses"], r"^actions/(checkout|download-artifact|create-github-app-token)@[0-9a-f]{40}$")
 
     def test_yaml_credential_boundary(self):
         self.assert_credential_boundary(yaml.safe_load(SOURCE))
 
     def test_credential_boundary_detects_seeded_violations(self):
         # Plant each forbidden behavior independently: this guard must fail red.
-        for violation in ("secret", "persist", "toolchain", "hook", "script"):
+        for violation in ("secret", "app-key", "app-token", "persist", "toolchain", "hook", "script"):
             with self.subTest(violation=violation):
                 workflow = yaml.safe_load(SOURCE)
-                if violation == "secret":
-                    workflow["jobs"]["update"]["env"] = {"GH_TOKEN": "${{ secrets.PAT_WORKFLOWS }}"}
+                if violation in ("secret", "app-key", "app-token"):
+                    credential = {"secret": "secrets.PAT_WORKFLOWS", "app-key": "secrets.AUTOMATION_APP_PRIVATE_KEY",
+                                  "app-token": "steps.app-token.outputs.token"}[violation]
+                    workflow["jobs"]["update"]["env"] = {"GH_TOKEN": "${{ " + credential + " }}"}
                 elif violation == "persist":
                     workflow["jobs"]["update"]["steps"][0]["with"]["persist-credentials"] = True
                 else:
@@ -303,6 +308,63 @@ class UpdatePackagesTests(unittest.TestCase):
                     workflow["jobs"]["publish"]["steps"].append({"run": command})
                 with self.assertRaises(AssertionError):
                     self.assert_credential_boundary(workflow)
+
+    def test_publication_authentication_selects_app_only_for_fully_configured_pr_mode(self):
+        for mode in ("pull-request", "direct"):
+            for configured in (False, True):
+                with self.subTest(mode=mode, configured=configured):
+                    self.env.update(PUBLICATION_MODE=mode, APP_ID="123" if configured else "",
+                                    HAS_APP_PRIVATE_KEY=str(configured).lower())
+                    self.assert_step_ok(AUTH)
+                    expected = str(configured and mode == "pull-request").lower()
+                    self.assertEqual((self.root / "step-output").read_text(), f"use-app={expected}\n")
+                    self.assertNotIn("123", self.last_result.stdout + self.last_result.stderr)
+
+    def test_partial_app_configuration_fails_in_both_modes(self):
+        for mode in ("pull-request", "direct"):
+            for app_id, has_key in (("123", "false"), ("", "true")):
+                with self.subTest(mode=mode, app_id=app_id, has_key=has_key):
+                    self.env.update(PUBLICATION_MODE=mode, APP_ID=app_id, HAS_APP_PRIVATE_KEY=has_key)
+                    self.assertEqual(self.run_step(AUTH), 1)
+                    self.assertIn("Set both CRATIS_AUTOMATION_APP_ID and AUTOMATION_APP_PRIVATE_KEY, or neither.",
+                                  self.last_result.stdout)
+                    self.assertEqual((self.root / "step-output").read_text(), "")
+                    self.assert_not_published()
+
+    def test_app_mint_scope_pin_revocation_and_credential_consumers(self):
+        workflow = yaml.safe_load(SOURCE)
+        steps = workflow["jobs"]["publish"]["steps"]
+        auth, mint, checkout = steps[:3]
+        self.assertEqual(auth["name"], AUTH)
+        self.assertEqual(auth["id"], "publication-auth")
+        self.assertEqual(auth["env"], {
+            "PUBLICATION_MODE": "${{ inputs.publication-mode }}",
+            "APP_ID": "${{ vars.CRATIS_AUTOMATION_APP_ID }}",
+            "HAS_APP_PRIVATE_KEY": "${{ secrets.AUTOMATION_APP_PRIVATE_KEY != '' }}",
+        })
+        self.assertEqual(mint["id"], "app-token")
+        self.assertEqual(mint["if"], "steps.publication-auth.outputs.use-app == 'true'")
+        self.assertIn("uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0",
+                      STEPS["Mint publication App token"])
+        self.assertEqual(mint["with"], {
+            "app-id": "${{ vars.CRATIS_AUTOMATION_APP_ID }}",
+            "private-key": "${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}",
+            "permission-contents": "write", "permission-pull-requests": "write",
+        })  # No skip-token-revoke: keep default post-job revocation.
+        token = "${{ steps.app-token.outputs.token || secrets.PAT_WORKFLOWS || github.token }}"
+        self.assertEqual(checkout["with"]["token"], token)
+        pr = next(step for step in steps if step["name"] == PUBLISH)
+        self.assertEqual(pr["env"]["GH_TOKEN"], token)
+        direct = next(step for step in steps if step["name"] == LEGACY)
+        self.assertNotIn("GH_TOKEN", direct.get("env", {}))  # Direct push uses checkout's credentials.
+        for step in steps:
+            if step not in (auth, mint):
+                self.assertNotIn("AUTOMATION_APP_PRIVATE_KEY", json.dumps(step))
+            if step not in (checkout, pr):
+                self.assertNotIn("steps.app-token.outputs.token", json.dumps(step))
+        # PyYAML treats the unquoted YAML 1.1 'on' key as True.
+        self.assertEqual(workflow[True]["workflow_call"]["secrets"]["AUTOMATION_APP_PRIVATE_KEY"],
+                         {"required": False})
 
     def test_direct_bundle_round_trip_preserves_postbuild_tree_and_message(self):
         self.env.update(PUBLICATION_MODE="direct", DIRTY_BUILD="1")
@@ -684,7 +746,8 @@ class UpdatePackagesTests(unittest.TestCase):
             self.assertIn(f"default: {default}", block)
         self.assertIn("runs-on: ${{ inputs.runs-on }}", SOURCE)
         self.assertIn("token: ${{ github.token }}", STEPS["Checkout repository"])
-        self.assertIn("token: ${{ secrets.PAT_WORKFLOWS || github.token }}", STEPS["Checkout publication base"])
+        self.assertIn("token: ${{ steps.app-token.outputs.token || secrets.PAT_WORKFLOWS || github.token }}",
+                      STEPS["Checkout publication base"])
         self.assertIsNone(re.search(r"^\s*permissions:", SOURCE, re.M))
 
     def test_shell_syntax(self):
