@@ -21,6 +21,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# NOT_SMOKEABLE: close-superseded-bump-pulls.yml comments on and closes PRs and
+# deletes head branches; it requires writes, so exercise its offline fake-API spec instead.
 jobs:
   lint:
     uses: ./.github/workflows/workflow-lint.yml

@@ -12,6 +12,9 @@ on:
       - .github/scripts/tests/cleanup-pr-artifacts.test.py
       - ".github/scripts/update-ai-profile-subscription*.mjs"
       - .github/workflows/update-ai-profile-subscription.yml
+      - .github/scripts/close-superseded-bump-pulls.mjs
+      - .github/scripts/tests/close-superseded-bump-pulls.spec.mjs
+      - .github/workflows/close-superseded-bump-pulls.yml
       - .github/workflows/verify-workflow-programs.yml
       - README.md
   push:
@@ -24,6 +27,9 @@ on:
       - .github/scripts/tests/cleanup-pr-artifacts.test.py
       - ".github/scripts/update-ai-profile-subscription*.mjs"
       - .github/workflows/update-ai-profile-subscription.yml
+      - .github/scripts/close-superseded-bump-pulls.mjs
+      - .github/scripts/tests/close-superseded-bump-pulls.spec.mjs
+      - .github/workflows/close-superseded-bump-pulls.yml
       - .github/workflows/verify-workflow-programs.yml
       - README.md
 
@@ -63,3 +69,5 @@ jobs:
         run: |
           set -euo pipefail
           node --test .github/scripts/update-ai-profile-subscription*.spec.mjs
+      - name: Verify superseded bump pull request behavior
+        run: node --test .github/scripts/tests/close-superseded-bump-pulls.spec.mjs

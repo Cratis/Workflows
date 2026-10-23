@@ -16,6 +16,7 @@ WORKFLOWS = ROOT / ".github/workflows"
 CONFIG = ROOT / ".github/actionlint.yaml"
 FIXTURES = Path(__file__).parent / "fixtures/workflow-lint"
 NOT_SMOKEABLE = {
+    "close-superseded-bump-pulls.yml": "comments on and closes pull requests and deletes head branches; requires writes",
     "update-packages.yml": "requires secrets and writes package updates",
     "cleanup-pr-artifacts.yml": "requires secrets and deletes repository artifacts",
     "trigger-documentation-build.yml": "dispatches to another repository using a secret",

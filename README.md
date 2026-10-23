@@ -5,6 +5,57 @@
 
 Common reusable GitHub Actions workflows for Cratis repositories.
 
+## Superseded bump pull requests
+
+`.github/workflows/close-superseded-bump-pulls.yml` finds older open bump PRs
+superseded by a newer open PR against the same base. The newer PR must include all
+of the older PR's dependencies, with no lower version and at least one higher
+version. Titles such as `Bump Arc from 19.0 to 19.1 and Chronicle to 19.2` and
+`align-versions/stage-A-scene-B-screenplay-C` branches are recognized.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `branch-prefixes` | `align-versions/` | Space-separated head branch prefixes required for replacements, closure, and branch deletion. An empty list permits none of these. |
+| `authors` | `github-actions[bot]` | Space-separated trusted bot/PAT logins whose superseded PRs may be closed. |
+| `dry-run` | `false` | Print planned actions without any writes. |
+| `runs-on` | `ubuntu-latest` | Runner label; use a self-hosted runner for private repositories. |
+| `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the program, not a PR head ref. |
+
+A replacement PR must have an author listed in `authors`, a head in the caller
+repository, and a branch matching a configured prefix. Untrusted PRs, including
+forks and non-prefix branches, never trigger comments, closure, or deletion.
+The same three checks are required to close an older PR and delete its branch.
+Other older PRs superseded by a trusted replacement (including human-authored
+bumps) receive only one `Superseded by #Q` comment per replacement. An empty prefix
+list permits no replacements or closures. Do not add human contributors to
+`authors`. Dependabot PRs and `keep-open` PRs are never closed. API failures fail
+the job. The workflow **never checks out PR code**: it checks out only
+Cratis/Workflows at `workflows-ref` to run the supporting program.
+
+Example caller (choose a repository-specific, nonzero schedule minute):
+
+```yaml
+name: Close superseded bumps
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+permissions:
+  pull-requests: write
+  contents: write
+jobs:
+  close-superseded:
+    uses: Cratis/Workflows/.github/workflows/close-superseded-bump-pulls.yml@main
+    with:
+      branch-prefixes: align-versions/
+      authors: github-actions[bot]
+```
+
+The hourly sweep also catches PRs opened with `GITHUB_TOKEN`, whose events do not
+normally start other workflows. Start with `dry-run: true` before enabling writes.
+
 ## Reviewed package updates
 
 `.github/workflows/update-packages.yml` updates detected NuGet, NPM, Gradle and
