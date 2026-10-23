@@ -1,0 +1,60 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Smoke Workflows
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/**
+      - .github/actions/**
+      - .github/templates/**
+      - .github/actionlint.yaml
+      - .github/scripts/install-actionlint.sh
+      - .github/scripts/tests/workflow-lint.test.py
+      - .github/scripts/tests/fixtures/workflow-lint/**
+      - .github/scripts/tests/fixtures/discoverability/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: ./.github/workflows/workflow-lint.yml
+    with:
+      workflows-ref: ${{ github.sha }}
+      shellcheck: true
+      extra-files: .github/templates/publish.template.yml
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: bash .github/scripts/install-actionlint.sh
+      - name: Exercise lint failures and smoke coverage
+        run: python3 -B .github/scripts/tests/workflow-lint.test.py
+
+  docker-cleanup:
+    uses: ./.github/workflows/docker-cleanup-gate.yml
+
+  public-runners:
+    uses: ./.github/workflows/check-public-runners.yml
+    with:
+      workflows-ref: ${{ github.sha }}
+
+  no-work-records:
+    uses: ./.github/workflows/verify-no-work-records.yml
+
+  discoverability:
+    uses: ./.github/workflows/verify-discoverability.yml
+    with:
+      site-path: .github/scripts/tests/fixtures/discoverability/good
+      base-url: https://example.cratis.io
+      fail-on: error

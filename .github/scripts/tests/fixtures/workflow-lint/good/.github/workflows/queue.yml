@@ -1,0 +1,15 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Shared configuration fixture
+on: workflow_dispatch
+concurrency:
+  group: fixture
+  queue: max
+jobs:
+  check:
+    strategy:
+      matrix:
+        runner: [cratis-arc, cratis-arc-small, cratis-arc-release]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: echo fixture

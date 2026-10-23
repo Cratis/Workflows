@@ -63,16 +63,6 @@ jobs:
         run: node --test .github/scripts/tests/verify-pull-request-policy.spec.mjs
       - name: Install actionlint
         # The migration test lints every rendered caller; the runner image has no actionlint.
-        env:
-          VERSION: 1.7.12
-          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/actionlint.tar.gz"
-          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz" -o "$archive"
-          echo "$SHA256  $archive" | sha256sum --check --strict
-          mkdir -p "$RUNNER_TEMP/bin"
-          tar -xzf "$archive" -C "$RUNNER_TEMP/bin" actionlint
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        run: bash .github/scripts/install-actionlint.sh
       - name: Exercise atomic policy wrapper migration
         run: python3 -B .github/scripts/tests/bootstrap-policy.test.py
