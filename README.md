@@ -5,6 +5,55 @@
 
 Common reusable GitHub Actions workflows for Cratis repositories.
 
+## Superseded bump pull requests
+
+`.github/workflows/close-superseded-bump-pulls.yml` finds older open bump PRs
+superseded by a newer open PR against the same base. The newer PR must include all
+of the older PR's dependencies, with no lower version and at least one higher
+version. Titles such as `Bump Arc from 19.0 to 19.1 and Chronicle to 19.2` and
+`align-versions/stage-A-scene-B-screenplay-C` branches are recognized.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `branch-prefixes` | `align-versions/` | Space-separated prefixes permitting same-repository head branch deletion after closure. |
+| `authors` | `github-actions[bot]` | Space-separated trusted bot/PAT logins whose superseded PRs may be closed. |
+| `dry-run` | `false` | Print planned actions without any writes. |
+| `runs-on` | `ubuntu-latest` | Runner label; use a self-hosted runner for private repositories. |
+| `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the program, not a PR head ref. |
+
+Unlisted authors (including human-authored bumps) receive only one
+`Superseded by #Q` comment per replacement, even if their branch matches a prefix.
+Only explicitly trusted bot/PAT authors may be closed; a prefix alone never
+permits closure. Do not add human contributors to `authors`. Dependabot PRs and
+`keep-open` PRs are never closed. A closed PR's branch is deleted only when it is
+in the caller repository and matches a configured prefix. API failures fail the
+job. The workflow **never checks out PR code**: it checks out only Cratis/Workflows
+at `workflows-ref` to run the supporting program.
+
+Example caller (choose a repository-specific, nonzero schedule minute):
+
+```yaml
+name: Close superseded bumps
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+permissions:
+  pull-requests: write
+  contents: write
+jobs:
+  close-superseded:
+    uses: Cratis/Workflows/.github/workflows/close-superseded-bump-pulls.yml@main
+    with:
+      branch-prefixes: align-versions/
+      authors: github-actions[bot]
+```
+
+The hourly sweep also catches PRs opened with `GITHUB_TOKEN`, whose events do not
+normally start other workflows. Start with `dry-run: true` before enabling writes.
+
 ## Reviewed package updates
 
 `.github/workflows/update-packages.yml` updates detected NuGet, NPM, Gradle and

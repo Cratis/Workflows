@@ -1,0 +1,67 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Close Superseded Bump Pull Requests
+
+on:
+  workflow_call:
+    inputs:
+      branch-prefixes:
+        description: Space-separated branch prefixes eligible for head branch deletion.
+        type: string
+        default: align-versions/
+      authors:
+        description: Space-separated trusted bot/PAT logins whose superseded bump PRs may be closed; other authors get a comment only.
+        type: string
+        default: github-actions[bot]
+      dry-run:
+        description: Print the plan without commenting, closing PRs, or deleting branches.
+        type: boolean
+        default: false
+      runs-on:
+        description: Runner label; private repositories should select their self-hosted runner.
+        type: string
+        default: ubuntu-latest
+      workflows-ref:
+        description: Cratis/Workflows ref providing the program; never a pull request head ref.
+        type: string
+        default: main
+
+permissions:
+  pull-requests: write
+  contents: write
+
+concurrency:
+  group: close-superseded-bump-pulls-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  close-superseded:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    steps:
+      - name: Validate caller
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ "$OWNER" != Cratis ]; then
+            echo 'Only Cratis repositories may call this workflow' >&2
+            exit 1
+          fi
+      # Check out only the trusted supporting program, never caller or PR code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Plan and apply superseded bump actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BRANCH_PREFIXES: ${{ inputs.branch-prefixes }}
+          AUTHORS: ${{ inputs.authors }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: node .cratis-workflows/.github/scripts/close-superseded-bump-pulls.mjs
