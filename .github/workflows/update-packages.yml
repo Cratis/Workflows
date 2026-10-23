@@ -23,6 +23,13 @@ name: Update Packages
 # mode; the reusable workflow cannot elevate its caller's token permissions.
 # PAT-based pushes are not affected by GITHUB_TOKEN permissions. See README
 # for PR-creation policy and downstream event/CI differences between tokens.
+#
+# Optional PR-only App authentication: caller variable CRATIS_AUTOMATION_APP_ID
+# plus workflow_call secret AUTOMATION_APP_PRIVATE_KEY. Both must be set or both
+# absent; partial configuration fails publish. The App needs Contents (read/write)
+# and Pull requests (read/write), only on the caller repository, with no bypass.
+# App-created PRs trigger downstream workflows. Direct mode keeps the PAT/token
+# path even with the App configured. No mode enables automatic merging.
 
 env:
   DOTNET_VERSION: "10.0.x"
@@ -90,6 +97,8 @@ on:
         default: ''
     secrets:
       PAT_WORKFLOWS:
+        required: false
+      AUTOMATION_APP_PRIVATE_KEY:
         required: false
 
 jobs:
@@ -919,10 +928,42 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 60
     steps:
+      - name: Check publication authentication
+        id: publication-auth
+        shell: bash
+        env:
+          PUBLICATION_MODE: ${{ inputs.publication-mode }}
+          APP_ID: ${{ vars.CRATIS_AUTOMATION_APP_ID }}
+          HAS_APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if { [ -n "$APP_ID" ] && [ "$HAS_APP_PRIVATE_KEY" != true ]; } ||
+             { [ -z "$APP_ID" ] && [ "$HAS_APP_PRIVATE_KEY" = true ]; }; then
+            echo "::error::Set both CRATIS_AUTOMATION_APP_ID and AUTOMATION_APP_PRIVATE_KEY, or neither."
+            exit 1
+          fi
+          use_app=false
+          if [ "$PUBLICATION_MODE" = pull-request ] && [ -n "$APP_ID" ]; then
+            use_app=true
+          fi
+          echo "use-app=$use_app" >> "$GITHUB_OUTPUT"
+
+      - name: Mint publication App token
+        id: app-token
+        if: steps.publication-auth.outputs.use-app == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CRATIS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          # No owner/repositories: the action then scopes the token to the current
+          # repository only (event payloads such as schedule omit repository.name).
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Checkout publication base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          token: ${{ steps.app-token.outputs.token || secrets.PAT_WORKFLOWS || github.token }}
           ref: ${{ needs.update.outputs.base }}
           fetch-depth: 0
 
@@ -1015,7 +1056,7 @@ jobs:
         if: inputs.publication-mode == 'pull-request'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.PAT_WORKFLOWS || github.token }}
           CALLER_REPOSITORY: ${{ github.repository }}
           BASE_BRANCH: ${{ needs.update.outputs.base_branch }}
           EXPECTED_BASE: ${{ needs.update.outputs.base }}

@@ -237,10 +237,32 @@ offending path.
 
 No permissions block or repository/organization setting is changed by the reusable
 workflow. The built-in token must have repository read access even when publishing
-uses a PAT. Provision Bash, Git and `gh` on the chosen runner in addition to the
+uses a PAT or App. Provision Bash, Git and `gh` on the chosen runner in addition to the
 existing ecosystem prerequisites. Use isolated, ephemeral runners: splitting jobs
 does not make a persistent self-hosted runner safe if dependency code can leave
 processes or alter tools for a later job.
+
+**Optional PR-only GitHub App authentication.** Set the caller's repository or
+organization configuration variable `CRATIS_AUTOMATION_APP_ID` and pass the optional
+`AUTOMATION_APP_PRIVATE_KEY` workflow secret. For example, add
+`AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}` to the
+wrapper's `secrets` mapping above. [Reusable workflows use the caller's variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#configuration-variable-precedence),
+so no additional input is needed. Both values must be available or both absent:
+a partial configuration fails `publish` with a configuration error, in either mode.
+With neither present, the existing `PAT_WORKFLOWS || github.token` path is unchanged.
+With both present, only `publication-mode: pull-request` mints an installation token;
+`direct` still uses the existing PAT/token path, never the App.
+
+Install the App on the approved caller repository with **Contents: write** and
+**Pull requests: write** (Metadata: read is implicit). The mint requests only that
+repository and those two write permissions; the App needs **no default-branch
+bypass**, and the workflow never enables auto-merge. The private key is supplied
+only to the mint action in `publish`; the token is used only by its checkout and
+PR publication step, never by package tools in `update`. Default post-job token
+revocation remains enabled. App-created PRs **do trigger downstream workflows**,
+unlike the built-in token; caller CI and branch protection still decide mergeability.
+Direct publication still requires the existing PAT actor's bypass where branch
+protection blocks direct writes. Configuring the App does not grant that bypass.
 
 - A classic PAT needs `repo`; a fine-grained PAT needs repository **Contents: write**,
   **Pull requests: write**, and **Metadata: read**, including access to the selected
@@ -256,7 +278,7 @@ processes or alter tools for a later job.
 - [Events created using `GITHUB_TOKEN`](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow#triggering-a-workflow-from-a-workflow)
   generally do not trigger downstream workflows (except explicit dispatch events).
   A PR created successfully with that token therefore does **not** prove PR checks
-  will start. Use an approved PAT when ordinary push/PR/label events must trigger
+  will start. Use an approved PAT or the PR-only App path when ordinary push/PR/label events must trigger
   caller CI/release-intent gates; this workflow dispatches no compensating workflows.
   PAT permissions are independent of the workflow's `GITHUB_TOKEN` permission block.
 
