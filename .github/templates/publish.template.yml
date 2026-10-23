@@ -87,6 +87,8 @@ jobs:
 
     steps:
       # ... publish dotnet packages ...
+      - name: Publish .NET packages
+        run: echo "::error::Replace this step with your .NET publish steps" && exit 1
 
   publish-npm-packages:
     if: needs.release.outputs.publish == 'true'
@@ -98,4 +100,6 @@ jobs:
 
     steps:
       # ... publish npm packages ...
+      - name: Publish npm packages
+        run: echo "::error::Replace this step with your npm publish steps" && exit 1
 

@@ -1,0 +1,67 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Workflow Lint
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the lint job; keep it hosted in a public repository.
+        type: string
+        default: ubuntu-latest
+      workflows-ref:
+        description: Cratis/Workflows ref providing the installer and default configuration.
+        type: string
+        default: main
+      shellcheck:
+        description: Also check inline shell scripts with shellcheck.
+        type: boolean
+        default: false
+      extra-files:
+        description: Space-separated additional workflow files, such as templates, to lint.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: bash .cratis-workflows/.github/scripts/install-actionlint.sh
+
+      - name: Lint workflows and additional files
+        shell: bash
+        env:
+          SHELLCHECK: ${{ inputs.shellcheck }}
+          EXTRA_FILES: ${{ inputs.extra-files }}
+        run: |
+          set -euo pipefail
+          config=.cratis-workflows/.github/actionlint.yaml
+          for candidate in .github/actionlint.yaml .github/actionlint.yml; do
+            if [ -f "$candidate" ]; then
+              config="$candidate"
+              break
+            fi
+          done
+          args=(-config-file "$config" -pyflakes=)
+          if [ "$SHELLCHECK" != true ]; then args+=(-shellcheck=); fi
+          # Explicit file arguments replace discovery, so keep all workflows alongside extras.
+          shopt -s nullglob
+          files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          read -r -a extra_files <<< "$EXTRA_FILES"
+          actionlint "${args[@]}" "${files[@]}" "${extra_files[@]}"

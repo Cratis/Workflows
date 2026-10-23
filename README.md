@@ -720,6 +720,79 @@ The check's program is inline in the reusable workflow, so the rules that run ar
 
 ---
 
+## Verifying workflow changes
+
+`smoke-workflows.yml` runs on `pull_request` changes to workflows, actions,
+templates, the actionlint configuration/installer, and its tests and fixtures.
+It calls reusable workflows through `./.github/workflows/` so GitHub uses the
+PR merge commit, not the version on `main`. The lint and public-runner calls also
+pass `${{ github.sha }}` as `workflows-ref` for their supporting files. Permissions
+are read-only, no secrets are passed, and public PRs use `ubuntu-latest`.
+The path filter is intentional: this workflow is **not a required check**.
+
+| Coverage | Reusable workflow | Limit |
+| --- | --- | --- |
+| Smoke call | `workflow-lint.yml` | All workflows plus the publish template; shellcheck enabled |
+| Smoke call | `docker-cleanup-gate.yml` | Read-only scan; its checker checkout still defaults to `main` |
+| Smoke call | `check-public-runners.yml` | Read-only scan using the PR merge commit's checker |
+| Smoke call | `verify-no-work-records.yml` | Uses its existing immutable script pin |
+| Smoke call | `verify-discoverability.yml` | Good HTML fixture at `https://example.cratis.io`; existing script pin |
+| Not smokeable | `update-packages.yml`, `cleanup-pr-artifacts.yml` | Secrets and repository writes/deletions |
+| Not smokeable | `trigger-documentation-build.yml` | Cross-repository dispatch and a secret |
+| Not smokeable | `normalize-dependabot-labels.yml` | Writes labels |
+| Not smokeable | `verify-pull-request-policy.yml`, `verify-release-notes.yml`, `verify-release-intent.yml` | Holds Workflows PRs to consumer release policy; decide separately |
+
+`auto-approve-publish-deployments.yml` uses `workflow_run`, not `workflow_call`,
+so it is outside the reusable coverage ratchet. Action changes trigger this
+workflow, but these smoke calls do not execute composite actions. The offline test
+requires every reusable workflow to be called here or have an explicit reason
+in `NOT_SMOKEABLE`; adding a reusable without either fails the test.
+
+### Linting locally and in consumers
+
+The shared installer pins actionlint 1.7.12 and verifies the Linux amd64/arm64
+archive checksum. `workflow-lint.yml` accepts `runs-on` (default `ubuntu-latest`),
+`workflows-ref` (default `main`), `shellcheck` (default `false`), and `extra-files`
+(a space-separated list of additional paths). It always lints all caller workflows,
+including when extra files are supplied. It prefers the caller's
+`.github/actionlint.yaml` or `.github/actionlint.yml`, otherwise uses the shared
+configuration. The shared config recognizes Cratis runner labels and ignores
+only actionlint's unsupported `concurrency.queue` key under workflows/templates;
+remove that exception when actionlint supports it. Pyflakes is disabled.
+
+```bash
+actionlint
+actionlint .github/templates/publish.template.yml
+python3 -B .github/scripts/tests/workflow-lint.test.py
+```
+
+The test proves a broken workflow fails with `expression`, `job-needs` and
+`syntax-check` rule IDs, and that `queue: max` passes with the shared config.
+
+### Manual fallback for changes smoke cannot exercise
+
+For a reusable that can safely be dispatched with its existing permissions,
+use a scratch branch in a consumer such as Arc. Point its caller at
+`Cratis/Workflows/.github/workflows/<file>@<your-branch>`, ensure that caller
+supports `workflow_dispatch`, push the scratch branch, then run:
+
+```bash
+gh workflow run <caller-file> --repo Cratis/Arc --ref <scratch-branch>
+```
+
+Dispatch is not a dry run: use only explicitly authorized secrets and effects.
+Link the exact run in a **PR comment**, not the release-note description.
+Cleanup is an exception: its manual dispatch is main-only and `dry_run` is not a
+reusable input. Do not dispatch a scratch cleanup caller (it deletes artifacts).
+After the reviewed change lands, use `dry_run: true` in Workflows following
+[Retry an already-closed PR safely](#retry-an-already-closed-pr-safely); do not
+weaken that main-only boundary to test a branch.
+
+For consumer `pull_request_target` or publish workflows, use actionlint only
+before merge and watch the first authorized run on `main`. Smoke calls do not
+prove privileged event semantics, publishing, deployments, or secret-backed
+writes, and are not a consumer rollout or a bootstrap installation.
+
 ## Workflows in this repository
 
 ### `cleanup-pr-artifacts.yml`

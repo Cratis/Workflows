@@ -1,0 +1,13 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+self-hosted-runner:
+  labels:
+    - cratis-arc
+    - cratis-arc-small
+    - cratis-arc-release
+
+paths:
+  '.github/{workflows,templates}/**':
+    ignore:
+      # Remove once actionlint supports concurrency.queue.
+      - 'unexpected key "queue" for "concurrency" section'
