@@ -872,7 +872,7 @@ The check's program is inline in the reusable workflow, so the rules that run ar
 ## Verifying workflow changes
 
 `smoke-workflows.yml` runs on `pull_request` changes to workflows, actions,
-templates, the actionlint configuration/installer, and its tests and fixtures.
+templates, the actionlint/zizmor configurations and installers, and their tests and fixtures.
 It calls reusable workflows through `./.github/workflows/` so GitHub uses the
 PR merge commit, not the version on `main`. The lint and public-runner calls also
 pass `${{ github.sha }}` as `workflows-ref` for their supporting files. Permissions
@@ -881,7 +881,7 @@ The path filter is intentional: this workflow is **not a required check**.
 
 | Coverage | Reusable workflow | Limit |
 | --- | --- | --- |
-| Smoke call | `workflow-lint.yml` | All workflows plus the publish template; shellcheck enabled |
+| Smoke call | `workflow-lint.yml` | All workflows plus the publish template; shellcheck enabled; zizmor in report mode |
 | Smoke call | `docker-cleanup-gate.yml` | Read-only scan; its checker checkout still defaults to `main` |
 | Smoke call | `check-public-runners.yml` | Read-only scan using the PR merge commit's checker |
 | Smoke call | `verify-no-work-records.yml` | Uses its existing immutable script pin |
@@ -901,22 +901,45 @@ in `NOT_SMOKEABLE`; adding a reusable without either fails the test.
 
 The shared installer pins actionlint 1.7.12 and verifies the Linux amd64/arm64
 archive checksum. `workflow-lint.yml` accepts `runs-on` (default `ubuntu-latest`),
-`workflows-ref` (default `main`), `shellcheck` (default `false`), and `extra-files`
-(a space-separated list of additional paths). It always lints all caller workflows,
+`workflows-ref` (default `main`), `shellcheck` (default `false`), `zizmor` (default
+`report`), and `extra-files` (a space-separated list of additional paths). It always lints all caller workflows,
 including when extra files are supplied. It prefers the caller's
 `.github/actionlint.yaml` or `.github/actionlint.yml`, otherwise uses the shared
 configuration. The shared config recognizes Cratis runner labels and ignores
 only actionlint's unsupported `concurrency.queue` key under workflows/templates;
 remove that exception when actionlint supports it. Pyflakes is disabled.
 
+The zizmor installer pins **1.31.1** and verifies the Linux amd64/arm64 release
+archive SHA-256 before extraction. The security audit runs with `--offline`:
+no GitHub token or secrets are needed, and online-only audits are not run.
+The `zizmor` input selects one of three modes:
+
+- `report` (default): print findings without failing on them; tool errors still fail.
+- `blocking`: findings fail the job using zizmor's normal exit codes.
+- `off`: skip installing and running zizmor (actionlint still runs).
+
+Zizmor uses its native caller configuration discovery: `.github/zizmor.yml`,
+`.github/zizmor.yaml`, `zizmor.yml`, then `zizmor.yaml`. Without a caller config,
+it uses zizmor's built-in defaults; no shared suppressions are applied. It audits
+all caller workflows; `extra-files` applies only to actionlint. Start with report
+mode, fix or narrowly justify findings in the caller's config, then set
+`zizmor: blocking` on the reusable workflow call once the offline audit is clean.
+Workflows' own smoke call remains in report mode while existing findings are triaged.
+
+For local checks, install actionlint, zizmor, shellcheck, and Python's PyYAML:
+
 ```bash
 actionlint
 actionlint .github/templates/publish.template.yml
+zizmor --offline .github/workflows
 python3 -B .github/scripts/tests/workflow-lint.test.py
 ```
 
 The test proves a broken workflow fails with `expression`, `job-needs` and
 `syntax-check` rule IDs, and that `queue: max` passes with the shared config.
+It also proves zizmor detects `unpinned-uses` and `template-injection`, blocking
+mode fails, report mode prints the findings without failing, and caller config
+is honored.
 
 ### Manual fallback for changes smoke cannot exercise
 
