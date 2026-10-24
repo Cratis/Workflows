@@ -45,7 +45,7 @@ def prior_run():
 
 
 def execute(runs=None, *, missing_gh=False, response=None, **overrides):
-    with tempfile.TemporaryDirectory(dir=ROOT / ".ai-work") as temp:
+    with tempfile.TemporaryDirectory() as temp:
         directory = Path(temp)
         for name in ("output", "summary", "calls"):
             (directory / name).write_text("")
@@ -138,6 +138,7 @@ class ActionBehaviorTests(unittest.TestCase):
         run["event"] = "push"
         self.assert_result(execute(runs=[run]), False)
         self.assert_result(execute(runs=[run], EVENTS="schedule,push"), True)
+        self.assert_result(execute(runs=[run], EVENTS="schedule, push"), True)
 
     def test_no_success_runs_again(self):
         self.assert_result(execute(), False)

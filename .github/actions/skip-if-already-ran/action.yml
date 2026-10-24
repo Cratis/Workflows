@@ -58,6 +58,7 @@ runs:
           run_needed
           exit 0
         fi
+        EVENTS="${EVENTS//[[:space:]]/}"
         case ",$EVENTS," in
           *",$EVENT_NAME,"*) ;;
           *) run_needed; exit 0 ;;
