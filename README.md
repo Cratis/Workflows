@@ -18,6 +18,7 @@ version. Titles such as `Bump Arc from 19.0 to 19.1 and Chronicle to 19.2` and
 | `branch-prefixes` | `align-versions/` | Space-separated head branch prefixes required for replacements, closure, and branch deletion. An empty list permits none of these. |
 | `authors` | `github-actions[bot]` | Space-separated trusted bot/PAT logins whose superseded PRs may be closed. |
 | `dry-run` | `false` | Print planned actions without any writes. |
+| `java-version` | `21` | JDK version for Gradle updates. A caller whose Gradle toolchain needs another JDK (for example `jvmToolchain(17)`) passes it here. |
 | `runs-on` | `ubuntu-latest` | Runner label; use a self-hosted runner for private repositories. |
 | `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the program, not a PR head ref. |
 
@@ -501,7 +502,10 @@ caller. Callers with an explicit secrets map must add
 that pass only `PAT_WORKFLOWS` are unaffected.
 
 Permission failures remain blocking except for the organization inventory
-HTTP 401/403 warning described above. HTTP 401 also covers an expired or revoked
+HTTP 401/403 warning described above and an HTTP 403 on one package's version
+inventory: cleanup warns, skips that package without deleting any of its
+versions, and cleans up the others. Manual apply fails instead when a package was
+skipped. HTTP 401 also covers an expired or revoked
 token: it now produces a warning in reusable cleanup calls and dry runs, but
 manual apply and other workflows using that secret still fail.
 
