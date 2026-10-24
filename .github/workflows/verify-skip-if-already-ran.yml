@@ -1,0 +1,56 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Skip If Already Ran
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/skip-if-already-ran/**
+      - .github/scripts/tests/skip-if-already-ran.test.py
+      - .github/workflows/verify-skip-if-already-ran.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/skip-if-already-ran/**
+      - .github/scripts/tests/skip-if-already-ran.test.py
+      - .github/workflows/verify-skip-if-already-ran.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the action offline
+        run: python3 -B .github/scripts/tests/skip-if-already-ran.test.py
+      - name: Default events never skip pull requests or pushes
+        id: defaults
+        uses: ./.github/actions/skip-if-already-ran
+      - name: Exercise the real API for the current event
+        id: live
+        uses: ./.github/actions/skip-if-already-ran
+        with:
+          events: ${{ github.event_name }}
+      - name: Assert live outputs
+        env:
+          DEFAULT_SKIP: ${{ steps.defaults.outputs.skip }}
+          LIVE_SKIP: ${{ steps.live.outputs.skip }}
+          LIVE_OUTCOME: ${{ steps.live.outcome }}
+        run: |
+          set -euo pipefail
+          [[ "$DEFAULT_SKIP" == false ]]
+          [[ "$LIVE_SKIP" == true || "$LIVE_SKIP" == false ]]
+          [[ "$LIVE_OUTCOME" == success ]]
+          echo "Checked 3 live action assertions"
