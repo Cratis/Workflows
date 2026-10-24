@@ -1,0 +1,90 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+# Caller contract: the job needs permissions: actions: read and runs on the repo's
+# own cheapest runner (cratis-arc / RUNNER_GATE for private repositories).
+# Only successful runs count; failed or cancelled runs run again next night.
+# Floating toolchains and other inputs outside the commit are not part of the key.
+# Do not use in a reusable workflow that has a scheduled caller: it sees the caller's runs.
+name: Skip if already ran
+description: Reports whether this workflow already succeeded for the same commit and an allowed event.
+
+inputs:
+  events:
+    description: Comma-separated events eligible for skipping and counted as prior successes.
+    required: false
+    default: schedule
+  sha:
+    description: Commit to check; override for workflows that push their own bot commit.
+    required: false
+    default: ${{ github.sha }}
+  token:
+    description: Token with actions read permission in the current repository.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  skip:
+    description: "'true' when a prior success exists; otherwise 'false', including on API errors."
+    value: ${{ steps.check.outputs.skip }}
+  previous-run-url:
+    description: Link to the prior successful run, or empty when not skipping.
+    value: ${{ steps.check.outputs.previous-run-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check for a prior successful run
+      id: check
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        EVENTS: ${{ inputs.events }}
+        SHA: ${{ inputs.sha }}
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        run_needed() {
+          printf 'skip=false\nprevious-run-url=\n' >> "$GITHUB_OUTPUT"
+        }
+        fail_open() {
+          echo "::warning::skip-if-already-ran: $1; running normally"
+          run_needed
+          exit 0
+        }
+        if [[ "$EVENT_NAME" == workflow_dispatch || "$RUN_ATTEMPT" -gt 1 ]]; then
+          run_needed
+          exit 0
+        fi
+        EVENTS="${EVENTS//[[:space:]]/}"
+        case ",$EVENTS," in
+          *",$EVENT_NAME,"*) ;;
+          *) run_needed; exit 0 ;;
+        esac
+        command -v gh >/dev/null || fail_open "gh is not installed"
+        if ! workflow_id=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .workflow_id); then
+          fail_open "Could not resolve the workflow id"
+        fi
+        [[ "$workflow_id" =~ ^[0-9]+$ ]] || fail_open "Invalid workflow id"
+        # The single quotes are deliberate: $ENV and $event are jq variables, not shell ones.
+        # shellcheck disable=SC2016
+        if ! previous_url=$(gh api \
+          "repos/$REPO/actions/workflows/$workflow_id/runs?head_sha=$SHA&status=success&per_page=100" \
+          --jq '.workflow_runs | map(select(.id != ($ENV.RUN_ID | tonumber) and
+            (.event as $event | ($ENV.EVENTS | split(",") | index($event)) != null))) |
+            .[0].html_url // empty'); then
+          fail_open "Could not query prior successful runs"
+        fi
+        if [[ -z "$previous_url" ]]; then
+          run_needed
+          exit 0
+        fi
+        [[ "$previous_url" =~ ^https://[^[:space:]]+$ ]] || fail_open "Invalid previous run URL"
+        if ! printf 'Skipped: this workflow already succeeded on this commit: [previous run](%s).\n' \
+          "$previous_url" >> "$GITHUB_STEP_SUMMARY"; then
+          fail_open "Could not write the step summary"
+        fi
+        printf 'skip=true\nprevious-run-url=%s\n' "$previous_url" >> "$GITHUB_OUTPUT"
+        echo "::notice title=skip-if-already-ran::Already succeeded on this commit: $previous_url"

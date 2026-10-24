@@ -725,6 +725,35 @@ The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <
 
 ---
 
+## Skip scheduled runs that already ran on this commit
+
+`Cratis/Workflows/.github/actions/skip-if-already-ran@main` reports `skip=true` when the same workflow already succeeded on the same commit for an event in `events` (default: `schedule`). Failed or cancelled runs do not count. Manual dispatches and manual re-runs always run; API errors warn and run normally. `previous-run-url` links to the prior success. See [#205](https://github.com/Cratis/Workflows/issues/205).
+
+Place the step in an existing cheap gate job and expose its output, or add a small `already-ran` job:
+
+```yaml
+already-ran:
+  runs-on: ubuntu-latest # Private repos: use cratis-arc / your RUNNER_GATE instead.
+  timeout-minutes: 5
+  permissions:
+    actions: read
+  outputs:
+    skip: ${{ steps.check.outputs.skip }}
+  steps:
+    - id: check
+      uses: Cratis/Workflows/.github/actions/skip-if-already-ran@main
+build:
+  needs: [already-ran]
+  if: needs.already-ran.outputs.skip != 'true'
+  # ...existing job configuration...
+```
+
+**Every other job must directly list the gate in `needs`**, and add `needs.<gate>.outputs.skip != 'true' && (…existing condition…)` to its `if` (or just the skip condition if it has none). This includes `always()`, `!cancelled()` and `failure()` aggregators and notification jobs; otherwise a deliberate skip can report red. Do not use the action in a reusable workflow with a scheduled caller: it would look up the caller's runs.
+
+For workflows that push their own bot commit, pass `sha:` with the last relevant source commit rather than the bot-updated HEAD. The key excludes floating toolchains, runner images, repository variables and other external inputs: use this only to validate the repository's own commit, not live health, latest dependencies or live-data reports. External changes without a commit need a manual dispatch.
+
+---
+
 ## Verifying release intent and release notes
 
 **`verify-pull-request-policy.yml`** combines release notes, warn-only release-note drift,
