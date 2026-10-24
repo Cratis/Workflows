@@ -81,9 +81,6 @@ jobs:
           class InventoryNotAuthorized(CleanupError):
               pass
 
-          class PackageNotAuthorized(CleanupError):
-              pass
-
           def require(condition, message):
               if not condition:
                   raise CleanupError(message)
@@ -128,12 +125,6 @@ jobs:
                       if (method == "GET" and endpoint.split("?", 1)[0] == "orgs/Cratis/packages"
                               and status in (401, 403)):
                           raise InventoryNotAuthorized("Package inventory not authorized")
-                      # A 403 on one package or its versions means the token cannot see that
-                      # package; inventory skips it. Outside inventory it still fails.
-                      if (method == "GET" and status == 403
-                              and re.fullmatch(r"orgs/Cratis/packages/[^/?]+/[^/?]+(/versions)?",
-                                               endpoint.split("?", 1)[0])):
-                          raise PackageNotAuthorized(f"API {method} failed (HTTP {status})")
                       require(status in allowed, f"API {method} failed (HTTP {status})")
                       # Never log API bodies, headers, URLs from errors, or exception text.
                       data = parse_json(response.read()) if status == 200 else None
@@ -236,7 +227,7 @@ jobs:
                       "version_name": version_name, "tags": tags,
                       "delete_endpoint": endpoint, "restore_endpoint": endpoint + "/restore"}
 
-          def inventory(api, repository, pr, skipped):
+          def inventory(api, repository, pr):
               targets = []
               for kind in ("container", "nuget"):
                   print(f"Inventorying {kind} packages")
@@ -249,14 +240,7 @@ jobs:
                       names.add(name)
                       if association(package) != repository:
                           continue
-                      try:
-                          versions = api.listing(package_endpoint(kind, name) + "/versions?state=active")
-                      except PackageNotAuthorized:
-                          skipped.append(f"{kind}/{name}")
-                          print(f"::warning::Skipped {kind} package {name}: version inventory not "
-                                "authorized (HTTP 403). None of its versions were deleted.")
-                          continue
-                      for version in versions:
+                      for version in api.listing(package_endpoint(kind, name) + "/versions?state=active"):
                           target = target_for(version, kind, name, pr)
                           if target:
                               targets.append(target)
@@ -309,9 +293,8 @@ jobs:
               api = API(token)
               if manual and not dry_run:
                   verify_closed(api, repository, pr)
-              skipped = []
               try:
-                  plan = inventory(api, repository, pr, skipped)
+                  plan = inventory(api, repository, pr)
               except InventoryNotAuthorized:
                   message = ("Could not run: package inventory not authorized. No versions deleted. "
                              "Create a classic PAT (fine-grained PATs are not supported) with "
@@ -327,15 +310,6 @@ jobs:
                       raise CleanupError(message)
                   print(f"::warning::{message}")
                   return
-              if skipped:
-                  message = (f"Skipped {len(skipped)} package(s) whose version inventory was not "
-                             f"authorized (HTTP 403): {', '.join(skipped)}. Their versions were not "
-                             "deleted; give PACKAGE_CLEANUP_TOKEN admin access to them to clean them up.")
-                  if os.environ.get("GITHUB_STEP_SUMMARY"):
-                      with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-                          summary.write(f"### PR package cleanup\n\n{message}\n")
-                  if expected is not None:
-                      raise CleanupError(message)
               if expected is not None:
                   # Comparing canonical JSON also distinguishes booleans from numeric IDs.
                   require(json.dumps(expected, sort_keys=True) == json.dumps(plan, sort_keys=True),
