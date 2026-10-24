@@ -478,7 +478,7 @@ test("labels, description, author and base come from the pull request as it is n
         fails("## Overview\n", ["Heading not allowed", "No release notes"], { labels: ["minor"], live });
 });
 
-test("a (#n) inside an HTML comment still closes the issue, so it fails; comments stay ignored for everything else", () => {
+test("a (#n) inside an HTML comment closes nothing, so it fails; comments stay ignored for everything else", () => {
     for (const body of [
         "<!-- follow-up (#7) -->\n\n## Added\n\n- A thing (#1)\n",
         "## Added\n\n- A thing (#1) <!-- also (#8) -->\n",
@@ -487,7 +487,7 @@ test("a (#n) inside an HTML comment still closes the issue, so it fails; comment
         "## Added\n\n- A thing (#1) <!-- (#3) -->\r\n",
     ]) {
         const result = fails(body, ["Issue reference position"]);
-        assert.match(result.errors[0].message, /sits inside an HTML comment.*release-action still closes #\d+.*never put issue references in comments/);
+        assert.match(result.errors[0].message, /sits inside an HTML comment: release-action removes the comment with it, so #\d+ is not closed.*end of the delivering bullet.*never put issue references in comments/);
     }
     // Only fenced and inline code hide a reference, as in release-action, and what surrounds removed code joins up.
     passes("## Added\n\n- A thing (#1)\n\n```\n<!-- (#9) -->\n```\n- Another `<!-- (#8) -->` (#2)\n");
