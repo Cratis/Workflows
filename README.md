@@ -18,7 +18,6 @@ version. Titles such as `Bump Arc from 19.0 to 19.1 and Chronicle to 19.2` and
 | `branch-prefixes` | `align-versions/` | Space-separated head branch prefixes required for replacements, closure, and branch deletion. An empty list permits none of these. |
 | `authors` | `github-actions[bot]` | Space-separated trusted bot/PAT logins whose superseded PRs may be closed. |
 | `dry-run` | `false` | Print planned actions without any writes. |
-| `java-version` | `21` | JDK version for Gradle updates. A caller whose Gradle toolchain needs another JDK (for example `jvmToolchain(17)`) passes it here. |
 | `runs-on` | `ubuntu-latest` | Runner label; use a self-hosted runner for private repositories. |
 | `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the program, not a PR head ref. |
 
@@ -93,6 +92,7 @@ dedupe.
 | `publication-mode` | `direct` | `direct` retains legacy publication; `pull-request` uses the validated-candidate rules below. Other values fail. |
 | `pull-request-label` | Empty (no label) | One existing, caller-chosen label, only in `pull-request` mode. Must match `[a-zA-Z0-9][a-zA-Z0-9_.:/-]*`. No comma lists, whitespace, or implicit release intent. |
 | `node-version` | `24` | Node.js version for NPM updates. Satisfies the Cratis JavaScript repositories' engine floors; a caller may override it, but the minimum is Node 22 (the peer sync script needs `fs.globSync` with array `exclude`, available from 22.14/23.7). |
+| `java-version` | `21` | JDK version for Gradle updates. A caller whose Gradle toolchain needs another JDK (for example `jvmToolchain(17)`) passes it here. |
 | `runs-on` | `ubuntu-latest` | Existing runner-label input; private callers should retain their approved self-hosted label. |
 | `npm-package-exclusions` | `typescript` | Existing comma-delimited exclusions, supplemented by the caller's `.github/update-packages-npm-exclusions`. |
 | `nuget-package-exclusions` | `StyleCop.Analyzers` (its 1.3.x betas fail the build of repositories on 1.2.0-beta.556; a caller that sets this input replaces the default and lists the package itself to keep it held) | Comma-delimited exact NuGet package IDs, matched case-insensitively after trimming whitespace. Applies to top-level project references, including centrally managed versions in `Directory.Packages.props`; transitive-only IDs warn as not directly referenced (updating a parent can still change transitive versions). Prerelease references retain the updater's prerelease eligibility; stable references do not gain prerelease-only candidates. Invalid/incomplete listings and divergent per-framework versions for eligible packages fail before updating. As with the default path, SDK exit 3 (no changes written) skips NuGet updates for that run. |
