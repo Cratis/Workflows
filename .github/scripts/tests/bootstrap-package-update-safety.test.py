@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
 BOOTSTRAP_PATH = ".github/workflows/bootstrap-common-workflows.yml"
+BOOTSTRAP_SCRIPT_PATH = ".github/scripts/bootstrap-common-workflows.sh"
 VERIFY_PATH = ".github/workflows/verify-package-updates.yml"
 TEST_PATH = ".github/scripts/tests/bootstrap-package-update-safety.test.py"
 BOOTSTRAP = (ROOT / BOOTSTRAP_PATH).read_text()
@@ -47,7 +48,7 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
         self.assertEqual(event_paths(BOOTSTRAP, "push"), [
             ".github/workflows/cleanup-pr-artifacts.yml",
             ".github/workflows/auto-approve-publish-deployments.yml",
-            ".github/scripts/bootstrap-common-workflows.sh",
+            BOOTSTRAP_SCRIPT_PATH,
         ])
         self.assertIn('    branches: ["main"]', event_block(BOOTSTRAP, "push"))
         self.assertIn("  workflow_dispatch:", BOOTSTRAP)
@@ -91,6 +92,13 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
         changed.update(filter(None, git("ls-files", "--others", "--exclude-standard", "-z").split("\0")))
         patterns = event_paths(BOOTSTRAP, "push") + event_paths(
             (ROOT / ".github/workflows/propagate-pr-templates.yml").read_text(), "push")
+        # The bootstrap script itself is a deliberate push trigger (editing it must
+        # propagate org-wide), not a file a rollout could touch by accident: its
+        # content is exercised directly by update-packages.test.py,
+        # bootstrap-schedules.test.py and bootstrap-rollout.test.py. This guard
+        # exists for the other, genuinely incidental triggers (the distributed
+        # wrapper workflows, the PR templates), so exclude it here.
+        patterns = [pattern for pattern in patterns if pattern != BOOTSTRAP_SCRIPT_PATH]
         self.assertEqual(sorted(path for path in changed if any(
             fnmatch.fnmatchcase(path, pattern) for pattern in patterns)), [],
             "Changed files would trigger organization-wide writes")
