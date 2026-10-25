@@ -502,7 +502,10 @@ caller. Callers with an explicit secrets map must add
 that pass only `PAT_WORKFLOWS` are unaffected.
 
 Permission failures remain blocking except for the organization inventory
-HTTP 401/403 warning described above. HTTP 401 also covers an expired or revoked
+HTTP 401/403 warning described above and an HTTP 403 on one package's version
+inventory: cleanup warns, skips that package without deleting any of its
+versions, and cleans up the others. Manual apply fails instead when a package was
+skipped. HTTP 401 also covers an expired or revoked
 token: it now produces a warning in reusable cleanup calls and dry runs, but
 manual apply and other workflows using that secret still fail.
 
