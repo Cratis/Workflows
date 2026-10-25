@@ -770,6 +770,9 @@ The caller runs on pull-request events `opened`, `edited`, `reopened`, `synchron
 `labeled`, `unlabeled`, `ready_for_review`, and pushes to `main`, with one cancelling
 concurrency group per PR/ref. Push events run only the work-record policy. Intent
 applies only to PRs targeting `main` and can be disabled with `release-intent: false`.
+When such a PR is opened without labels, the intent check waits 20 seconds before reading
+them, so a label added right after opening cancels that run instead of leaving a stale
+failure; `verify-release-intent.yml` does the same.
 Notes retain the default-branch, release-label and Dependabot rules below. The
 reusable declares no permissions; callers grant `contents: read` and
 `pull-requests: read`. Releasing repositories also have a separate
