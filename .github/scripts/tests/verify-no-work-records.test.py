@@ -102,6 +102,18 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.run_script(self.fixture(CLEAN + ["docs/Plan-roadmap.md"])).returncode, 0)
         self.assertEqual(self.run_script(self.fixture(CLEAN + ["decisions/HANDOVER.md"])).returncode, 1)
 
+    def test_vendored_trees_skip_name_rules_but_not_runtime_rules(self):
+        vendored = ["vendor/claude-seo/extensions/banana/references/prompt-engineering.md",
+                    "tools/vendor/lib/HANDOVER-notes.md", "vendor/PLAN-upstream.md"]
+        result = self.run_script(self.fixture(CLEAN + vendored))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ["references/prompt-x.md", "Vendor/lib/prompt-x.md", "vendor-lib/prompt-x.md", ".ai-work/vendor/notes.md"]:
+            with self.subTest(path=name):
+                # Without the vendored files, so Vendor/ cannot fold into vendor/ on a case-insensitive disk.
+                result = self.run_script(self.fixture(CLEAN + [name]))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("violations: 1", result.stdout)
+
     def test_extra_allowed_inputs(self):
         files = CLEAN + ["LIFECYCLE.md", "product-docs/plan-coverage-audit.md", "product-docs/Plan-coverage.md"]
         self.assertEqual(self.run_script(self.fixture(files)).returncode, 1)
@@ -225,7 +237,7 @@ class Guard(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cwd:
             passing = self.run_script(cwd, "--self-test")
             self.assertEqual(passing.returncode, 0, passing.stdout + passing.stderr)
-            self.assertIn("self-test: 5 planted, 5 red, control 0, broken-listing 2", passing.stdout)
+            self.assertIn("self-test: 7 planted, 7 red, control 0, broken-listing 2", passing.stdout)
             broken = self.run_script(cwd, "--self-test", VERIFY_SELF_TEST_BREAK="1")
             self.assertNotEqual(broken.returncode, 0)
 
