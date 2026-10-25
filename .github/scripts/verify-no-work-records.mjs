@@ -15,6 +15,9 @@ const rootNames = 'README LICENSE AGENTS CLAUDE GEMINI CODE_OF_CONDUCT CONTRIBUT
 const legacySession = /(^|\/)[^/]*HANDOVER[^/]*\.md$|(^|\/)PROMPT-[^/]+\.md$|(^|\/)[^/]*NEXT-SESSION[^/]*\.md$|(^|\/)SESSION-PROMPT[^/]*\.md$|(^|\/)[^/]*SESSION[-_]HANDOVER[^/]*\.md$/;
 const session = /(^|\/)(HANDOVER|PROMPT|SESSION)[-_][^/]+\.md$|(^|\/)NEXT-SESSION([-_][^/]+)?\.md$/i;
 const shape = /(^|\/)(PLAN|DESIGN|REPORT|STATUS)([-_][^/]*)?\.md$/i;
+// Third-party trees vendored under a directory named exactly `vendor` keep their
+// upstream file names, so the name-based rules skip them.
+const vendored = /(^|\/)vendor\//;
 const splitInput = value => (value ?? '').split(',').map(part => part.trim()).filter(Boolean);
 
 export function checkPaths(files, environment = process.env) {
@@ -32,7 +35,7 @@ export function checkPaths(files, environment = process.env) {
             const documentation = /(^|\/)templates\//i.test(path) || docs.some(prefix => path.toLowerCase().startsWith(prefix));
             if (!path.includes('/') && /^[A-Z][A-Z0-9_.-]*[A-Z0-9]\.md$/.test(path) && !allowedRoot) {
                 rule = 'root-document';
-            } else if (!/^\.(claude|github|pi|agents|cratis)\//.test(path)) {
+            } else if (!/^\.(claude|github|pi|agents|cratis)\//.test(path) && !vendored.test(path)) {
                 if (legacySession.test(path) || session.test(path)) {
                     rule = 'session';
                 } else if (shape.test(path) && !allowedRoot && !documentation) {
@@ -98,7 +101,9 @@ function selfTest() {
             ['pi-runtime', '.pi/fusion/x/prompt.md'],
             ['root-document', 'IMPLEMENTATION_STATUS.md'],
             ['session', 'decisions/hAnDoVeR-notes.md'],
-            ['work-record-shape', 'Notes/pLaN-something.md']
+            ['work-record-shape', 'Notes/pLaN-something.md'],
+            ['session', 'references/prompt-x.md'],
+            ['session', 'Vendor/lib/prompt-x.md']
         ];
         let red = 0;
         for (const [index, [rule, path]] of plants.entries()) {
@@ -106,7 +111,7 @@ function selfTest() {
             if (result.status === 1 && result.stdout.includes(`[${rule}] ${JSON.stringify(path)}`) && result.stdout.includes('violations: 1')) red++;
             else console.error(`self-test: planted defect not caught: ${path}`);
         }
-        const clean = ['README.md', 'DECISIONS.md', 'decisions/D-0001-example.md', 'Documentation/decisions/0003-kernel-boundary.md', 'Source/Reporting.md', 'templates/build-kit/lib/prompt.md', 'templates/session.md', 'templates/handover.md', '.pi/settings.json'];
+        const clean = ['README.md', 'DECISIONS.md', 'decisions/D-0001-example.md', 'Documentation/decisions/0003-kernel-boundary.md', 'Source/Reporting.md', 'templates/build-kit/lib/prompt.md', 'templates/session.md', 'templates/handover.md', '.pi/settings.json', 'vendor/claude-seo/references/prompt-engineering.md', 'tools/vendor/lib/HANDOVER-notes.md', 'vendor/PLAN-upstream.md'];
         if (process.env.VERIFY_SELF_TEST_BREAK === '1') clean.push('PLAN-break.md');
         const control = run('control', clean);
         const counts = control.stdout.includes(`scanned: ${clean.length} tracked files, rules: ${ruleCount}, violations: 0`);
