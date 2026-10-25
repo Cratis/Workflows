@@ -402,6 +402,44 @@ releases_with_release_action() {
   return 1
 }
 
+# Create missing release-intent labels only; existing names (case-insensitive), colors and descriptions stay intact.
+ensure_release_intent_labels() {
+  local repo="$1" labels label_error label_response name color description
+  label_error=$(mktemp)
+  if ! labels=$(gh api --paginate "repos/Cratis/$repo/labels?per_page=100" \
+    --jq '.[].name | ascii_downcase' 2>"$label_error"); then
+    echo "  ⚠ Could not read release-intent labels for $repo, skipping"
+    echo "    API error: $(cat "$label_error" 2>/dev/null || true)"
+    rm -f "$label_error"
+    return 1
+  fi
+  rm -f "$label_error"
+
+  while IFS='|' read -r name color description; do
+    if grep -Fxq "$name" <<<"$labels"; then continue; fi
+    label_error=$(mktemp)
+    if label_response=$(gh api -X POST "repos/Cratis/$repo/labels" \
+      -f name="$name" -f color="$color" -f description="$description" 2>"$label_error"); then
+      echo "  ✓ Created release-intent label $name in $repo"
+    elif grep -q 'HTTP 422' "$label_error" \
+      && printf '%s' "$label_response" | jq -e 'any(.errors[]?; .code == "already_exists")' >/dev/null 2>&1; then
+      : # Another writer created the label after our read; never modify it.
+    else
+      echo "  ⚠ Could not create release-intent label $name in $repo, skipping"
+      echo "    API error: $(cat "$label_error" 2>/dev/null || true)"
+      rm -f "$label_error"
+      return 1
+    fi
+    rm -f "$label_error"
+  done <<'LABELS'
+major|bfdadc|Breaking change: merging releases a new major version
+minor|e5db36|New functionality: merging releases a new minor version
+patch|ace006|Fix: merging releases a new patch version
+no-release|ededed|Merging publishes no package, image, release, or deployment
+LABELS
+  echo "  ✓ All four release-intent labels exist in $repo"
+}
+
 # ================================================================
 # Rollout: canary first, then staggered [skip ci] commits (Cratis/Workflows#163)
 # ================================================================
@@ -618,6 +656,9 @@ update_repo() {
   fi
   # Arc.Kotlin retains its deliberately pinned semver wrapper, not a second gate.
   if skips_file "$SEMVER_LABEL_FILE" "$repo"; then repo_releases=false; fi
+  if [ "$repo_releases" = true ]; then
+    ensure_release_intent_labels "$repo" || return 1
+  fi
   for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
     if skips_file "$file_path" "$repo"; then
       echo "  ℹ Skipping $file_path (Cratis/$repo keeps its own copy)"
