@@ -75,6 +75,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A pull request opened without labels is often labelled seconds later (gh pr create --label, or a click
+      # right after opening). Waiting here keeps this run in progress, so the labeled run cancels it through the
+      # caller's concurrency group instead of leaving a stale failing release-intent check (Cratis/Workflows#93).
+      - name: Wait briefly for labels added right after opening
+        id: label-grace
+        if: ${{ !cancelled() && inputs.release-intent && github.event_name == 'pull_request' && github.event.action == 'opened' && github.event.pull_request.base.ref == 'main' && toJSON(github.event.pull_request.labels) == '[]' && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        run: sleep 20
       - name: Read the pull request as it is now
         id: pull
         if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.tools.outcome == 'success' }}
