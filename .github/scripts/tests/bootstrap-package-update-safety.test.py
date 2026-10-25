@@ -47,7 +47,6 @@ class BootstrapPackageUpdateSafetyTests(unittest.TestCase):
         self.assertEqual(event_paths(BOOTSTRAP, "push"), [
             ".github/workflows/cleanup-pr-artifacts.yml",
             ".github/workflows/auto-approve-publish-deployments.yml",
-            ".github/codeql/codeql-config.yml",
             ".github/scripts/bootstrap-common-workflows.sh",
         ])
         self.assertIn('    branches: ["main"]', event_block(BOOTSTRAP, "push"))

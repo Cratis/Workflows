@@ -307,7 +307,7 @@ for automatic merge.
 existing callers already reference the reused implementation, and an implementation
 update must not rewrite unrelated repositories. The bootstrap workflow itself is not
 in those paths either, so this narrowly scoped rollout triggers no organization-wide
-write workflow. All other watched workflow/template, CodeQL and bootstrap-script
+write workflow. All other watched workflow/template and bootstrap-script
 triggers remain intact; changing those still requires separate deployment approval.
 Stage is explicitly excluded from bootstrap because it owns its reviewed
 package-update/kernel guard workflow and pin, which bootstrap must not overwrite.
@@ -659,12 +659,6 @@ It derives an offset from 0 to 14 from the name (a checksum, like the weekly pac
 ### Staleness check
 
 GitHub cron is best effort and can skip or lag. [`check-batched-releases.yml`](#check-batched-releasesyml) sweeps hourly and fails when a pending merge is older than the window plus 60 minutes.
-
----
-
-## Shared CodeQL configuration
-
-The common workflow bootstrap also propagates **`.github/codeql/codeql-config.yml`** to repositories. The shared config currently excludes rule `ca1031`.
 
 ---
 
@@ -1260,7 +1254,7 @@ be cloned, no repositories, or no files to scan). A clean run prints
 ### `bootstrap-common-workflows.yml`
 
 **Triggers:** `push` to `main` when a watched reusable workflow (including
-`cleanup-pr-artifacts.yml`), CodeQL config, or bootstrap script changes; also
+`cleanup-pr-artifacts.yml`) or bootstrap script changes; also
 `workflow_dispatch`.
 
 Maintains common wrappers across non-archived Cratis repositories, subject to its

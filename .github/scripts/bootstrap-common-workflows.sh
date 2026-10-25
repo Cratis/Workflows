@@ -8,7 +8,6 @@
 #   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
 #   - verify-pull-request-policy.yml      — notes, drift, release intent and work records in one job;
 #                                           replaces only known bootstrapped legacy wrappers atomically
-#   - .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
 #
@@ -320,16 +319,6 @@ render_policy_wrapper() {
   file_content="${file_content/__RELEASE_INTENT__/$releases}"
   printf '%s\n' "${file_content//__POLICY_RUNNER__/$runner}"
 }
-
-# .github/codeql/codeql-config.yml — shared CodeQL configuration
-# Decodes to:
-#   name: "Cratis CodeQL config"
-#
-#   query-filters:
-#     # CA1031 is intentionally excluded from the shared baseline.
-#     - exclude:
-#         id: ca1031
-BOOTSTRAPPED_FILES[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAjIENBMTAzMSBpcyBpbnRlbnRpb25hbGx5IGV4Y2x1ZGVkIGZyb20gdGhlIHNoYXJlZCBiYXNlbGluZS4KICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
 
 # Stable POSIX checksum of the repository name: Monday, minute 1-59, 03:00-07:59 UTC.
 # Unlike an array index, this does not move existing schedules when repositories are added.
@@ -675,9 +664,6 @@ update_repo() {
       file_b64=$(printf '%s\n' "$file_content" | base64 | tr -d '\n')
     fi
     case "$file_path" in
-      .github/codeql/codeql-config.yml)
-        file_label="codeql-config"
-        ;;
       *.yml)
         file_label=$(basename "$file_path" .yml)
         ;;
