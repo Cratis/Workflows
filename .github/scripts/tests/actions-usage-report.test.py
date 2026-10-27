@@ -40,7 +40,7 @@ class UsageReportTests(unittest.TestCase):
         output = render([("Cratis/Public", "public", "Build", job())], repos=[PUBLIC], total=0)
         self.assertIn("Private repository coverage unavailable", output)
         self.assertIn("This is not evidence of zero private usage", output)
-        self.assertIn("Not observable with PAT_WORKFLOWS", output)
+        self.assertIn("Not observable with the reporting token", output)
         self.assertNotIn("billed wall-clock", output)
 
     def test_scale_set_execution_short_jobs_and_queue_percentile(self):

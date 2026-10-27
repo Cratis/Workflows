@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
       - name: Build and publish the report
         env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOWS }}
+          GH_TOKEN: ${{ secrets.__USAGE_SECRET__ || secrets.PAT_WORKFLOWS }}
         shell: bash
         run: |
           set -euo pipefail
