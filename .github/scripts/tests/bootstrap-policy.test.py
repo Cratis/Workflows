@@ -18,6 +18,12 @@ POLICY = '.github/workflows/verify-pull-request-policy.yml'
 LEGACY = ['.github/workflows/' + name + '.yml' for name in
           ['verify-release-notes', 'verify-semver-label', 'verify-no-work-records']]
 PAYLOADS = dict(re.findall(r'BOOTSTRAPPED_FILES\["([^"]+)"\]="([^"]+)"', SOURCE))
+LABELS = [
+    {'name': 'major', 'color': 'bfdadc', 'description': 'Breaking change: merging releases a new major version'},
+    {'name': 'minor', 'color': 'e5db36', 'description': 'New functionality: merging releases a new minor version'},
+    {'name': 'patch', 'color': 'ace006', 'description': 'Fix: merging releases a new patch version'},
+    {'name': 'no-release', 'color': 'ededed', 'description': 'Merging publishes no package, image, release, or deployment'},
+]
 
 
 def blob(data):
@@ -52,6 +58,21 @@ if method == 'GET' and '/actions/runs?' in endpoint:
 elif method == 'GET' and endpoint.count('/') == 2:
     result = {'default_branch':'main','permissions':{'push':True},'private':s.get('private',False)}
     if s.get('fail_visibility') and '.private' in a: error = 'HTTP 503 repository read failed'
+elif method == 'GET' and '/labels?' in endpoint:
+    pages = s.get('label_pages', [s.get('labels', [])])
+    result = [label for page in (pages if '--paginate' in a else pages[:1]) for label in page]
+    if s.get('fail_labels'): error = 'HTTP 503 labels read failed'
+elif method == 'POST' and endpoint.endswith('/labels'):
+    failure = s.get('label_errors', {}).get(fields['name'])
+    if failure:
+        status, code = failure
+        result = {'message':'Validation Failed','errors':[{'resource':'Label','field':'name','code':code}]}
+        error = 'gh: Validation Failed (HTTP '+str(status)+')'
+        if status == 422 and code == 'already_exists':
+            s.setdefault('labels', []).append({**fields, 'color':'123456','description':'Concurrent label'})
+    else:
+        s.setdefault('labels', []).append(fields)
+        result = fields
 elif '/git/ref/heads/' in endpoint:
     result = {'object':{'sha':s['head']}}
 elif method == 'GET' and '/git/commits/' in endpoint:
@@ -108,6 +129,7 @@ else:
     error = 'UNEXPECTED API CALL '+repr(a)
 p.write_text(json.dumps(s))
 if error:
+    if result is not None: print(json.dumps(result))
     print(error,file=sys.stderr)
     sys.exit(1)
 if '--jq' in a:
@@ -116,6 +138,8 @@ if '--jq' in a:
     elif q == '.default_branch': print(result['default_branch'])
     elif q == '.private': print('true' if result['private'] else 'false')
     elif q == '.content': print(result['content'])
+    elif q == '.[].name | ascii_downcase':
+        for label in result: print(label['name'].lower())
     else: raise Exception(q)
 else:
     print(json.dumps(result))
@@ -299,6 +323,85 @@ jobs:
         self.run_bootstrap(expected=1)
         self.assertEqual(self.state['tree_writes'], [])
         self.assertEqual(self.state['patches'], 0)
+
+    def label_calls(self):
+        return [call for call in self.state['calls'] if any('/labels' in arg for arg in call)]
+
+    def label_posts(self):
+        calls = self.label_calls()
+        self.assertFalse(any(method in call for call in calls for method in ['PATCH', 'DELETE']), calls)
+        return [dict(call[i+1].split('=', 1) for i, arg in enumerate(call) if arg == '-f')
+                for call in calls if 'POST' in call]
+
+    def test_releasing_repository_creates_only_missing_labels_even_without_workflow_changes(self):
+        self.initialize(labels=[LABELS[0], LABELS[2]])
+        out = self.run_bootstrap()
+        self.assertEqual(self.label_posts(), [LABELS[1], LABELS[3]])
+        self.assertEqual(out.count('Created release-intent label '), 2)
+        self.assertEqual(out.count('All four release-intent labels exist'), 1)
+        self.state['labels'] = [LABELS[0]]
+        self.state['calls'] = []
+        self.state_file.write_text(json.dumps(self.state))
+        out = self.run_bootstrap()
+        self.assertEqual(self.label_posts(), LABELS[1:])
+        self.assertIn('No changes needed', out)
+        self.assertEqual(len(self.state['tree_writes']), 1)
+        self.assertEqual(self.state['patches'], 1)
+
+    def test_existing_labels_are_preserved_case_insensitively(self):
+        labels = [{**label, 'name': label['name'].capitalize(), 'color': '123456',
+                   'description': 'Repository-owned label'} for label in LABELS]
+        self.initialize(labels=labels)
+        out = self.run_bootstrap()
+        self.assertEqual(self.label_posts(), [])
+        self.assertEqual(self.state['labels'], labels)
+        self.assertNotIn('Created release-intent label ', out)
+        self.assertEqual(out.count('All four release-intent labels exist'), 1)
+
+    def test_nonreleasing_repositories_make_no_label_api_calls(self):
+        for repo, files in [('Example', {}), ('Arc.Kotlin', {LEGACY[1]: base64.b64decode(PAYLOADS[LEGACY[1]]).decode()})]:
+            with self.subTest(repo=repo):
+                (self.directory / 'repos.json').write_text(json.dumps([repo]))
+                self.initialize(files)
+                self.run_bootstrap()
+                self.assertEqual(self.label_calls(), [])
+
+    def test_label_read_failure_fails_the_repository_without_creating_anything(self):
+        self.initialize(labels=[LABELS[0]], fail_labels=True)
+        out = self.run_bootstrap(expected=1)
+        self.assertIn('⚠ Could not read release-intent labels for Example, skipping', out)
+        self.assertEqual(len(self.label_calls()), 1)
+        self.assertEqual(self.label_posts(), [])
+        self.assertEqual(self.state['labels'], [LABELS[0]])
+        self.assertEqual(self.state['tree_writes'], [])
+        self.assertEqual(self.state['patches'], 0)
+
+    def test_only_http_422_already_exists_is_tolerated_on_label_creation(self):
+        for status, code, expected in [(422, 'already_exists', 0), (422, 'invalid', 1),
+                                       (403, 'already_exists', 1), (503, 'unavailable', 1)]:
+            with self.subTest(status=status, code=code):
+                self.initialize(labels=LABELS[:3], label_errors={'no-release': [status, code]})
+                out = self.run_bootstrap(expected=expected)
+                self.assertEqual(self.label_posts(), [LABELS[3]])
+                self.assertNotIn('Created release-intent label ', out)
+                if expected == 0:
+                    self.assertIn('All four release-intent labels exist', out)
+                    self.assertEqual(self.state['labels'][-1]['description'], 'Concurrent label')
+                else:
+                    self.assertIn('⚠ Could not create release-intent label no-release in Example, skipping', out)
+                    self.assertNotIn('All four release-intent labels exist', out)
+                    self.assertEqual(self.state['tree_writes'], [])
+                    self.assertEqual(self.state['patches'], 0)
+
+    def test_label_discovery_reads_both_pages_before_creating_labels(self):
+        first_page = [{'name': 'unrelated-'+str(i)} for i in range(98)] + LABELS[:2]
+        self.initialize(label_pages=[first_page, LABELS[2:]])
+        self.run_bootstrap()
+        self.assertEqual(self.label_posts(), [])
+        calls = self.label_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn('--paginate', calls[0])
+        self.assertIn('repos/Cratis/Example/labels?per_page=100', calls[0])
 
     def test_known_hash_table_covers_every_historical_payload_per_path(self):
         history = subprocess.check_output(['git', 'log', '-p', 'HEAD', '--', '.github/scripts/bootstrap-common-workflows.sh'], cwd=ROOT, text=True)

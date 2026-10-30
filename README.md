@@ -92,6 +92,7 @@ dedupe.
 | `publication-mode` | `direct` | `direct` retains legacy publication; `pull-request` uses the validated-candidate rules below. Other values fail. |
 | `pull-request-label` | Empty (no label) | One existing, caller-chosen label, only in `pull-request` mode. Must match `[a-zA-Z0-9][a-zA-Z0-9_.:/-]*`. No comma lists, whitespace, or implicit release intent. |
 | `node-version` | `24` | Node.js version for NPM updates. Satisfies the Cratis JavaScript repositories' engine floors; a caller may override it, but the minimum is Node 22 (the peer sync script needs `fs.globSync` with array `exclude`, available from 22.14/23.7). |
+| `java-version` | `21` | JDK version for Gradle updates. A caller whose Gradle toolchain needs another JDK (for example `jvmToolchain(17)`) passes it here. |
 | `runs-on` | `ubuntu-latest` | Existing runner-label input; private callers should retain their approved self-hosted label. |
 | `npm-package-exclusions` | `typescript` | Existing comma-delimited exclusions, supplemented by the caller's `.github/update-packages-npm-exclusions`. |
 | `nuget-package-exclusions` | `StyleCop.Analyzers` (its 1.3.x betas fail the build of repositories on 1.2.0-beta.556; a caller that sets this input replaces the default and lists the package itself to keep it held) | Comma-delimited exact NuGet package IDs, matched case-insensitively after trimming whitespace. Applies to top-level project references, including centrally managed versions in `Directory.Packages.props`; transitive-only IDs warn as not directly referenced (updating a parent can still change transitive versions). Prerelease references retain the updater's prerelease eligibility; stable references do not gain prerelease-only candidates. Invalid/incomplete listings and divergent per-framework versions for eligible packages fail before updating. As with the default path, SDK exit 3 (no changes written) skips NuGet updates for that run. |
@@ -306,7 +307,7 @@ for automatic merge.
 existing callers already reference the reused implementation, and an implementation
 update must not rewrite unrelated repositories. The bootstrap workflow itself is not
 in those paths either, so this narrowly scoped rollout triggers no organization-wide
-write workflow. All other watched workflow/template, CodeQL and bootstrap-script
+write workflow. All other watched workflow/template and bootstrap-script
 triggers remain intact; changing those still requires separate deployment approval.
 Stage is explicitly excluded from bootstrap because it owns its reviewed
 package-update/kernel guard workflow and pin, which bootstrap must not overwrite.
@@ -501,7 +502,10 @@ caller. Callers with an explicit secrets map must add
 that pass only `PAT_WORKFLOWS` are unaffected.
 
 Permission failures remain blocking except for the organization inventory
-HTTP 401/403 warning described above. HTTP 401 also covers an expired or revoked
+HTTP 401/403 warning described above and an HTTP 403 on one package's version
+inventory: cleanup warns, skips that package without deleting any of its
+versions, and cleans up the others. Manual apply fails instead when a package was
+skipped. HTTP 401 also covers an expired or revoked
 token: it now produces a warning in reusable cleanup calls and dry runs, but
 manual apply and other workflows using that secret still fail.
 
@@ -658,12 +662,6 @@ GitHub cron is best effort and can skip or lag. [`check-batched-releases.yml`](#
 
 ---
 
-## Shared CodeQL configuration
-
-The common workflow bootstrap also propagates **`.github/codeql/codeql-config.yml`** to repositories. The shared config currently excludes rule `ca1031`.
-
----
-
 ## Shared cache actions
 
 Two composite actions replace hand-written `actions/cache` steps. Each gives a repository one key and one path list per ecosystem. That matters because the path list is part of the cache version: a cache saved by a step with one path list is never restored by a step with another, even under the same key.
@@ -725,6 +723,35 @@ The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <
 
 ---
 
+## Skip scheduled runs that already ran on this commit
+
+`Cratis/Workflows/.github/actions/skip-if-already-ran@main` reports `skip=true` when the same workflow already succeeded on the same commit for an event in `events` (default: `schedule`). Failed or cancelled runs do not count. Manual dispatches and manual re-runs always run; API errors warn and run normally. `previous-run-url` links to the prior success. See [#205](https://github.com/Cratis/Workflows/issues/205).
+
+Place the step in an existing cheap gate job and expose its output, or add a small `already-ran` job:
+
+```yaml
+already-ran:
+  runs-on: ubuntu-latest # Private repos: use cratis-arc / your RUNNER_GATE instead.
+  timeout-minutes: 5
+  permissions:
+    actions: read
+  outputs:
+    skip: ${{ steps.check.outputs.skip }}
+  steps:
+    - id: check
+      uses: Cratis/Workflows/.github/actions/skip-if-already-ran@main
+build:
+  needs: [already-ran]
+  if: needs.already-ran.outputs.skip != 'true'
+  # ...existing job configuration...
+```
+
+**Every other job must directly list the gate in `needs`**, and add `needs.<gate>.outputs.skip != 'true' && (…existing condition…)` to its `if` (or just the skip condition if it has none). This includes `always()`, `!cancelled()` and `failure()` aggregators and notification jobs; otherwise a deliberate skip can report red. Do not use the action in a reusable workflow with a scheduled caller: it would look up the caller's runs.
+
+For workflows that push their own bot commit, pass `sha:` with the last relevant source commit rather than the bot-updated HEAD. The key excludes floating toolchains, runner images, repository variables and other external inputs: use this only to validate the repository's own commit, not live health, latest dependencies or live-data reports. External changes without a commit need a manual dispatch.
+
+---
+
 ## Verifying release intent and release notes
 
 **`verify-pull-request-policy.yml`** combines release notes, warn-only release-note drift,
@@ -737,6 +764,9 @@ The caller runs on pull-request events `opened`, `edited`, `reopened`, `synchron
 `labeled`, `unlabeled`, `ready_for_review`, and pushes to `main`, with one cancelling
 concurrency group per PR/ref. Push events run only the work-record policy. Intent
 applies only to PRs targeting `main` and can be disabled with `release-intent: false`.
+When such a PR is opened without labels, the intent check waits 20 seconds before reading
+them, so a label added right after opening cancels that run instead of leaving a stale
+failure; `verify-release-intent.yml` does the same.
 Notes retain the default-branch, release-label and Dependabot rules below. The
 reusable declares no permissions; callers grant `contents: read` and
 `pull-requests: read`. Releasing repositories also have a separate
@@ -787,11 +817,11 @@ Both gates read the labels (and the release-notes gate the description, author a
 The release-notes gate checks every pull request into the default branch except Dependabot's. One that carries any of `major`, `minor` or `patch` is release-bound and fails on a violation, also when it carries a second intent label by mistake. One labelled `no-release`, or not labelled yet, gets the same checks as warnings and passes, since any pull request may become releasable; a `no-release` description without a change list is fine. A pull request into another base passes with a notice. The check re-runs when a label is added or the description is edited. It enforces the release-note contract:
 
 - An optional summary, first: either a short `## Summary` section of prose or one lead paragraph without a heading, not both. Then only `## Added`, `## Changed`, `## Fixed`, `## Removed`, `## Security` and `## Deprecated`, in that order, each once and only when it has bullets: prose or a code example alone under a section, such as a `None.` filler, fails, and so does a bullet that only says `None`, `N/A` or `Nothing` (also in bold or italics, with closing punctuation), which is a filler and not a change, so a section holding only such bullets is a section without bullets. `###` sub-headings may group bullets inside a section (there even `### Added` is only a sub-heading; before or between sections a `###` named like a section fails as a wrong-level section).
-- A delivered issue is `(#n)` at the end of its bullet (only more issue references, including `(part of #n)`, `(see #n)` and `(Cratis/Repo#n)`, closing emphasis, `<br>` and sentence punctuation may follow; a `:` may introduce nested bullets). Write one `(#n)` per issue: `(#56) (#57)`, never `(#56, #57)`, which closes nothing. `(part of #n)` or `see #n` keeps an issue open, and `Cratis/Repo#n` names another repository. `Closes`, `Fixes`, `Refs` and the other closing or linking keywords never appear, with `#n` or an issue URL, also when wrapped in bold, italics or a link (`**Closes** #n`, `Closes [#n](url)`, `[Closes #n](url)`, and `[Closes](url)` where the link starts a clause). A `(#n)` in the summary, in a heading, in the middle of a bullet or inside an HTML comment fails because release-action would still close it. For a `(#n)` in the middle of a bullet the error quotes the text that follows it (`(#12)` is followed by `, see #11 ...`) and asks for that text to move before the `(#n)`.
+- A delivered issue is `(#n)` at the end of its bullet (only more issue references, including `(part of #n)`, `(see #n)` and `(Cratis/Repo#n)`, closing emphasis, `<br>` and sentence punctuation may follow; a `:` may introduce nested bullets). Write one `(#n)` per issue: `(#56) (#57)`, never `(#56, #57)`, which closes nothing. `(part of #n)` or `see #n` keeps an issue open, and `Cratis/Repo#n` names another repository. `Closes`, `Fixes`, `Refs` and the other closing or linking keywords never appear, with `#n` or an issue URL, also when wrapped in bold, italics or a link (`**Closes** #n`, `Closes [#n](url)`, `[Closes #n](url)`, and `[Closes](url)` where the link starts a clause). A `(#n)` in the summary, in a heading, in the middle of a bullet or inside an HTML comment fails: in the summary, a heading or the middle of a bullet release-action would still close it, and inside a comment release-action removes it with the comment, so the issue is not closed. For a `(#n)` in the middle of a bullet the error quotes the text that follows it (`(#12)` is followed by `, see #11 ...`) and asks for that text to move before the `(#n)`.
 - No Overview, Test plan, Verification, Notes or other headings (also written as `<h2>`, `<b>`, `<i>`, `*italic*` or `<summary>`, which may span lines), no review, verification, test-result or provenance notes (which agent or model wrote it, a stand-alone `Reviewed by` line, CI results), no relative links, no template placeholders, no unclosed `<!--` and no Copilot "Original prompt" transcripts. Headings are checked like any other line for keywords, `(#n)`, relative links, placeholders and provenance. Provenance is recognised at the start of a clause (`Reviewed with a cross-provider review.`, `Review: Opus-only review`, `The review workflow passed.`, `Co-Authored-By:`); inside a bullet, a `## Summary` or the lead paragraph the note must also end the clause (`- Cross-provider review pending (#3)`), and `Reviewed by ...` is not read there at all (`- Reviewed by status is now shown on the dashboard (#4)` passes), so a bullet that merely mentions review or validation as a product change, such as `- Validation: rules now apply to commands (#3)` or `- Adds same-provider review routing to the review workflow (#3)`, passes. Reviewer-facing information goes in a pull request comment.
 - No verification or scope notes and no reviewer instructions, recognised by their phrasing wherever they stand (a bullet, the summary, the lead paragraph or a line of their own): how or where a change was checked (`Verified by building ...`, `verified in Storybook`, `Tested locally`), what was not (`not yet verified`, `Storybook only`), results (`specs 492/492`, `9 of 9 runs`, `Tier 1 PASS`, `0 warnings, 0 errors`, a `Local:`, `CI:`, `Checks:` or `Checked locally:` line, a `Checks (local)` heading), provenance (`Verified against Arc.TypeScript main (v0.34.0)`, `Tested against a real kernel`; the error asks for compatibility as a fact instead, such as `Requires @cratis/arc 0.34 or later`), and stacking, retargeting, merge or deploy order and draft status (`Stacked on #207`, `Retarget to main`, `This PR should be deployed separately`, `Draft:`, `Do not merge`), reported as a reviewer instruction. The patterns name the phrasing, not the topic: `Events are now verified against their schema`, `Toasts are stacked on top of each other` and `- CI: builds now cache packages (#3)` pass.
 
-Fenced code and inline code are exempt. Closed HTML comments are not shown on the release page, so the heading, keyword, link and placeholder rules ignore them, but a `(#n)` inside a comment still closes the issue and fails, so never put issue references in comments. Each violation is reported as its own error, naming the rule, the offending line and the fix. Whether a summary states a cohesive theme, whether a bullet is user-facing and whether an issue number exists cannot be decided from text; reviewers keep those.
+Fenced code and inline code are exempt. Closed HTML comments are not shown on the release page, so the heading, keyword, link and placeholder rules ignore them, and release-action removes them before publishing, so a `(#n)` inside a comment closes nothing. Such a `(#n)` still fails: write it at the end of the delivering bullet, outside the comment, and never put issue references in comments. Each violation is reported as its own error, naming the rule, the offending line and the fix. Whether a summary states a cohesive theme, whether a bullet is user-facing and whether an issue number exists cannot be decided from text; reviewers keep those.
 
 In the legacy release-notes reusable, a second job, `drift`, compares the notes with the diff and only ever warns: a bullet whose code spans (paths and identifiers) the diff no longer touches, because the change landed on main another way or was dropped in conflict resolution; a version the diff only removes; a registry (PyPI, npm, NuGet, Maven Central, Docker Hub, GHCR) that no workflow publishes to; and a merge from the base branch that changed which files the pull request touches. It checks out the pull request head with full history (blobs on demand), skips Dependabot, and runs on label changes too, because the caller's concurrency group cancels the whole run when a label changes and the check would otherwise stay cancelled.
 
@@ -854,6 +884,8 @@ errors skip the repository rather than installing a nonreleasing caller. Reposit
 that never release receive `release-intent: false`; Arc.Kotlin also receives false
 because it retains its pinned semver caller. The canonical policy caller passes
 `runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. The bootstrap reads each repository's visibility and renders that default per repository: a public repository gets `ubuntu-latest` (its `pull_request` jobs never run on self-hosted runners, per `.cratis/ai/rules/github-actions.md`), a private repository gets `cratis-arc-small`, also for the Dependabot label normalizer, and a repository whose visibility cannot be read is skipped. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
+
+For repositories that receive the release-intent gate, the bootstrap also creates any missing `major`, `minor`, `patch` and `no-release` labels, even when workflow files are already up to date. Existing labels are matched case-insensitively and are never edited, renamed, recolored or deleted. Repositories that do not receive the release-intent gate get no labels.
 
 A repository that keeps its own copy of one bootstrapped file, and takes every other one, is listed for that file in the script's `SKIP_FILE_REPOS`: Arc.Kotlin keeps its SHA-pinned `verify-semver-label.yml`.
 
@@ -999,7 +1031,7 @@ A reusable guard that fails when AI session work records are tracked. It applies
 | `session` | explicit session prefixes at any depth, case-insensitively (`Handover-*`, `PROMPT-*`, `NEXT-SESSION`, `Session-*`, with `-` or `_` separators); legacy embedded all-caps names such as `HANDOVER.md` are also caught; never exempted by a documentation directory. Bare `prompt.md`, `session.md` and `handover.md` remain ordinary product files |
 | `work-record-shape` | a `PLAN`, `DESIGN`, `REPORT` or `STATUS` file at any depth (`PLAN-foo.md`, `Plan-foo.md`, `Status.md`), outside the documentation directories and product `templates/` directories |
 
-Decision records are documentation. `decisions/`, `Documentation/`, `docs/`, `Knowledge/`, `evidence/` and `governance/` at the repository root exempt the `work-record-shape` rule, case-insensitively. Product `templates/` directories at any depth also exempt the shape rule (for example Direct's prompt sections), not the session/runtime rules. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Work-record prefixes match every letter case, including `pLaN-notes.md` and `design-notes.md`, outside the documentation directories.
+Decision records are documentation. `decisions/`, `Documentation/`, `docs/`, `Knowledge/`, `evidence/` and `governance/` at the repository root exempt the `work-record-shape` rule, case-insensitively. Product `templates/` directories at any depth also exempt the shape rule (for example Direct's prompt sections), not the session/runtime rules. Files under `.claude/`, `.github/`, `.pi/`, `.agents/` and `.cratis/` are skipped by the name rules. Third-party trees under a directory named exactly `vendor/`, at any depth, are skipped by the name rules too, so vendored files keep their upstream names (for example `vendor/claude-seo/references/prompt-engineering.md`); the `.ai-work/` and `.pi/` runtime rules still apply. Work-record prefixes match every letter case, including `pLaN-notes.md` and `design-notes.md`, outside the documentation directories.
 
 Inputs:
 
@@ -1245,7 +1277,7 @@ be cloned, no repositories, or no files to scan). A clean run prints
 ### `bootstrap-common-workflows.yml`
 
 **Triggers:** `push` to `main` when a watched reusable workflow (including
-`cleanup-pr-artifacts.yml`), CodeQL config, or bootstrap script changes; also
+`cleanup-pr-artifacts.yml`) or bootstrap script changes; also
 `workflow_dispatch`.
 
 Maintains common wrappers across non-archived Cratis repositories, subject to its

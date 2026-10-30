@@ -64,6 +64,12 @@ test("blocking steps have ids, continue on error and guarded applicability", () 
     }
     assert.match(step("intent"), /inputs.release-intent && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'/);
     assert.match(step("notes"), /github.event_name == 'pull_request'/);
+    // #93: an unlabelled opened run waits in progress so the labeled run cancels it, and only then reads labels.
+    assert.match(step("label-grace"), /inputs.release-intent && github.event_name == 'pull_request' && github.event.action == 'opened'/);
+    assert.match(step("label-grace"), /toJSON\(github.event.pull_request.labels\) == '\[\]'/);
+    assert.match(step("label-grace"), /user.login != 'dependabot\[bot\]'/);
+    assert.match(step("label-grace"), /\n {8}run: sleep 20$/);
+    assert(steps.indexOf(step("label-grace")) < steps.indexOf(step("pull")), "waits before the live read");
     assert.match(step("pull"), /github.event_name == 'pull_request'/);
     assert.match(step("checkout"), /persist-credentials: false/);
     assert.doesNotMatch(step("checkout"), /\n\s+ref:/);

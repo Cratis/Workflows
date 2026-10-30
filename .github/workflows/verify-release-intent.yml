@@ -42,6 +42,12 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # A pull request opened without labels is often labelled seconds later (gh pr create --label, or a click
+      # right after opening). Waiting keeps this run in progress, so the labeled run cancels it through the
+      # caller's concurrency group instead of leaving a stale failing check (Cratis/Workflows#93).
+      - name: Wait briefly for labels added right after opening
+        if: ${{ github.event.action == 'opened' && toJSON(github.event.pull_request.labels) == '[]' && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        run: sleep 20
       - name: Require exactly one release-intent label
         env:
           GH_TOKEN: ${{ github.token }}

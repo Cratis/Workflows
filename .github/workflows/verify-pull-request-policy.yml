@@ -75,6 +75,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A pull request opened without labels is often labelled seconds later (gh pr create --label, or a click
+      # right after opening). Waiting here keeps this run in progress, so the labeled run cancels it through the
+      # caller's concurrency group instead of leaving a stale failing release-intent check (Cratis/Workflows#93).
+      - name: Wait briefly for labels added right after opening
+        id: label-grace
+        if: ${{ !cancelled() && inputs.release-intent && github.event_name == 'pull_request' && github.event.action == 'opened' && github.event.pull_request.base.ref == 'main' && toJSON(github.event.pull_request.labels) == '[]' && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        run: sleep 20
       - name: Read the pull request as it is now
         id: pull
         if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.tools.outcome == 'success' }}
@@ -158,7 +165,8 @@ jobs:
           const KEYWORD = /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references)(?:[ \t]*:[ \t]*|[ \t]+)((?:[\w.-]+\/[\w.-]+)?#(\d+))/gi;
           const KEYWORD_URL = /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references)(?:[ \t]*:[ \t]*|[ \t]+)(https?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+))/gi;
           // The pattern release-action closes issues with.
-          // It sees everything but fenced and inline code: HTML comments are not skipped.
+          // release-action removes closed HTML comments first; this check still reads them, so the position
+          // rule can fail a `(#n)` hidden in one.
           const CLOSES_ISSUE = /(?<![\w/-])\(#(\d+)\)/g;
           // What may follow the delivering `(#n)` and still count as the end of the bullet: more issue references
           // (`(part of #n)`, `(see #n)`, `(Cratis/Repo#n)` too), closing emphasis, a trailing `<br>` and sentence
@@ -462,9 +470,10 @@ jobs:
               // The same without fenced code, which does not belong to the bullet text around it.
               const uncommented = blank(blank(text, FENCED_CODE, " "), INLINE_CODE, "x");
               const prose = blank(uncommented, HTML_COMMENT, " ").split("\n");
-              // What release-action reads when it closes issues: it removes fenced and inline code, in that order,
-              // and nothing else, so a `(#n)` hidden in an HTML comment still closes its issue. Each match is
-              // mapped back to where it sits in the description.
+              // Every `(#n)` outside fenced and inline code, in that order, including those in HTML comments.
+              // release-action also removes closed comments, so a `(#n)` hidden in one closes nothing; it is
+              // collected here so the position rule can fail it. Each match is mapped back to where it sits in
+              // the description.
               const closes = closingReferences(text, prose);
 
               const violations = [];
@@ -650,7 +659,7 @@ jobs:
                   }
                   for (const match of closes.filter(candidate => candidate.line === index)) {
                       if (match.commented) {
-                          report("Issue reference position", index, `\`(#${match.number})\` sits inside an HTML comment: the release page does not show the comment, but release-action still closes #${match.number}. Delete it from the comment, or write \`(part of #${match.number})\` or \`see #${match.number}\` outside the comment if it must stay open; never put issue references in comments.`);
+                          report("Issue reference position", index, `\`(#${match.number})\` sits inside an HTML comment: release-action removes the comment with it, so #${match.number} is not closed. Write \`(#${match.number})\` at the end of the delivering bullet, outside the comment, or write \`(part of #${match.number})\` or \`see #${match.number}\` outside the comment if it must stay open; never put issue references in comments.`);
                           continue;
                       }
                       const end = bulletEnd[match.endLine];
@@ -854,12 +863,12 @@ jobs:
           fi
           script="$RUNNER_TEMP/verify-no-work-records.mjs"
           if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
-            'https://raw.githubusercontent.com/Cratis/Workflows/366135082754c74199b284163fb00b8e596cc424/.github/scripts/verify-no-work-records.mjs' \
+            'https://raw.githubusercontent.com/Cratis/Workflows/c310348e882067468f8b7b517a57799cdf9a3be9/.github/scripts/verify-no-work-records.mjs' \
             --output "$script"; then
             echo 'could not run: downloading the pinned work-record guard failed' >&2
             exit 2
           fi
-          script_sha256='4b0628fa06fb573f8b16f4398ded1c394f2b39294d6000bb1a65ce2711387c34'
+          script_sha256='7f9314da92eb4764e9baad91d302d25001588836408aacc4ae5275b42cc49b38'
           if ! node --input-type=module --eval '
             import { createHash } from "node:crypto";
             import { readFileSync } from "node:fs";

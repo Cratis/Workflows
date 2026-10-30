@@ -8,7 +8,6 @@
 #   - auto-approve-publish-deployments.yml — auto-approves npm/nuget trusted publishing deployments
 #   - verify-pull-request-policy.yml      — notes, drift, release intent and work records in one job;
 #                                           replaces only known bootstrapped legacy wrappers atomically
-#   - .github/codeql/codeql-config.yml     — shared CodeQL query filters
 #
 # Called by .github/workflows/bootstrap-common-workflows.yml after checkout.
 #
@@ -321,16 +320,6 @@ render_policy_wrapper() {
   printf '%s\n' "${file_content//__POLICY_RUNNER__/$runner}"
 }
 
-# .github/codeql/codeql-config.yml — shared CodeQL configuration
-# Decodes to:
-#   name: "Cratis CodeQL config"
-#
-#   query-filters:
-#     # CA1031 is intentionally excluded from the shared baseline.
-#     - exclude:
-#         id: ca1031
-BOOTSTRAPPED_FILES[".github/codeql/codeql-config.yml"]="bmFtZTogIkNyYXRpcyBDb2RlUUwgY29uZmlnIgoKcXVlcnktZmlsdGVyczoKICAjIENBMTAzMSBpcyBpbnRlbnRpb25hbGx5IGV4Y2x1ZGVkIGZyb20gdGhlIHNoYXJlZCBiYXNlbGluZS4KICAtIGV4Y2x1ZGU6CiAgICAgIGlkOiBjYTEwMzEK"
-
 # Stable POSIX checksum of the repository name: Monday, minute 1-59, 03:00-07:59 UTC.
 # Unlike an array index, this does not move existing schedules when repositories are added.
 package_update_cron() {
@@ -400,6 +389,44 @@ releases_with_release_action() {
     fi
   done < <(echo "$tree" | jq -r '.tree[] | select(.type == "blob" and (.path | test("^[.]github/workflows/[^/]+[.]ya?ml$"))) | .sha')
   return 1
+}
+
+# Create missing release-intent labels only; existing names (case-insensitive), colors and descriptions stay intact.
+ensure_release_intent_labels() {
+  local repo="$1" labels label_error label_response name color description
+  label_error=$(mktemp)
+  if ! labels=$(gh api --paginate "repos/Cratis/$repo/labels?per_page=100" \
+    --jq '.[].name | ascii_downcase' 2>"$label_error"); then
+    echo "  ⚠ Could not read release-intent labels for $repo, skipping"
+    echo "    API error: $(cat "$label_error" 2>/dev/null || true)"
+    rm -f "$label_error"
+    return 1
+  fi
+  rm -f "$label_error"
+
+  while IFS='|' read -r name color description; do
+    if grep -Fxq "$name" <<<"$labels"; then continue; fi
+    label_error=$(mktemp)
+    if label_response=$(gh api -X POST "repos/Cratis/$repo/labels" \
+      -f name="$name" -f color="$color" -f description="$description" 2>"$label_error"); then
+      echo "  ✓ Created release-intent label $name in $repo"
+    elif grep -q 'HTTP 422' "$label_error" \
+      && printf '%s' "$label_response" | jq -e 'any(.errors[]?; .code == "already_exists")' >/dev/null 2>&1; then
+      : # Another writer created the label after our read; never modify it.
+    else
+      echo "  ⚠ Could not create release-intent label $name in $repo, skipping"
+      echo "    API error: $(cat "$label_error" 2>/dev/null || true)"
+      rm -f "$label_error"
+      return 1
+    fi
+    rm -f "$label_error"
+  done <<'LABELS'
+major|bfdadc|Breaking change: merging releases a new major version
+minor|e5db36|New functionality: merging releases a new minor version
+patch|ace006|Fix: merging releases a new patch version
+no-release|ededed|Merging publishes no package, image, release, or deployment
+LABELS
+  echo "  ✓ All four release-intent labels exist in $repo"
 }
 
 # ================================================================
@@ -618,6 +645,9 @@ update_repo() {
   fi
   # Arc.Kotlin retains its deliberately pinned semver wrapper, not a second gate.
   if skips_file "$SEMVER_LABEL_FILE" "$repo"; then repo_releases=false; fi
+  if [ "$repo_releases" = true ]; then
+    ensure_release_intent_labels "$repo" || return 1
+  fi
   for file_path in "${!BOOTSTRAPPED_FILES[@]}"; do
     if skips_file "$file_path" "$repo"; then
       echo "  ℹ Skipping $file_path (Cratis/$repo keeps its own copy)"
@@ -634,9 +664,6 @@ update_repo() {
       file_b64=$(printf '%s\n' "$file_content" | base64 | tr -d '\n')
     fi
     case "$file_path" in
-      .github/codeql/codeql-config.yml)
-        file_label="codeql-config"
-        ;;
       *.yml)
         file_label=$(basename "$file_path" .yml)
         ;;

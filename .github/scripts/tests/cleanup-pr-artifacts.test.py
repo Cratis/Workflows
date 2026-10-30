@@ -308,7 +308,7 @@ class CleanupTests(unittest.TestCase):
 
     def test_listing_failures_in_each_family_and_level(self):
         for failing in ["package_type=container", "package_type=nuget", "container/image/versions?", "nuget/Cratis.Test/versions?"]:
-            statuses = [404, 429, 500] if failing.startswith("package_type=") else [401, 403, 404, 429, 500]
+            statuses = [404, 429, 500] if failing.startswith("package_type=") else [401, 404, 429, 500]
             for status in statuses:
                 with self.subTest(failing=failing, status=status):
                     api = FakeAPI()
@@ -346,7 +346,42 @@ class CleanupTests(unittest.TestCase):
     def test_page_two_failure_prevents_deletion(self):
         api = FakeAPI()
         api.versions[("nuget", "Cratis.Test")] = [version(i) for i in range(1, 102)]
-        api.hook = lambda m, e: Response(status=403) if "page=2" in e else None
+        api.hook = lambda m, e: Response(status=500) if "page=2" in e else None
+        self.assert_failed_without_deletes(self.run_cleanup(api))
+
+    def unauthorized_package_api(self, failing):
+        api = FakeAPI()
+        api.packages["container"] = [package("container", "image")]
+        api.versions[("container", "image")] = [version(7, tags=["pr42"])] + [
+            version(i, tags=["other"]) for i in range(1000, 1100)]
+        api.hook = lambda m, e: Response(status=403, raw=TOKEN.encode()) if failing in e else None
+        return api
+
+    def test_package_version_inventory_403_skips_only_that_package(self):
+        for failing in ["container/image/versions?", "container/image/versions?state=active&per_page=100&page=2"]:
+            for mode in ["reusable", "dry-run"]:
+                with self.subTest(failing=failing, mode=mode):
+                    api = self.unauthorized_package_api(failing)
+                    status, plan, output, api = self.run_cleanup(
+                        api, manual=mode == "dry-run",
+                        expected_summary="Skipped 1 package(s) whose version inventory was not authorized")
+                    self.assertEqual(status, 0, output)
+                    self.assertIn("::warning::Skipped container package image", output)
+                    self.assertNotIn("::error::", output)
+                    self.assertEqual([t["package_name"] for t in plan["targets"]], ["Cratis.Test"])
+                    self.assertTrue(all("container" not in e for e in api.deletes))
+                    self.assertEqual(len(api.deletes), 0 if mode == "dry-run" else 1)
+
+    def test_manual_apply_with_skipped_package_fails_without_deletion(self):
+        approved = self.approved()
+        api = self.unauthorized_package_api("container/image/versions?")
+        result = self.run_cleanup(api, manual=True, **approved)
+        self.assert_failed_without_deletes(result)
+        self.assertIn("::error::Skipped 1 package(s)", result[2])
+
+    def test_package_403_outside_inventory_still_fails(self):
+        api = FakeAPI()
+        api.hook = lambda m, e: Response(status=403) if m == "GET" and e.endswith("nuget/Cratis.Test") else None
         self.assert_failed_without_deletes(self.run_cleanup(api))
 
     def test_all_target_preflight_before_first_delete(self):

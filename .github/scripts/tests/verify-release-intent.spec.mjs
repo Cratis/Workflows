@@ -121,6 +121,16 @@ test("a Dependabot pull request passes with a notice when the token cannot write
     assert.equal(run(INTENT, { live: pull(["major", "patch"], "someone"), readOnly: true }).status, 1);
 });
 
+test("an unlabelled opened pull request waits before the gate reads labels, so a labeled run supersedes it", () => {
+    const grace = INTENT.indexOf("Wait briefly for labels added right after opening");
+    const gate = INTENT.indexOf("Require exactly one release-intent label");
+    assert(grace > 0 && grace < gate);
+    const block = INTENT.slice(grace, gate);
+    assert.match(block, /github.event.action == 'opened' && toJSON\(github.event.pull_request.labels\) == '\[\]'/);
+    assert.match(block, /user.login != 'dependabot\[bot\]'/);
+    assert.match(block, /run: sleep 20\n/);
+});
+
 test("the gate sets no permissions of its own, so the caller's pull-requests: read reaches it", () => {
     assert.equal(/^\s*permissions:/m.test(INTENT), false);
     assert(INTENT.includes("GH_TOKEN: ${{ github.token }}"));
