@@ -166,5 +166,44 @@ class WorkflowLintTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class InstallZizmorTests(unittest.TestCase):
+    """The pinned archive checksum must reject a substituted download before extraction."""
+
+    def run_installer(self, machine):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stubs, runner, github_path = root / "stubs", root / "runner", root / "github_path"
+            stubs.mkdir()
+            runner.mkdir()
+            github_path.write_text("")
+            # Offline: curl writes a substituted archive; uname selects the architecture branch.
+            (stubs / "curl").write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                                        'printf substituted > "$out"\n')
+            (stubs / "uname").write_text(f"#!/bin/sh\necho {machine}\n")
+            # Fails if the installer reaches extraction.
+            (stubs / "tar").write_text(f'#!/bin/sh\necho "$@" > "{root}/tar-called"\nexit 0\n')
+            probe = subprocess.run(["sha256sum", "--check", "--strict"], input="", capture_output=True, text=True)
+            if "usage" in probe.stderr.lower():
+                # macOS portability shim; CI (Linux) uses the real sha256sum.
+                (stubs / "sha256sum").write_text('#!/bin/sh\nexec shasum -a 256 -c -\n')
+            for stub in stubs.iterdir():
+                stub.chmod(0o755)
+            env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}", RUNNER_TEMP=str(runner),
+                       GITHUB_PATH=str(github_path))
+            result = subprocess.run(["bash", str(ROOT / ".github/scripts/install-zizmor.sh")], env=env,
+                                    capture_output=True, text=True, timeout=30)
+            return (result, (root / "tar-called").exists(), (runner / "bin" / "zizmor").exists(),
+                    github_path.read_text())
+
+    def test_substituted_archive_is_rejected_on_both_architectures(self):
+        for machine in ["x86_64", "aarch64"]:
+            with self.subTest(machine=machine):
+                result, extracted, installed, github_path = self.run_installer(machine)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(extracted)
+                self.assertFalse(installed)
+                self.assertEqual(github_path, "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
