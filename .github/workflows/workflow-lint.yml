@@ -17,6 +17,10 @@ on:
         description: Also check inline shell scripts with shellcheck.
         type: boolean
         default: false
+      zizmor:
+        description: Security audit mode (report, blocking, or off); offline, no token required.
+        type: string
+        default: report
       extra-files:
         description: Space-separated additional workflow files, such as templates, to lint.
         type: string
@@ -65,3 +69,22 @@ jobs:
           files=(.github/workflows/*.yml .github/workflows/*.yaml)
           read -r -a extra_files <<< "$EXTRA_FILES"
           actionlint "${args[@]}" "${files[@]}" "${extra_files[@]}"
+
+      - name: Install zizmor
+        if: inputs.zizmor != 'off'
+        run: bash .cratis-workflows/.github/scripts/install-zizmor.sh
+
+      - name: Audit workflow security
+        shell: bash
+        env:
+          ZIZMOR_MODE: ${{ inputs.zizmor }}
+        run: |
+          set -euo pipefail
+          args=(--offline)
+          case "$ZIZMOR_MODE" in
+            report) args+=(--no-exit-codes) ;;
+            blocking) ;;
+            off) exit 0 ;;
+            *) echo "Invalid zizmor mode: $ZIZMOR_MODE (expected report, blocking, or off)" >&2; exit 1 ;;
+          esac
+          zizmor "${args[@]}" .github/workflows
