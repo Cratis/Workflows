@@ -168,8 +168,16 @@ jobs:
                           expected_query = urllib.parse.parse_qs(expected.query)
                           target_page = query.pop("page", [])
                           expected_query.pop("page")
+                          # GitHub links org/repo listings through numeric IDs
+                          # (/organizations/<id>/..., /repositories/<id>/...). The link only supplies
+                          # the page number; requests are always rebuilt from the named endpoint.
+                          repository = re.match(r"/repos/Cratis/[^/]+/", expected.path)
+                          canonical = re.sub(r"^/organizations/[0-9]+/", lambda _: "/orgs/Cratis/", parsed.path)
+                          canonical = re.sub(r"^/repositories/[0-9]+/",
+                                             lambda _: repository.group(0) if repository else "/invalid/",
+                                             canonical)
                           require(parsed.scheme == expected.scheme and parsed.netloc == expected.netloc
-                                  and parsed.path == expected.path and not parsed.fragment
+                                  and canonical == expected.path and not parsed.fragment
                                   and query == expected_query and len(target_page) == 1
                                   and re.fullmatch(r"[1-9][0-9]*", target_page[0]) is not None,
                                   "Unsafe pagination target")
