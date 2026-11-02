@@ -106,7 +106,11 @@ class FakeAPI:
         headers = {}
         if len(items) > page * 100:
             query["page"] = [str(page + 1)]
-            url = "https://api.github.com/" + parsed.path + "?" + urllib.parse.urlencode(query, doseq=True)
+            path = parsed.path
+            if getattr(self, "numeric_links", False):
+                # GitHub's real Link headers name the organization by numeric ID.
+                path = path.replace("orgs/Cratis/", "organizations/16456213/", 1)
+            url = "https://api.github.com/" + path + "?" + urllib.parse.urlencode(query, doseq=True)
             headers["Link"] = f'<{url}>; rel="next"'
         return Response(items[(page - 1) * 100:page * 100], headers=headers)
 
@@ -223,6 +227,30 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual([t["version_id"] for t in plan["targets"]], [101])
         self.assertTrue(any("package_type=nuget" in e and "page=2" in e for _, e in api.calls))
         self.assertTrue(any("/versions?" in e and "page=2" in e for _, e in api.calls))
+
+    def test_pagination_links_with_numeric_organization_id(self):
+        api = FakeAPI()
+        api.numeric_links = True
+        api.packages["nuget"] = [package(name=f"Other{i}", repository="Cratis/Other", identity=i)
+                                  for i in range(1, 101)] + [package(identity=101)]
+        api.versions[("nuget", "Cratis.Test")] = [version(i, "1.0.0") for i in range(1, 101)] + [version(101)]
+        status, plan, output, api = self.run_cleanup(api)
+        self.assertEqual(status, 0, output)
+        self.assertEqual([t["version_id"] for t in plan["targets"]], [101])
+        self.assertTrue(all(e.startswith(("orgs/Cratis/", "repos/Cratis/")) for _, e in api.calls))
+
+    def test_numeric_pagination_links_must_match_the_listing(self):
+        for link in ['<https://api.github.com/organizations/16456213/repos?package_type=nuget&per_page=100&page=2>; rel="next"',
+                     '<https://api.github.com/organizations/x1/packages?package_type=nuget&per_page=100&page=2>; rel="next"',
+                     '<https://api.github.com/repositories/1/packages?package_type=nuget&per_page=100&page=2>; rel="next"',
+                     '<https://evil.example/organizations/16456213/packages?package_type=nuget&per_page=100&page=2>; rel="next"']:
+            api = FakeAPI()
+            page = [package(name=f"Other{i}", repository="Cratis/Other", identity=i) for i in range(1, 101)]
+            api.hook = lambda m, e, page=page, link=link: (Response(page, headers={"Link": link})
+                                                           if "package_type=nuget" in e else None)
+            status, _, output, _ = result = self.run_cleanup(api)
+            self.assertIn("Unsafe pagination target", output)
+            self.assert_failed_without_deletes(result)
 
     def test_container_package_and_version_pagination(self):
         api = FakeAPI()

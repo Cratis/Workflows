@@ -1,6 +1,6 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
-"""Offline actionlint red controls and reusable-workflow smoke coverage."""
+"""Offline actionlint/zizmor red controls and reusable-workflow smoke coverage."""
 import os
 from pathlib import Path
 import re
@@ -46,11 +46,23 @@ def lint(case, config=True):
                           capture_output=True, text=True, timeout=30)
 
 
+def workflow_step(name):
+    workflow = document(WORKFLOWS / "workflow-lint.yml")
+    return next(step for step in workflow["jobs"]["lint"]["steps"] if step.get("name") == name)
+
+
+def audit(root, mode):
+    return subprocess.run(["bash", "-c", workflow_step("Audit workflow security")["run"]],
+                          cwd=root, env=dict(os.environ, ZIZMOR_MODE=mode),
+                          capture_output=True, text=True, timeout=30)
+
+
 class WorkflowLintTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not shutil.which("actionlint"):
-            raise RuntimeError("actionlint is required; run .github/scripts/install-actionlint.sh in CI")
+        for tool in ["actionlint", "zizmor"]:
+            if not shutil.which(tool):
+                raise RuntimeError(f"{tool} is required; run .github/scripts/install-{tool}.sh in CI")
 
     def test_broken_fixture_fails_with_expected_rule_ids(self):
         result = lint("broken")
@@ -88,8 +100,7 @@ class WorkflowLintTests(unittest.TestCase):
                 self.assertNotIn("secrets", job)
 
     def test_lint_step_uses_repo_config_or_shared_default_and_keeps_workflows_with_extras(self):
-        workflow = document(WORKFLOWS / "workflow-lint.yml")
-        script = workflow["jobs"]["lint"]["steps"][-1]["run"]
+        script = workflow_step("Lint workflows and additional files")["run"]
         for config_name in ["actionlint.yaml", "actionlint.yml", None]:
             with self.subTest(config=config_name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -113,6 +124,85 @@ class WorkflowLintTests(unittest.TestCase):
                                         capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("[job-needs]", result.stdout)
+
+    def test_zizmor_blocking_fails_and_report_prints_the_same_findings(self):
+        for mode in ["blocking", "report"]:
+            with self.subTest(mode=mode):
+                result = audit(FIXTURES / "security", mode)
+                if mode == "blocking":
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for rule in ["unpinned-uses", "template-injection"]:
+                    self.assertIn(f"[{rule}]", result.stdout + result.stderr)
+
+    def test_zizmor_off_skips_install_and_audit_and_invalid_modes_fail(self):
+        workflow = document(WORKFLOWS / "workflow-lint.yml")
+        inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
+        self.assertEqual(inputs["zizmor"]["default"], "report")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(workflow_step("Install zizmor")["if"], "inputs.zizmor != 'off'")
+        with tempfile.TemporaryDirectory() as directory:
+            # No workflows here: an attempted audit would fail.
+            result = audit(directory, "off")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = audit(directory, "typo")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Invalid zizmor mode", result.stderr)
+
+    def test_zizmor_discovers_caller_config_and_report_still_fails_on_tool_errors(self):
+        for config_name in [".github/zizmor.yml", "zizmor.yml"]:
+            with self.subTest(config=config_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shutil.copytree(FIXTURES / "security/.github", root / ".github")
+                config = root / config_name
+                config.write_text("rules:\n  template-injection:\n    ignore: [unsafe.yml]\n")
+                result = audit(root, "blocking")
+                output = result.stdout + result.stderr
+                self.assertIn("[unpinned-uses]", output)
+                self.assertNotIn("[template-injection]", output)
+                config.write_text("rules: [invalid config]\n")
+                result = audit(root, "report")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class InstallZizmorTests(unittest.TestCase):
+    """The pinned archive checksum must reject a substituted download before extraction."""
+
+    def run_installer(self, machine):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stubs, runner, github_path = root / "stubs", root / "runner", root / "github_path"
+            stubs.mkdir()
+            runner.mkdir()
+            github_path.write_text("")
+            # Offline: curl writes a substituted archive; uname selects the architecture branch.
+            (stubs / "curl").write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                                        'printf substituted > "$out"\n')
+            (stubs / "uname").write_text(f"#!/bin/sh\necho {machine}\n")
+            # Fails if the installer reaches extraction.
+            (stubs / "tar").write_text(f'#!/bin/sh\necho "$@" > "{root}/tar-called"\nexit 0\n')
+            probe = subprocess.run(["sha256sum", "--check", "--strict"], input="", capture_output=True, text=True)
+            if "usage" in probe.stderr.lower():
+                # macOS portability shim; CI (Linux) uses the real sha256sum.
+                (stubs / "sha256sum").write_text('#!/bin/sh\nexec shasum -a 256 -c -\n')
+            for stub in stubs.iterdir():
+                stub.chmod(0o755)
+            env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}", RUNNER_TEMP=str(runner),
+                       GITHUB_PATH=str(github_path))
+            result = subprocess.run(["bash", str(ROOT / ".github/scripts/install-zizmor.sh")], env=env,
+                                    capture_output=True, text=True, timeout=30)
+            return (result, (root / "tar-called").exists(), (runner / "bin" / "zizmor").exists(),
+                    github_path.read_text())
+
+    def test_substituted_archive_is_rejected_on_both_architectures(self):
+        for machine in ["x86_64", "aarch64"]:
+            with self.subTest(machine=machine):
+                result, extracted, installed, github_path = self.run_installer(machine)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(extracted)
+                self.assertFalse(installed)
+                self.assertEqual(github_path, "")
 
 
 if __name__ == "__main__":
