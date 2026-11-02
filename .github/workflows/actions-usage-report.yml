@@ -26,13 +26,43 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build and publish the report
+      - name: Check reporting App configuration
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.__USAGE_SECRET__ || secrets.PAT_WORKFLOWS }}
+          APP_ID: ${{ vars.CRATIS_AUTOMATION_APP_ID }}
+          HAS_APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APP_ID" ] || [ "$HAS_APP_PRIVATE_KEY" != true ]; then
+            echo "::error::The usage report reads every organization repository with the cratis-automation App. Set the CRATIS_AUTOMATION_APP_ID variable and make the AUTOMATION_APP_PRIVATE_KEY secret available to this repository."
+            exit 1
+          fi
+      - name: Mint reporting App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CRATIS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          # Owner without repositories: the token covers every repository the
+          # installation can see, including private ones. Read-only: workflow runs
+          # and jobs need Actions read; repository listing needs Metadata read.
+          owner: ${{ github.repository_owner }}
+          permission-actions: read
+          permission-metadata: read
+      - name: Build the report
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/actions-usage-report.py > "${RUNNER_TEMP}/actions-usage-report.md"
+      - name: Publish the report
+        env:
+          # The App token is read-only; the workflow's own token opens the issue here.
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           report="${RUNNER_TEMP}/actions-usage-report.md"
-          python3 .github/scripts/actions-usage-report.py > "$report"
           title="Actions usage report ($(date -u +%Y-%m-%d))"
           gh issue create --repo "${GITHUB_REPOSITORY}" --title "$title" --body-file "$report"
