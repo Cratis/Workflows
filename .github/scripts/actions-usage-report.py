@@ -340,7 +340,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
                        for _, visibility, run in runs)
     lines.extend([f"GitHub-managed dynamic runs (included in public run-level totals): **{dynamic_runs}**.", ""])
     if private_visible == 0:
-        lines.append("**Private repository coverage unavailable:** PAT_WORKFLOWS exposes no private repositories. "
+        lines.append("**Private repository coverage unavailable:** the reporting token exposes no private repositories. "
                      "This is not evidence of zero private usage. Give the reporting token read access to private "
                      "repository metadata and Actions; on plans without private organization-secret support, use "
                      "a repository secret in Workflows.")
@@ -350,7 +350,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
     elif private_visible < private_total:
         lines.append(f"**Partial private coverage:** {private_visible} private repositories visible (including archived) "
                      f"out of {private_total} organization private repositories (including archived repositories). "
-                     "Check PAT_WORKFLOWS repository access; missing usage is not zero.")
+                     "Check the reporting token's repository access; missing usage is not zero.")
     else:
         lines.append("Private repository visibility matches the organization private-repository count.")
     lines.extend(["", "### Private repositories", "",
@@ -361,7 +361,7 @@ def render(repos, private_total, runs, jobs, errors, since, until):
         n, billed, self_hosted, unknown = private[repo]
         lines.append(f"| {repo} | {n} | {billed:,.0f} | {self_hosted:,.1f} | {unknown} |")
     if not private_active:
-        lines.append("| Not observable with PAT_WORKFLOWS | — | unknown | unknown | — |")
+        lines.append("| Not observable with the reporting token | — | unknown | unknown | — |")
     if hosted_private > 300:
         lines.extend(["", f"**Alert: observed private hosted usage is {hosted_private:,.0f} weighted minutes, "
                       "above the 300-minute weekly guardrail.**"])

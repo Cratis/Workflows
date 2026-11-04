@@ -1,0 +1,34 @@
+name: Probe automation App configuration
+
+# Reports whether this repository can use the cratis-automation GitHub App:
+# the CRATIS_AUTOMATION_APP_ID variable and the AUTOMATION_APP_PRIVATE_KEY secret.
+# It prints only present/absent, never a value.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Report presence
+        shell: bash
+        env:
+          # Secrets are not allowed in a step 'if:'; map them to a boolean here.
+          HAS_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY != '' }}
+          HAS_APP_ID: ${{ vars.CRATIS_AUTOMATION_APP_ID != '' }}
+        run: |
+          set -euo pipefail
+          presence() { if [ "$1" = true ]; then echo present; else echo absent; fi; }
+          key="$(presence "$HAS_KEY")"
+          app_id="$(presence "$HAS_APP_ID")"
+          echo "AUTOMATION_APP_PRIVATE_KEY: ${key}"
+          echo "CRATIS_AUTOMATION_APP_ID: ${app_id}"
+          {
+            echo "| Setting | Status |"
+            echo "|---|---|"
+            echo "| AUTOMATION_APP_PRIVATE_KEY (secret) | ${key} |"
+            echo "| CRATIS_AUTOMATION_APP_ID (variable) | ${app_id} |"
+          } >> "$GITHUB_STEP_SUMMARY"
