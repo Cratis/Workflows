@@ -87,4 +87,6 @@ jobs:
             off) exit 0 ;;
             *) echo "Invalid zizmor mode: $ZIZMOR_MODE (expected report, blocking, or off)" >&2; exit 1 ;;
           esac
-          zizmor "${args[@]}" .github/workflows
+          targets=(.github/workflows)
+          if [ -d .github/actions ]; then targets+=(.github/actions); fi
+          zizmor "${args[@]}" "${targets[@]}"
