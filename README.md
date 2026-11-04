@@ -953,8 +953,9 @@ The `zizmor` input selects one of three modes:
 Zizmor uses its native caller configuration discovery: `.github/zizmor.yml`,
 `.github/zizmor.yaml`, `zizmor.yml`, then `zizmor.yaml`. Without a caller config,
 it uses zizmor's built-in defaults; no shared suppressions are applied. It audits
-all caller workflows; `extra-files` applies only to actionlint. Start with report
-mode, fix or narrowly justify findings in the caller's config, then set
+all caller workflows and, when present, composite actions under `.github/actions`;
+`extra-files` applies only to actionlint. Start with report mode, fix or narrowly
+justify findings in the caller's config, then set
 `zizmor: blocking` on the reusable workflow call once the offline audit is clean.
 Workflows' own smoke call remains in report mode while existing findings are triaged.
 
@@ -963,7 +964,7 @@ For local checks, install actionlint, zizmor, shellcheck, and Python's PyYAML:
 ```bash
 actionlint
 actionlint .github/templates/publish.template.yml
-zizmor --offline .github/workflows
+zizmor --offline .github/workflows .github/actions
 python3 -B .github/scripts/tests/workflow-lint.test.py
 ```
 
@@ -971,7 +972,8 @@ The test proves a broken workflow fails with `expression`, `job-needs` and
 `syntax-check` rule IDs, and that `queue: max` passes with the shared config.
 It also proves zizmor detects `unpinned-uses` and `template-injection`, blocking
 mode fails, report mode prints the findings without failing, and caller config
-is honored.
+is honored. The composite fixture is caught, and callers without `.github/actions`
+or with an empty actions directory pass.
 
 ### Manual fallback for changes smoke cannot exercise
 
