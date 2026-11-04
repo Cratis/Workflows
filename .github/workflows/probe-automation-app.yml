@@ -6,6 +6,7 @@ name: Probe automation App configuration
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened]
     paths:
       - .github/workflows/probe-automation-app.yml
 
