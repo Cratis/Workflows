@@ -1,7 +1,9 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 """Offline checks for batched-release opt-in: template, cron helper and staleness decision."""
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import re
 import subprocess
@@ -22,6 +24,10 @@ def active_lines():
 def cron(repo):
     result = subprocess.run(["bash", str(CRON), repo], capture_output=True, text=True, check=True)
     return result.stdout.strip()
+
+
+def _capture_stdout():
+    return contextlib.redirect_stdout(io.StringIO())
 
 
 class PublishTemplateOptIn(unittest.TestCase):
@@ -112,6 +118,38 @@ class StalenessDecision(unittest.TestCase):
         self.assertEqual(staleness.parse_window("          release-window: 60\n"), 60)
         self.assertEqual(staleness.parse_window("          # release-window: 60\n"), 0)
         self.assertEqual(staleness.parse_window("          release-window: 0\n"), 0)
+
+
+class Report(unittest.TestCase):
+    def test_nobody_opted_in_is_not_a_failure(self):
+        with _capture_stdout() as out:
+            code = staleness.report(42, [])
+        self.assertEqual(code, 0)
+        self.assertIn("checked 42 repositories, 0 opted in", out.getvalue())
+
+    def test_nothing_pending_passes(self):
+        verdict = decide([])
+        with _capture_stdout():
+            code = staleness.report(1, [verdict])
+        self.assertEqual(code, 0)
+
+    def test_stale_verdict_fails(self):
+        verdict = decide([pull(1, "2026-01-01T09:00:00Z", "patch")])
+        with _capture_stdout() as out:
+            code = staleness.report(1, [verdict])
+        self.assertEqual(code, 1)
+        self.assertIn("::error::Repo", out.getvalue())
+
+
+class FetchRepositories(unittest.TestCase):
+    def test_an_empty_organization_is_a_failure_not_zero_opt_ins(self):
+        original = staleness.gh
+        staleness.gh = lambda *args: ""
+        try:
+            with self.assertRaises(staleness.CouldNotRun):
+                staleness.fetch_repositories()
+        finally:
+            staleness.gh = original
 
 
 class MergedPullsQuery(unittest.TestCase):

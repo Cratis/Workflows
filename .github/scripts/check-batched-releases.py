@@ -6,10 +6,14 @@
 A repository opts in to batched releases (Cratis/Workflows#189) with `release-window: <minutes>` on its
 cratis/release-action step. GitHub cron is best effort and can skip or lag, so this sweep checks that the
 oldest merged pull request carrying `major`, `minor` or `patch` since the latest non-draft release is not
-older than the window plus 60 minutes. All GitHub calls are read only and live in `fetch_*`; `evaluate` is
-a pure function.
+older than the window plus 60 minutes. All GitHub calls are read only and live in `fetch_*`; `evaluate`
+and `report` are pure functions.
 
-Exit codes: 0 ran clean, 1 found stale repositories, 2 could not run.
+Nobody having opted in yet is a legitimate outcome, not a failure — `fetch_repositories` is what carries
+the non-vacuity check (the organization always has repositories; an empty result there means the API call
+itself failed), while zero of those repositories opting in is just the common, un-adopted case.
+
+Exit codes: 0 ran clean (including nobody opted in), 1 found stale repositories, 2 could not run.
 """
 import argparse
 import base64
@@ -101,7 +105,10 @@ def gh(*args):
 def fetch_repositories():
     out = gh("api", f"orgs/{OWNER}/repos", "--paginate", "--jq",
              '.[] | select(.archived | not) | [.name, .default_branch] | @tsv')
-    return [tuple(line.split("\t")) for line in out.splitlines() if line]
+    repos = [tuple(line.split("\t")) for line in out.splitlines() if line]
+    if not repos:
+        raise CouldNotRun(f"orgs/{OWNER}/repos returned no repositories")
+    return repos
 
 
 def fetch_publish_window(repo, branch):
@@ -139,15 +146,33 @@ def fetch_merged_pulls(repo, branch, releases):
 
 
 def sweep(now):
+    """Return (repositories scanned, verdicts for those that opt in). Zero repositories opting in is a
+    legitimate outcome, not a failure — it means nobody has adopted release-window yet."""
+    repos = fetch_repositories()
     verdicts = []
-    for repo, branch in fetch_repositories():
+    for repo, branch in repos:
         window = fetch_publish_window(repo, branch)
         if window <= 0:
             continue
         releases = fetch_releases(repo)
         pulls = fetch_merged_pulls(repo, branch, releases)
         verdicts.append(evaluate(repo, window, releases, pulls, now))
-    return verdicts
+    return len(repos), verdicts
+
+
+def report(scanned, verdicts):
+    """Print the sweep's findings and decide the exit code. Pure aside from printing, so it is testable
+    without the GitHub API."""
+    if not verdicts:
+        print(f"checked {scanned} repositories, 0 opted in to batched releases, nothing to check")
+        return 0
+    for verdict in verdicts:
+        print(verdict.summary())
+    stale = [v for v in verdicts if v.stale]
+    for verdict in stale:
+        print(verdict.error())
+    print(f"checked {len(verdicts)} batched repositories, {len(stale)} stale")
+    return 1 if stale else 0
 
 
 def self_test():
@@ -170,20 +195,11 @@ def main(argv=None):
     if args.self_test:
         return self_test()
     try:
-        verdicts = sweep(datetime.now(timezone.utc))
+        scanned, verdicts = sweep(datetime.now(timezone.utc))
     except CouldNotRun as error:
         print(f"::error::could not run: {error}")
         return 2
-    if not verdicts:
-        print("::error::could not run: no repository opts in to batched releases, so nothing was checked")
-        return 2
-    for verdict in verdicts:
-        print(verdict.summary())
-    stale = [v for v in verdicts if v.stale]
-    for verdict in stale:
-        print(verdict.error())
-    print(f"checked {len(verdicts)} batched repositories, {len(stale)} stale")
-    return 1 if stale else 0
+    return report(scanned, verdicts)
 
 
 if __name__ == "__main__":
