@@ -1,0 +1,10 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Unsafe composite security audit control
+description: Exercise security findings in caller composite actions.
+runs:
+  using: composite
+  steps:
+    - uses: docker/login-action@v3
+    - run: echo ${{ github.event.pull_request.title }}
+      shell: bash

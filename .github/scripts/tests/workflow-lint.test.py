@@ -136,6 +136,31 @@ class WorkflowLintTests(unittest.TestCase):
                 for rule in ["unpinned-uses", "template-injection"]:
                     self.assertIn(f"[{rule}]", result.stdout + result.stderr)
 
+    def test_zizmor_audits_composite_actions_in_report_and_blocking(self):
+        for mode in ["blocking", "report"]:
+            with self.subTest(mode=mode):
+                result = audit(FIXTURES / "security-composite", mode)
+                output = result.stdout + result.stderr
+                if mode == "blocking":
+                    self.assertNotEqual(result.returncode, 0, output)
+                else:
+                    self.assertEqual(result.returncode, 0, output)
+                for rule in ["unpinned-uses", "template-injection"]:
+                    self.assertIn(f"[{rule}]", output)
+                self.assertIn("action.yml", output)
+
+    def test_zizmor_tolerates_callers_without_or_with_empty_actions_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(FIXTURES / "security-composite/.github/workflows", root / ".github/workflows")
+            result = audit(root, "blocking")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("No such file", result.stderr)
+            self.assertNotIn("error", result.stderr.lower())
+            (root / ".github/actions").mkdir()
+            result = audit(root, "report")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_zizmor_off_skips_install_and_audit_and_invalid_modes_fail(self):
         workflow = document(WORKFLOWS / "workflow-lint.yml")
         inputs = workflow.get("on", workflow.get(True))["workflow_call"]["inputs"]
