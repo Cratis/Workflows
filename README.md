@@ -104,6 +104,10 @@ and skips every ecosystem build, the candidate commit, the direct-mode push and 
 pull request; the job succeeds. A Git error in that check fails the job instead of
 reading as "no changes".
 
+**.NET SDK selection.** The workflow installs SDK 10.0.x plus whatever the caller's `global.json` pins, so a
+repository opts in to .NET 11 by pinning an SDK 11 there; callers without a pin keep SDK 10. The
+[publish template](/.github/templates/publish.template.yml) lists `DOTNET11_VERSION` next to 8, 9 and 10.
+
 **NuGet packages come from the Actions cache.** When .NET is detected, the workflow
 restores `~/.nuget/packages` with `actions/cache/restore` under
 `nuget-v1-<runner OS>-<hash>`, hashed before any update from `**/packages.lock.json`,
