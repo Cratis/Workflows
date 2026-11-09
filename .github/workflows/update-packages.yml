@@ -32,6 +32,8 @@ name: Update Packages
 # path even with the App configured. No mode enables automatic merging.
 
 env:
+  # Default SDK for callers without a global.json pin. A caller opts in to .NET 11 by pinning an
+  # SDK 11 in its own global.json, which the Setup .NET step installs; never raise this default.
   DOTNET_VERSION: "10.0.x"
   ELIXIR_VERSION: "1.18"
   OTP_VERSION: "27"

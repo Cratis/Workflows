@@ -21,6 +21,8 @@ env:
   DOTNET8_VERSION: "8.0.407"
   DOTNET9_VERSION: "9.0.x"
   DOTNET10_VERSION: "10.0.x"
+  # Opt in to .NET 11 by listing this version next to the others in your setup-dotnet step.
+  DOTNET11_VERSION: "11.0.x"
 
 on:
   workflow_dispatch:

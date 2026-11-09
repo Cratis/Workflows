@@ -28,6 +28,17 @@ class WorkflowTemplatesTests(unittest.TestCase):
         result = checker.scan_directory(template.parent, "Workflows")
         self.assertEqual((result.subjects, result.violations), (1, []))
 
+    def test_publish_example_lists_net11_additively(self):
+        text = (ROOT / TEMPLATE_PATH).read_text()
+        for version in ['DOTNET8_VERSION: "8.0.407"', 'DOTNET9_VERSION: "9.0.x"',
+                        'DOTNET10_VERSION: "10.0.x"', 'DOTNET11_VERSION: "11.0.x"']:
+            self.assertIn(version, text)
+
+    def test_update_packages_default_sdk_stays_10_so_net11_is_opt_in(self):
+        text = (ROOT / ".github/workflows/update-packages.yml").read_text()
+        self.assertIn('DOTNET_VERSION: "10.0.x"', text)
+        self.assertIn("global-json-file:", text)
+
     def test_workflow_directory_contains_no_template_yaml(self):
         templates = [path.name for path in (ROOT / ".github/workflows").iterdir()
                      if path.suffix in {".yml", ".yaml"} and ".template." in path.name]
