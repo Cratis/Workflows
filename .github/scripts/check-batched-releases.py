@@ -139,15 +139,34 @@ def fetch_merged_pulls(repo, branch, releases):
 
 
 def sweep(now):
+    repos = fetch_repositories()
     verdicts = []
-    for repo, branch in fetch_repositories():
+    for repo, branch in repos:
         window = fetch_publish_window(repo, branch)
         if window <= 0:
             continue
         releases = fetch_releases(repo)
         pulls = fetch_merged_pulls(repo, branch, releases)
         verdicts.append(evaluate(repo, window, releases, pulls, now))
-    return verdicts
+    return len(repos), verdicts
+
+
+def report(total, verdicts):
+    """Render the sweep outcome and pick the exit code. Pure, so it is testable without `gh`.
+
+    No organization repository at all means the fetch itself is suspect (``CouldNotRun`` only
+    covers a failed call, not an empty one), so that stays a could-not-run. Nobody opted in to
+    batched releases is a legitimate, if empty, outcome: there is nothing to check, not a failure.
+    """
+    if total == 0:
+        return ["::error::could not run: no repositories found in the organization"], 2
+    if not verdicts:
+        return [f"checked 0 of {total} organization repositories, none opted in to batched releases"], 0
+    lines = [verdict.summary() for verdict in verdicts]
+    stale = [v for v in verdicts if v.stale]
+    lines += [verdict.error() for verdict in stale]
+    lines.append(f"checked {len(verdicts)} batched repositories, {len(stale)} stale")
+    return lines, 1 if stale else 0
 
 
 def self_test():
@@ -170,20 +189,14 @@ def main(argv=None):
     if args.self_test:
         return self_test()
     try:
-        verdicts = sweep(datetime.now(timezone.utc))
+        total, verdicts = sweep(datetime.now(timezone.utc))
     except CouldNotRun as error:
         print(f"::error::could not run: {error}")
         return 2
-    if not verdicts:
-        print("::error::could not run: no repository opts in to batched releases, so nothing was checked")
-        return 2
-    for verdict in verdicts:
-        print(verdict.summary())
-    stale = [v for v in verdicts if v.stale]
-    for verdict in stale:
-        print(verdict.error())
-    print(f"checked {len(verdicts)} batched repositories, {len(stale)} stale")
-    return 1 if stale else 0
+    lines, code = report(total, verdicts)
+    for line in lines:
+        print(line)
+    return code
 
 
 if __name__ == "__main__":
