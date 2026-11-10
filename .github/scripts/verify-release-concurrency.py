@@ -65,7 +65,9 @@ def is_subject_name(name):
     if not lower.endswith(WORKFLOW_SUFFIXES) or not SUBJECT_PATTERN.search(lower):
         return False
     # A documentation workflow only triggers a site build, where latest-wins is correct.
-    excluded = (lower.startswith(("verify-", "auto-approve"))
+    # "check-" is "verify-" by another name: both describe a read-only sweep that reports on
+    # release health (Cratis/Workflows/check-batched-releases.yml) rather than performing a release.
+    excluded = (lower.startswith(("verify-", "check-", "auto-approve"))
                 or any(part in lower for part in ("release-notes", "release-intent", "documentation")))
     return not excluded
 
@@ -293,6 +295,7 @@ CLEAN = {
     "deploy-latest-wins.yml": "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: false\n",
     "release-reusable.yml": "on: workflow_call\nconcurrency:\n  group: release\n  cancel-in-progress: true\n",
     "verify-release-notes.yml": "on: pull_request\nconcurrency:\n  group: notes\n  cancel-in-progress: true\n",
+    "check-batched-releases.yml": "on: schedule\nconcurrency:\n  group: sweep\n  cancel-in-progress: true\n",
     "publish-documentation.yml": "on: push\njobs: {}\n",
     "publish-per-sha-job-queue.yml": "on: push\n" + PER_SHA + JOB_QUEUED,
 }
