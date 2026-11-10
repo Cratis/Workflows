@@ -39,6 +39,10 @@ ALLOWLIST = (
        "github.workflow would collide with the caller's); a manual dispatch runs ungrouped - ends when "
        "the file gets a uniquely named group with queue: max")
       for client in ("elixir", "kotlin", "python", "typescript")),
+    ("Direct", "publish-runner.yml",
+     "reusable workflow; concurrency inherited from caller publish.yml's 'direct-publish' queue:max group "
+     "(it is called from a job with no concurrency of its own); a manual dispatch runs ungrouped - ends "
+     "when the file gets a uniquely named group with queue: max"),
 )
 ALLOWED = {(repo, name) for repo, name, _ in ALLOWLIST}
 

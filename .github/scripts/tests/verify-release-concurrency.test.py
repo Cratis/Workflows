@@ -118,6 +118,11 @@ class FixtureTests(unittest.TestCase):
         result.check("Arc", "chronicle-published.yml", UNQUEUED)
         self.assertEqual((result.subjects, result.violations), (1, []))
 
+    def test_direct_publish_runner_reusable_dispatch_is_allowlisted(self):
+        result = checker.Scan()
+        result.check("Direct", "publish-runner.yml", UNQUEUED)
+        self.assertEqual((result.subjects, result.violations), (1, []))
+
     def test_allowlisted_file_passes_only_for_its_repository(self):
         allowed = scan("allowlisted", repo="Studio")
         self.assertEqual((allowed.violations, allowed.allowlist_used), ([], {("Studio", "publish.yml")}))
