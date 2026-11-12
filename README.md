@@ -749,13 +749,12 @@ The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <
 | `stack-name` | none (`--stack` is omitted) |
 | `work-dir` | `.` |
 | `args` | none; extra flags, space-separated |
-| `allow-patterns-file` | none |
 
 `up` adds `--yes --skip-preview --non-interactive`. Passphrase and backend credentials come from the step's environment, never from inputs.
 
-The scan covers PEM private keys and certificates, kubeconfig credential fields, base64-encoded PEM armour, GitHub tokens, JWTs and AWS access key IDs. It cannot see unarmoured secrets, so mark every value that carries a credential as a Pulumi secret; a secret prints as `[secret]` and needs no exception.
+The scan covers PEM private keys and certificates, kubeconfig credential fields, base64-encoded PEM armour, GitHub tokens, JWTs and AWS access key IDs. It cannot see unarmoured secrets, so mark every value that carries a credential as a Pulumi secret; a secret prints as `[secret]`.
 
-Certificates fail by default. For a certificate that is intentionally public and cannot be a secret, list the SHA-256 of its body (the base64 lines joined, without whitespace) one per line in a committed file and pass it as `allow-patterns-file`. Private keys, kubeconfig credentials and tokens are never tolerated.
+There are no exceptions and no allow-list: a certificate in the output, including an intentionally public CA certificate, withholds it. Fix a false positive at the source by marking that Pulumi output as a secret, or by not exporting it.
 
 `verify-pulumi-guarded.yml` runs `.github/scripts/tests/pulumi-guarded.test.py` against a fake `pulumi` and calls the action in a self-test.
 

@@ -25,12 +25,6 @@ inputs:
     description: Extra Pulumi flags, space-separated, such as "--refresh --diff --target urn".
     required: false
     default: ""
-  allow-patterns-file:
-    description: >-
-      Optional file (repository-relative or absolute) with one SHA-256 per line, the fingerprint
-      of a certificate body that may appear in output. Never tolerates private keys or tokens.
-    required: false
-    default: ""
 
 runs:
   using: composite
@@ -42,7 +36,6 @@ runs:
         PULUMI_GUARD_COMMAND: ${{ inputs.command }}
         PULUMI_GUARD_STACK: ${{ inputs.stack-name }}
         PULUMI_GUARD_ARGS: ${{ inputs.args }}
-        PULUMI_GUARD_ALLOW_INPUT: ${{ inputs.allow-patterns-file }}
         PULUMI_GUARD_SCRIPT: ${{ github.action_path }}/../../scripts/pulumi-guarded.sh
       run: |
         set -euo pipefail
@@ -57,8 +50,4 @@ runs:
           read -r -a extra <<< "$PULUMI_GUARD_ARGS"
           args+=("${extra[@]}")
         fi
-        allow="$PULUMI_GUARD_ALLOW_INPUT"
-        if [ -n "$allow" ] && [ "${allow#/}" = "$allow" ]; then
-          allow="$GITHUB_WORKSPACE/$allow"
-        fi
-        PULUMI_GUARD_ALLOW_FILE="$allow" bash "$PULUMI_GUARD_SCRIPT" "${args[@]}"
+        bash "$PULUMI_GUARD_SCRIPT" "${args[@]}"

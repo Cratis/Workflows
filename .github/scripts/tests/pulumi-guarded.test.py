@@ -143,54 +143,38 @@ class FailClosedSpecs(GuardCase):
         self.assert_temp_clean(run)
 
 
-class AllowListSpecs(GuardCase):
-    def allow_file(self, *fingerprints):
-        path = self.work / "allow.txt"
-        path.write_text("# approved CA\n\n" + "\n".join(fingerprints) + "\n")
-        return {"PULUMI_GUARD_ALLOW_FILE": str(path)}
-
-    def test_certificate_fails_by_default(self):
-        self.assert_withheld(self.run_guard(self.fixture("certificate.txt")), "certificate")
-
-    def test_listed_certificate_is_tolerated(self):
-        fingerprint = hashlib.sha256(CERT_BODY.encode()).hexdigest()
-        run = self.run_guard(self.fixture("certificate.txt"), extra=self.allow_file(fingerprint))
-        self.assertEqual(run.code, 0, run.text)
-
-    def test_unlisted_certificate_is_withheld(self):
-        run = self.run_guard(self.fixture("certificate.txt"), extra=self.allow_file("0" * 64))
-        self.assert_withheld(run, "certificate")
-
-    def test_allow_list_never_tolerates_a_private_key(self):
-        fingerprint = hashlib.sha256(CERT_BODY.encode()).hexdigest()
-        run = self.run_guard(self.fixture("certificate-with-key.txt"), extra=self.allow_file(fingerprint))
-        self.assert_withheld(run, "private-key")
-
-
-class MalformedCertificateSpecs(AllowListSpecs):
-    def listed(self, text):
+class CertificateSpecs(GuardCase):
+    def withheld_text(self, text):
         path = self.work / "blocks.txt"
         path.write_text(text)
-        fingerprint = hashlib.sha256(CERT_BODY.encode()).hexdigest()
-        return self.run_guard(path, extra=self.allow_file(fingerprint))
+        self.assert_withheld(self.run_guard(path), "certificate")
+
+    def test_certificate_is_withheld(self):
+        self.assert_withheld(self.run_guard(self.fixture("certificate.txt")), "certificate")
+
+    def test_certificate_with_private_key_is_withheld(self):
+        self.assert_withheld(self.run_guard(self.fixture("certificate-with-key.txt")), "private-key")
+
+    def test_allow_file_environment_has_no_effect(self):
+        allow = self.work / "allow.txt"
+        allow.write_text(hashlib.sha256(CERT_BODY.encode()).hexdigest() + "\n")
+        run = self.run_guard(self.fixture("certificate.txt"), extra={"PULUMI_GUARD_ALLOW_FILE": str(allow)})
+        self.assert_withheld(run, "certificate")
 
     def test_nested_begin_is_withheld(self):
         begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
-        run = self.listed(f"{begin}\nTESTONLYUNLISTED\n{begin}\n{CERT_BODY}\n{end}\n")
-        self.assert_withheld(run, "certificate")
+        self.withheld_text(f"{begin}\nTESTONLYUNLISTED\n{begin}\n{CERT_BODY}\n{end}\n")
 
     def test_begin_without_end_is_withheld(self):
         begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
-        run = self.listed(f"{begin}\n{CERT_BODY}\n{end}\n{begin}\nTESTONLYOPEN\n")
-        self.assert_withheld(run, "certificate")
+        self.withheld_text(f"{begin}\n{CERT_BODY}\n{end}\n{begin}\nTESTONLYOPEN\n")
 
     def test_empty_certificate_body_is_withheld(self):
-        run = self.listed("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n")
-        self.assert_withheld(run, "certificate")
+        begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
+        self.withheld_text(f"{begin}\n{CERT_BODY}\n{end}\n{begin}\n{end}\n")
 
     def test_other_pem_certificate_label_is_withheld(self):
-        run = self.listed("-----BEGIN X509 CERTIFICATE-----\nTESTONLYUNLISTED\n-----END X509 CERTIFICATE-----\n")
-        self.assert_withheld(run, "certificate")
+        self.withheld_text("-----BEGIN X509 CERTIFICATE-----\nTESTONLY\n-----END X509 CERTIFICATE-----\n")
 
 
 class ActionSpecs(unittest.TestCase):
@@ -209,43 +193,37 @@ class ActionSpecs(unittest.TestCase):
         self.assertIn("pulumi-guarded.sh", self.step["env"]["PULUMI_GUARD_SCRIPT"])
         self.assertIn("--yes --skip-preview --non-interactive", self.step["run"])
 
-    def run_body(self, stack, args, allow="", command="up"):
+    def run_body(self, stack, args, command="up"):
         recorded = Path(tempfile.mkdtemp()) / "args.txt"
         self.addCleanup(lambda: recorded.parent.exists() and __import__("shutil").rmtree(recorded.parent))
         stub = recorded.parent / "stub.sh"
-        stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$RECORD"\nprintf "%s" "${PULUMI_GUARD_ALLOW_FILE:-}" > "$RECORD.allow"\n')
+        stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$RECORD"\n')
         env = {
             "PATH": os.environ["PATH"],
             "PULUMI_GUARD_COMMAND": command,
             "PULUMI_GUARD_STACK": stack,
             "PULUMI_GUARD_ARGS": args,
-            "PULUMI_GUARD_ALLOW_INPUT": allow,
             "PULUMI_GUARD_SCRIPT": str(stub),
-            "GITHUB_WORKSPACE": "/workspace",
             "RECORD": str(recorded),
         }
         subprocess.run(["bash", "-c", self.step["run"]], env=env, check=True)
-        return recorded.read_text().splitlines(), Path(f"{recorded}.allow").read_text()
+        return recorded.read_text().splitlines()
 
     def test_run_body_splits_args_from_env(self):
-        lines, _ = self.run_body("prod", "--refresh --diff --target urn:x")
+        lines = self.run_body("prod", "--refresh --diff --target urn:x")
         self.assertEqual(
             lines,
             ["up", "--stack", "prod", "--yes", "--skip-preview", "--non-interactive", "--refresh", "--diff", "--target", "urn:x"],
         )
 
     def test_run_body_without_stack_or_args(self):
-        lines, _ = self.run_body("", "", command="preview")
+        lines = self.run_body("", "", command="preview")
         self.assertEqual(lines, ["preview"])
-
-    def test_run_body_resolves_relative_allow_file(self):
-        _, allow = self.run_body("", "", allow="infra/allow.txt", command="preview")
-        self.assertEqual(allow, "/workspace/infra/allow.txt")
 
     def test_declares_the_interface(self):
         self.assertEqual(
             set(self.action["inputs"]),
-            {"command", "stack-name", "work-dir", "args", "allow-patterns-file"},
+            {"command", "stack-name", "work-dir", "args"},
         )
 
 
