@@ -1,0 +1,39 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Bootstrap Dependabot
+
+on:
+  pull_request:
+    paths:
+      - .github/scripts/bootstrap-dependabot.sh
+      - .github/scripts/ensure-dependabot-config.py
+      - .github/scripts/tests/bootstrap-dependabot.test.py
+      - .github/workflows/bootstrap-dependabot.yml
+      - .github/workflows/verify-bootstrap-dependabot.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/bootstrap-dependabot.sh
+      - .github/scripts/ensure-dependabot-config.py
+      - .github/scripts/tests/bootstrap-dependabot.test.py
+      - .github/workflows/bootstrap-dependabot.yml
+      - .github/workflows/verify-bootstrap-dependabot.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify Dependabot append, scope and read-only dry runs
+        # Stateful fake gh only: no token, GitHub API calls or containers.
+        run: python3 .github/scripts/tests/bootstrap-dependabot.test.py
