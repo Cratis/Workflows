@@ -7,13 +7,39 @@
 # annotation names the command and the pattern class, never the matched text. There are no
 # exceptions: a value that must appear in output is marked as a Pulumi secret instead.
 #
-# Exit status: 1 when the scan matched or could not run (fail closed, wins over Pulumi's
-# status); otherwise Pulumi's own status.
+# Config reads, ESC plaintext reads and explicit secret output are refused before invocation.
+# Exit status: 1 when admission or scanning fails (wins over Pulumi's status); otherwise
+# Pulumi's own status. Pattern scanning cannot identify all unarmoured secrets.
 set -euo pipefail
 umask 077
 
+# Pulumi identifies commands by literal tokens: no prefixes, only the env/esc alias
+# (verified in r2 against v3.256.0). Plaintext paths require these words, so scan all
+# tokens without interpreting options or stopping at --. Values that literally use
+# these command words can also be refused.
+admit_command() {
+    local config_seen=0 env_seen=0 token
+    for token in "$@"; do
+        case "$token" in
+            --show-secrets|--show-secrets=*) return 1 ;;
+            config) config_seen=1 ;;
+            env|esc) env_seen=1 ;;
+            get) [ "$config_seen" -eq 0 ] && [ "$env_seen" -eq 0 ] || return 1 ;;
+            open|run) [ "$env_seen" -eq 0 ] || return 1 ;;
+        esac
+    done
+    return 0
+}
+
+if ! admit_command "$@"; then
+    echo "::error title=Pulumi output withheld::Pulumi invocation refused."
+    exit 1
+fi
+
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # name|extended regex
 CLASSES=(
@@ -34,6 +60,9 @@ match_status() {
 }
 
 command_label="${1:-}"
+if ! [[ "$command_label" =~ ^[a-zA-Z][a-zA-Z0-9-]*$ ]]; then
+    command_label="command"
+fi
 status=0
 pulumi "$@" > "$output" 2>&1 || status=$?
 

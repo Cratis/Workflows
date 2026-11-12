@@ -63,7 +63,7 @@ class GuardCase(unittest.TestCase):
         path.write_text(GENERATED[name] + "\n")
         return path
 
-    def run_guard(self, output, status=0, args=("preview", "--stack", "production", "--yes"), extra=None, path_dirs=()):
+    def run_guard(self, output, status=0, args=("preview", "--stack", "production", "--yes"), extra=None, path_dirs=(), action=None):
         recorded = self.work / "args.txt"
         env = {
             "PATH": os.pathsep.join([*map(str, path_dirs), str(FIXTURES), os.environ["PATH"]]),
@@ -73,7 +73,18 @@ class GuardCase(unittest.TestCase):
             "PULUMI_FAKE_ARGS": str(recorded),
             **(extra or {}),
         }
-        process = subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True, check=False)
+        invocation = ["bash", str(SCRIPT), *args]
+        if action is not None:
+            command, stack, flags = action
+            step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
+            env.update({
+                "PULUMI_GUARD_COMMAND": command,
+                "PULUMI_GUARD_STACK": stack,
+                "PULUMI_GUARD_ARGS": flags,
+                "PULUMI_GUARD_SCRIPT": str(SCRIPT),
+            })
+            invocation = ["bash", "-c", step["run"]]
+        process = subprocess.run(invocation, env=env, capture_output=True, text=True, check=False)
         return Run(process, recorded, self.tmp)
 
     def assert_withheld(self, run, label=None):
@@ -85,6 +96,241 @@ class GuardCase(unittest.TestCase):
 
     def assert_temp_clean(self, run):
         self.assertEqual(list(run.tmp.iterdir()), [], "temp file must be removed")
+
+
+class AdmissionSpecs(GuardCase):
+    REFUSAL = ANNOTATION + "Pulumi invocation refused.\n"
+    REJECTED = (
+        ("config", "get", "k"),
+        ("--non-interactive", "config", "get", "k"),
+        ("--color", "always", "config", "get", "k"),
+        ("--cwd=d", "config", "get", "k"),
+        ("config", "--stack", "s", "get", "k"),
+        ("config", "--", "get", "k"),
+        ("config", "get"),
+        ("config", "get", "TESTONLYKEY", "--path"),
+        ("config", "--color=always", "--stack=s", "get", "k"),
+        ("--cwd", "d", "config", "get", "k"),
+        ("-C", "d", "config", "-s", "s", "get", "k"),
+        ("--", "config", "get", "k"),
+        ("--unknown", "config", "get", "k"),
+        ("config", "--unknown", "get", "k"),
+        ("env", "--unknown=value", "open", "TESTONLYENV"),
+        ("--show-secrets", "preview"),
+        ("preview", "--show-secrets"),
+        ("preview", "--", "--show-secrets=true"),
+        ("--color", "--show-secrets", "preview"),
+        ("config", "--show-secrets=false"),
+        ("config", "get", "--show-secrets", "k"),
+        ("env", "open", "TESTONLYENV"),
+        ("env", "get", "TESTONLYENV"),
+        ("--color=always", "env", "--stack", "s", "open", "TESTONLYENV"),
+        ("env", "--", "get", "TESTONLYENV"),
+        ("esc", "open", "x"),
+        ("esc", "get", "x", "y"),
+        ("env", "run", "x", "--", "cmd"),
+        ("esc", "run", "x", "--", "cmd"),
+        ("--non-interactive", "esc", "open", "x"),
+        ("--color", "always", "esc", "get", "x", "y"),
+        ("--cwd=d", "esc", "run", "x", "--", "cmd"),
+        ("config", "-s", "s", "get", "k"),
+        ("config", "--config-file", "f.yaml", "get", "k"),
+        ("config", "--json", "--open=false", "get", "k"),
+        ("env", "--env", "x", "run", "--", "cmd"),
+        ("esc", "--env=x", "open"),
+        ("esc", "--", "run", "x", "--", "cmd"),
+        ("esc", "--env", "x", "--unknown", "open"),
+        ("-Cdir", "config", "get", "k"),
+        ("-eh", "esc", "open", "x"),
+        ("config", "-js", "s", "get", "k"),
+        ("config", "-sstack", "get", "k"),
+        ("esc", "-hQ", "run", "x", "--", "cmd"),
+        ("esc", "ls", "--show-secrets=false"),
+        ("preview", "--", "config", "set", "get"),
+        ("preview", "env", "ls", "--", "open"),
+        ("preview", "esc", "list", "--", "run"),
+    )
+
+    def assert_refused(self, run):
+        self.assertEqual(run.code, 1, run.text)
+        self.assertEqual(run.process.stdout, self.REFUSAL)
+        self.assertEqual(run.process.stderr, "")
+        self.assertFalse(run.args.exists(), "refusal must precede any Pulumi invocation")
+        self.assert_temp_clean(run)
+
+    def test_direct_rejections(self):
+        output = self.work / "ordinary.txt"
+        output.write_text("TESTONLY ordinary non-pattern value\n")
+        for args in self.REJECTED:
+            with self.subTest(args=args):
+                self.assert_refused(self.run_guard(output, args=args))
+
+    def test_real_composite_rejections(self):
+        for args in self.REJECTED:
+            with self.subTest(args=args):
+                self.assert_refused(self.run_guard(
+                    self.fixture("clean.txt"), action=(args[0], "", " ".join(args[1:])),
+                ))
+        self.assert_refused(self.run_guard(
+            self.fixture("clean.txt"), action=("config", "TESTONLYSTACK", "get TESTONLYKEY"),
+        ))
+
+    def test_global_options_do_not_hide_config_get(self):
+        values = ("--color", "--cwd", "-C", "--memprofilerate", "--otel-traces", "--profiling", "--tracing", "--verbose", "-v")
+        booleans = (
+            "--disable-integrity-checking", "--emoji", "-e", "--fully-qualify-stack-names",
+            "-Q", "--help", "-h", "--logflow", "--logtostderr", "--non-interactive", "--version",
+        )
+        prefixes = [(flag, "TESTONLYVALUE") for flag in values]
+        prefixes += [(flag + "=TESTONLYVALUE",) for flag in values]
+        prefixes += [(flag,) for flag in booleans]
+        prefixes += [(flag + "=false",) for flag in booleans if flag.startswith("--")]
+        for prefix in prefixes:
+            args = (*prefix, "config", "get", "k")
+            with self.subTest(args=args):
+                self.assert_refused(self.run_guard(self.fixture("clean.txt"), args=args))
+                self.assert_refused(self.run_guard(
+                    self.fixture("clean.txt"), action=(args[0], "", " ".join(args[1:])),
+                ))
+
+    def test_option_compatibility(self):
+        cases = (
+            ("config", "-ss", "set", "--help"),
+            ("-v0", "config", "set", "--help"),
+            ("-e=false", "config", "set", "--help"),
+            ("--help",),
+            ("--unknown-flag", "up"),
+            ("--unknown=value", "preview"),
+            ("config", "--stack"),
+            ("--color",),
+            ("--non-interactive",),
+            ("config get", "TESTONLYKEY"),
+            ("",),
+            ("config", "--env", "x", "set", "k", "v"),
+            ("env", "--config-file=f.yaml", "ls"),
+            ("esc", "--env"),
+            ("config", "--config-file", "f.yaml", "set", "k", "v"),
+            ("config", "--config-file=f.yaml", "set", "--help"),
+            ("config", "--config-file", "f.yaml", "set", "--help"),
+            ("config", "--stack", "s", "set", "k", "v"),
+            ("config", "-s", "s", "set", "k", "v"),
+            ("config", "-s=s", "set", "k", "v"),
+            ("config", "--json", "set", "k", "v"),
+            ("config", "-j", "--open", "set", "k", "v"),
+            ("config", "--json=false", "--open=true", "set", "k", "v"),
+            ("env", "--env", "x", "ls"),
+            ("env", "--env=x", "list"),
+            ("esc", "--env", "x", "ls"),
+            ("--non-interactive", "esc", "--env=x", "list", "--help"),
+        )
+        for args in cases:
+            with self.subTest(args=args):
+                for action in (None, (args[0], "", " ".join(args[1:]))):
+                    run = self.run_guard(self.fixture("clean.txt"), args=args, action=action)
+                    self.assertEqual(run.code, 0, run.text)
+                    self.assertEqual(run.args.read_text().strip(), " ".join(args))
+                    self.assert_temp_clean(run)
+
+    def test_scoped_options_do_not_hide_read_subcommands(self):
+        config_options = (
+            ("--config-file", "f.yaml"), ("--config-file=f.yaml",),
+            ("--stack", "s"), ("--stack=s",), ("-s", "s"),
+            ("--json",), ("-j",), ("--open",), ("--open=false",),
+        )
+        cases = [("config", *options, "get", "k") for options in config_options]
+        cases += [
+            (command, *options, subcommand, "x")
+            for command in ("env", "esc")
+            for options in (("--env", "x"), ("--env=x",))
+            for subcommand in ("open", "get", "run")
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                self.assert_refused(self.run_guard(self.fixture("clean.txt"), args=args))
+                self.assert_refused(self.run_guard(
+                    self.fixture("clean.txt"), action=(args[0], "", " ".join(args[1:])),
+                ))
+
+    def test_admitted_commands_preserve_argv(self):
+        cases = (
+            (),
+            ("get", "config", "set"),
+            ("open", "env", "ls"),
+            ("run", "esc", "ls"),
+            ("config", "--option=get", "set", "k", "v"),
+            ("env", "--env=open", "ls"),
+            ("esc", "get-value"),
+            ("config",),
+            ("config", "--stack", "s"),
+            ("config", "set", "TESTONLYKEY", "TESTONLYVALUE"),
+            ("config", "--stack=s", "set", "TESTONLYKEY", "TESTONLYVALUE"),
+            ("--non-interactive", "--color=always", "--cwd", "d", "preview", "--diff"),
+            ("--verbose", "3", "--memprofilerate=1", "--tracing", "file:t", "preview"),
+            ("--otel-traces=file:t", "--profiling", "p", "-e", "-Q", "-h", "--version", "version"),
+            ("env", "ls"),
+        )
+        for args in cases:
+            with self.subTest(args=args):
+                run = self.run_guard(self.fixture("clean.txt"), args=args)
+                self.assertEqual(run.code, 0, run.text)
+                self.assertEqual(run.args.read_text().strip(), " ".join(args))
+                self.assert_temp_clean(run)
+
+    def test_real_composite_normal_commands(self):
+        for command, stack, flags, expected in (
+            ("up", "prod", "--refresh --diff", "up --stack prod --yes --skip-preview --non-interactive --refresh --diff"),
+            ("preview", "", "--target urn:x", "preview --target urn:x"),
+            ("config", "prod", "set TESTONLYKEY TESTONLYVALUE", "config --stack prod set TESTONLYKEY TESTONLYVALUE"),
+        ):
+            with self.subTest(command=command):
+                run = self.run_guard(self.fixture("clean.txt"), action=(command, stack, flags))
+                self.assertEqual(run.code, 0, run.text)
+                self.assertEqual(run.args.read_text().strip(), expected)
+                self.assert_temp_clean(run)
+
+    def test_refresh_caller_preserves_import_pairs(self):
+        args = (
+            "refresh", "--stack", "production", "--yes", "--skip-preview",
+            "--import-pending-creates", "placeholder-resource",
+            "--import-pending-creates", "placeholder-id",
+            "--import-pending-creates", "another-resource",
+            "--import-pending-creates", "another-id",
+        )
+        run = self.run_guard(self.fixture("clean.txt"), args=args)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.args.read_text().strip(), " ".join(args))
+        self.assert_temp_clean(run)
+
+    def test_destroy_caller_preserves_flags(self):
+        args = ("destroy", "--yes", "--skip-preview", "--non-interactive")
+        run = self.run_guard(self.fixture("clean.txt"), args=args)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.args.read_text().strip(), " ".join(args))
+        self.assert_temp_clean(run)
+
+    def test_up_caller_with_automatic_action_flags(self):
+        run = self.run_guard(self.fixture("clean.txt"), action=("up", "", ""))
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.args.read_text().strip(), "up --yes --skip-preview --non-interactive")
+        self.assert_temp_clean(run)
+
+    def test_up_caller_without_args(self):
+        run = self.run_guard(self.fixture("clean.txt"), args=("up",))
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.args.read_text().strip(), "up")
+        self.assert_temp_clean(run)
+
+    def test_signals_remove_capture(self):
+        fake = self.work / "bin"
+        fake.mkdir()
+        pulumi = fake / "pulumi"
+        for signal, status in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=signal):
+                pulumi.write_text(f'#!/usr/bin/env bash\nkill -{signal} "$PPID"\n')
+                pulumi.chmod(0o755)
+                run = self.run_guard(self.fixture("clean.txt"), path_dirs=[fake])
+                self.assertEqual(run.code, status, run.text)
+                self.assert_temp_clean(run)
 
 
 class LeakSpecs(GuardCase):
@@ -108,6 +354,15 @@ class LeakSpecs(GuardCase):
     def test_annotation_names_command(self):
         run = self.run_guard(self.fixture("private-key.txt"), args=("up", "--yes"))
         self.assertIn("'pulumi up'", run.text)
+
+    def test_annotation_does_not_echo_option_values_or_invalid_labels(self):
+        for first in ("--tracing=TESTONLYARG", "up\nTESTONLYARG"):
+            with self.subTest(first=first):
+                run = self.run_guard(self.fixture("private-key.txt"), args=(first, "up"))
+                self.assert_withheld(run)
+                self.assertIn("'pulumi command'", run.text)
+                self.assertNotIn("TESTONLYARG", run.text)
+                self.assert_temp_clean(run)
 
 
 class PassThroughSpecs(GuardCase):

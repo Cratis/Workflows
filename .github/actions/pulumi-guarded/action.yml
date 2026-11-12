@@ -5,13 +5,15 @@
 # installed (pulumi/actions without `command`); passphrase and backend credentials are
 # inherited from the caller's environment, never passed as inputs.
 # The scan catches armoured and well-known token shapes; it cannot catch unarmoured secrets,
-# so mark credential values as Pulumi secrets too.
+# so mark credential values as Pulumi secrets too. Before running, every argument token is
+# scanned: --show-secrets, config followed later by get, and env/esc followed later by
+# open/get/run are refused. Options are not parsed, so all other invocations pass through.
 name: Pulumi guarded
 description: Runs a Pulumi command and withholds its output when it carries key, certificate or token material.
 
 inputs:
   command:
-    description: Pulumi command to run, such as preview, up, refresh, destroy or stack.
+    description: Single Pulumi command token; config followed later by get, and env/esc followed later by open/get/run, are refused anywhere in the arguments.
     required: true
   stack-name:
     description: Stack passed as --stack; omitted when empty.
@@ -22,7 +24,7 @@ inputs:
     required: false
     default: .
   args:
-    description: Extra Pulumi flags, space-separated, such as "--refresh --diff --target urn".
+    description: Extra Pulumi arguments, space-separated; --show-secrets and its equals form are refused anywhere, and literal command words are scanned even after --.
     required: false
     default: ""
 
