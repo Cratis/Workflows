@@ -223,8 +223,120 @@ class ActionSpecs(unittest.TestCase):
     def test_declares_the_interface(self):
         self.assertEqual(
             set(self.action["inputs"]),
-            {"command", "stack-name", "work-dir", "args"},
+            {"command", "stack-name", "work-dir", "args", "output-file"},
         )
+
+
+class OutputFileSpecs(GuardCase):
+    def run_action(self, stdout="clean.txt", stderr=None, status=0, destination=None,
+                   command="stack", args="output clusterId", output_mode=True):
+        step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
+        self.destination = destination if destination is not None else self.work / "result.txt"
+        recorded = self.work / "args.txt"
+        env = {
+            "PATH": os.pathsep.join([str(FIXTURES), os.environ["PATH"]]),
+            "TMPDIR": str(self.tmp),
+            "RUNNER_TEMP": str(self.tmp),
+            "GITHUB_WORKSPACE": str(self.work),
+            "PULUMI_GUARD_COMMAND": command,
+            "PULUMI_GUARD_STACK": "",
+            "PULUMI_GUARD_ARGS": args,
+            "PULUMI_GUARD_SCRIPT": str(SCRIPT),
+            "PULUMI_FAKE_OUTPUT": str(self.fixture(stdout)),
+            "PULUMI_FAKE_STDERR": str(self.fixture(stderr)) if stderr else "/dev/null",
+            "PULUMI_FAKE_STATUS": str(status),
+            "PULUMI_FAKE_ARGS": str(recorded),
+        }
+        if output_mode:
+            env["PULUMI_GUARD_OUTPUT_FILE"] = str(self.destination)
+        process = subprocess.run(["bash", "-c", step["run"]], env=env,
+                                 cwd=self.tmp, capture_output=True, text=True, check=False)
+        return Run(process, recorded, self.tmp)
+
+    def test_absent_input_keeps_stdout_and_stderr_in_log(self):
+        run = self.run_action(stderr="clean.txt", output_mode=False)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.text, self.fixture("clean.txt").read_text() * 2)
+        self.assertFalse(self.destination.exists())
+
+    def test_clean_stdout_is_exact_private_file_not_log(self):
+        run = self.run_action()
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.text, "")
+        self.assertEqual(self.destination.read_bytes(), self.fixture("clean.txt").read_bytes())
+        self.assertEqual(self.destination.stat().st_mode & 0o777, 0o600)
+        self.assert_temp_clean(run)
+
+    def test_clean_stderr_is_logged_separately(self):
+        run = self.run_action(stderr="clean.txt")
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.process.stdout, "")
+        self.assertEqual(run.process.stderr, self.fixture("clean.txt").read_text())
+        self.assertTrue(self.destination.exists())
+
+    def test_secret_stdout_or_stderr_is_withheld(self):
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                destination = self.work / "result.txt"
+                destination.write_text("stale")
+                run = self.run_action(**{stream: "private-key.txt"})
+                self.assert_withheld(run, "private-key")
+                self.assertFalse(destination.exists())
+                self.assert_temp_clean(run)
+
+    def test_failure_removes_stale_file_and_preserves_exit_code(self):
+        destination = self.work / "result.txt"
+        destination.write_text("stale")
+        run = self.run_action(status=23, stderr="clean.txt")
+        self.assertEqual(run.code, 23, run.text)
+        self.assertEqual(run.process.stdout, "")
+        self.assertEqual(run.process.stderr, self.fixture("clean.txt").read_text())
+        self.assertFalse(destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_show_secrets_is_rejected_in_either_mode_before_running(self):
+        for output_mode in (False, True):
+            for flag in ("--show-secrets", "--show-secrets=true"):
+                with self.subTest(output_mode=output_mode, flag=flag):
+                    run = self.run_action(args=f"output clusterId {flag}", output_mode=output_mode)
+                    self.assertEqual(run.code, 1)
+                    self.assertFalse(run.args.exists())
+                    self.assertFalse(self.destination.exists())
+
+    def test_read_commands_reach_pulumi(self):
+        for command, args in (("stack", "output clusterId"), ("config", "get chronicleImage"),
+                              ("preview", "--json")):
+            with self.subTest(command=command):
+                run = self.run_action(command=command, args=args)
+                self.assertEqual(run.code, 0, run.text)
+                self.assertEqual(run.args.read_text().strip(), f"{command} {args}")
+
+    def test_relative_path_is_workspace_relative_not_work_dir(self):
+        run = self.run_action(destination="relative.txt")
+        self.assertEqual(run.code, 0, run.text)
+        self.assertTrue((self.work / "relative.txt").is_file())
+        self.assertFalse((self.tmp / "relative.txt").exists())
+
+    def test_runner_temp_path_is_allowed(self):
+        run = self.run_action(destination=self.tmp / "result.txt")
+        self.assertEqual(run.code, 0, run.text)
+        self.assertTrue(self.destination.is_file())
+
+    def test_invalid_paths_are_rejected_before_running(self):
+        outside = self.work.parent / f"{self.work.name}-outside.txt"
+        alias = self.work / "alias"
+        alias.symlink_to(self.work.parent, target_is_directory=True)
+        target = self.work / "target.txt"
+        target.write_text("untouched")
+        link = self.work / "link.txt"
+        link.symlink_to(target)
+        for destination in (self.work, outside, self.work / ".." / outside.name,
+                            alias / outside.name, link, self.work / "missing" / "result", " "):
+            with self.subTest(destination=destination):
+                run = self.run_action(destination=destination)
+                self.assertEqual(run.code, 1)
+                self.assertFalse(run.args.exists())
+        self.assertEqual(target.read_text(), "untouched")
 
 
 if __name__ == "__main__":
