@@ -132,6 +132,29 @@ class AdmissionSpecs(GuardCase):
         ("env", "get", "TESTONLYENV"),
         ("--color=always", "env", "--stack", "s", "open", "TESTONLYENV"),
         ("env", "--", "get", "TESTONLYENV"),
+        ("esc", "open", "x"),
+        ("esc", "get", "x", "y"),
+        ("env", "run", "x", "--", "cmd"),
+        ("esc", "run", "x", "--", "cmd"),
+        ("--non-interactive", "esc", "open", "x"),
+        ("--color", "always", "esc", "get", "x", "y"),
+        ("--cwd=d", "esc", "run", "x", "--", "cmd"),
+        ("config", "-s", "s", "get", "k"),
+        ("config", "--config-file", "f.yaml", "get", "k"),
+        ("config", "--json", "--open=false", "get", "k"),
+        ("env", "--env", "x", "run", "--", "cmd"),
+        ("esc", "--env=x", "open"),
+        ("esc", "--", "run", "x", "--", "cmd"),
+        ("esc", "--env", "x", "--unknown", "open"),
+        ("config", "--env", "x", "set", "k", "v"),
+        ("env", "--config-file=f.yaml", "ls"),
+        ("esc", "--env"),
+        ("-Cdir", "config", "get", "k"),
+        ("-eh", "esc", "open", "x"),
+        ("config", "-js", "s", "get", "k"),
+        ("config", "-sstack", "get", "k"),
+        ("esc", "-hQ", "run", "x", "--", "cmd"),
+        ("esc", "ls", "--show-secrets=false"),
     )
 
     def assert_refused(self, run):
@@ -170,6 +193,50 @@ class AdmissionSpecs(GuardCase):
         prefixes += [(flag + "=false",) for flag in booleans if flag.startswith("--")]
         for prefix in prefixes:
             args = (*prefix, "config", "get", "k")
+            with self.subTest(args=args):
+                self.assert_refused(self.run_guard(self.fixture("clean.txt"), args=args))
+                self.assert_refused(self.run_guard(
+                    self.fixture("clean.txt"), action=(args[0], "", " ".join(args[1:])),
+                ))
+
+    def test_scoped_option_compatibility(self):
+        cases = (
+            ("config", "--config-file", "f.yaml", "set", "k", "v"),
+            ("config", "--config-file=f.yaml", "set", "--help"),
+            ("config", "--config-file", "f.yaml", "set", "--help"),
+            ("config", "--stack", "s", "set", "k", "v"),
+            ("config", "-s", "s", "set", "k", "v"),
+            ("config", "-s=s", "set", "k", "v"),
+            ("config", "--json", "set", "k", "v"),
+            ("config", "-j", "--open", "set", "k", "v"),
+            ("config", "--json=false", "--open=true", "set", "k", "v"),
+            ("env", "--env", "x", "ls"),
+            ("env", "--env=x", "list"),
+            ("esc", "--env", "x", "ls"),
+            ("--non-interactive", "esc", "--env=x", "list", "--help"),
+        )
+        for args in cases:
+            with self.subTest(args=args):
+                for action in (None, (args[0], "", " ".join(args[1:]))):
+                    run = self.run_guard(self.fixture("clean.txt"), args=args, action=action)
+                    self.assertEqual(run.code, 0, run.text)
+                    self.assertEqual(run.args.read_text().strip(), " ".join(args))
+                    self.assert_temp_clean(run)
+
+    def test_scoped_options_do_not_hide_read_subcommands(self):
+        config_options = (
+            ("--config-file", "f.yaml"), ("--config-file=f.yaml",),
+            ("--stack", "s"), ("--stack=s",), ("-s", "s"),
+            ("--json",), ("-j",), ("--open",), ("--open=false",),
+        )
+        cases = [("config", *options, "get", "k") for options in config_options]
+        cases += [
+            (command, *options, subcommand, "x")
+            for command in ("env", "esc")
+            for options in (("--env", "x"), ("--env=x",))
+            for subcommand in ("open", "get", "run")
+        ]
+        for args in cases:
             with self.subTest(args=args):
                 self.assert_refused(self.run_guard(self.fixture("clean.txt"), args=args))
                 self.assert_refused(self.run_guard(

@@ -17,7 +17,10 @@ umask 077
 # options come from the installed `pulumi --help`: --color, --cwd (-C), --memprofilerate,
 # --otel-traces, --profiling, --tracing, --verbose (-v). All other globals listed there
 # are boolean. Unknown options before identity is known fail closed; ordinary commands'
-# flags and positional values are otherwise left untouched.
+# flags and positional values are otherwise left untouched. `pulumi config --help` lists
+# --config-file/--stack (-s) as value-taking and --json (-j)/--open as boolean;
+# `pulumi env --help` lists value-taking --env and alias esc. The gated get/open/run
+# commands have no aliases in their help. Prefixes do not resolve in the installed CLI.
 admit_command() {
     local options_ended=0 token
     command_label=""
@@ -39,26 +42,32 @@ admit_command() {
                     shift; continue ;;
                 --disable-integrity-checking=*|--emoji=*|--fully-qualify-stack-names=*|--help=*|--logflow=*|--logtostderr=*|--non-interactive=*|--version=*)
                     shift; continue ;;
-                --stack|-s)
-                    # The composite inserts this flag between config/env and their subcommand.
-                    [ -n "$command_label" ] && [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
-                    shift 2; continue ;;
-                --stack=*|-s=*)
-                    [ -n "$command_label" ] || return 1
-                    shift; continue ;;
-                -*) return 1 ;;
+                -*)
+                    case "$command_label:${1%%=*}" in
+                        config:--config-file|config:--stack|config:-s|env:--env)
+                            case "$1" in
+                                *=*) shift ;;
+                                *)
+                                    [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
+                                    shift 2 ;;
+                            esac ;;
+                        config:--json|config:-j|config:--open) shift ;;
+                        *) return 1 ;;
+                    esac
+                    continue ;;
             esac
         fi
         [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9-]*$ ]] || return 1
         if [ -z "$command_label" ]; then
             command_label="$1"
+            [ "$command_label" != esc ] || command_label="env"
             case "$command_label" in
                 config|env) shift; continue ;;
                 *) return 0 ;;
             esac
         fi
         case "$command_label:$1" in
-            config:get|env:open|env:get) return 1 ;;
+            config:get|env:open|env:get|env:run) return 1 ;;
             *) return 0 ;;
         esac
     done
