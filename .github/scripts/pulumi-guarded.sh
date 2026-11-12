@@ -13,65 +13,22 @@
 set -euo pipefail
 umask 077
 
-# Identify the command before accepting command-specific flags. These value-taking global
-# options come from the installed `pulumi --help`: --color, --cwd (-C), --memprofilerate,
-# --otel-traces, --profiling, --tracing, --verbose (-v). All other globals listed there
-# are boolean. Unknown options before identity is known fail closed; ordinary commands'
-# flags and positional values are otherwise left untouched. `pulumi config --help` lists
-# --config-file/--stack (-s) as value-taking and --json (-j)/--open as boolean;
-# `pulumi env --help` lists value-taking --env and alias esc. The gated get/open/run
-# commands have no aliases in their help. Prefixes do not resolve in the installed CLI.
+# Pulumi identifies commands by literal tokens: no prefixes, only the env/esc alias
+# (verified in r2 against v3.256.0). Plaintext paths require these words, so scan all
+# tokens without interpreting options or stopping at --. Values that literally use
+# these command words can also be refused.
 admit_command() {
-    local options_ended=0 token
-    command_label=""
+    local config_seen=0 env_seen=0 token
     for token in "$@"; do
         case "$token" in
             --show-secrets|--show-secrets=*) return 1 ;;
+            config) config_seen=1 ;;
+            env|esc) env_seen=1 ;;
+            get) [ "$config_seen" -eq 0 ] && [ "$env_seen" -eq 0 ] || return 1 ;;
+            open|run) [ "$env_seen" -eq 0 ] || return 1 ;;
         esac
     done
-    while [ "$#" -gt 0 ]; do
-        if [ "$options_ended" -eq 0 ]; then
-            case "$1" in
-                --) options_ended=1; shift; continue ;;
-                --color|--cwd|-C|--memprofilerate|--otel-traces|--profiling|--tracing|--verbose|-v)
-                    [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
-                    shift 2; continue ;;
-                --color=*|--cwd=*|-C=*|--memprofilerate=*|--otel-traces=*|--profiling=*|--tracing=*|--verbose=*|-v=*)
-                    shift; continue ;;
-                --disable-integrity-checking|--emoji|-e|--fully-qualify-stack-names|-Q|--help|-h|--logflow|--logtostderr|--non-interactive|--version)
-                    shift; continue ;;
-                --disable-integrity-checking=*|--emoji=*|--fully-qualify-stack-names=*|--help=*|--logflow=*|--logtostderr=*|--non-interactive=*|--version=*)
-                    shift; continue ;;
-                -*)
-                    case "$command_label:${1%%=*}" in
-                        config:--config-file|config:--stack|config:-s|env:--env)
-                            case "$1" in
-                                *=*) shift ;;
-                                *)
-                                    [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
-                                    shift 2 ;;
-                            esac ;;
-                        config:--json|config:-j|config:--open) shift ;;
-                        *) return 1 ;;
-                    esac
-                    continue ;;
-            esac
-        fi
-        [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9-]*$ ]] || return 1
-        if [ -z "$command_label" ]; then
-            command_label="$1"
-            [ "$command_label" != esc ] || command_label="env"
-            case "$command_label" in
-                config|env) shift; continue ;;
-                *) return 0 ;;
-            esac
-        fi
-        case "$command_label:$1" in
-            config:get|env:open|env:get|env:run) return 1 ;;
-            *) return 0 ;;
-        esac
-    done
-    [ -n "$command_label" ]
+    return 0
 }
 
 if ! admit_command "$@"; then
@@ -102,6 +59,10 @@ match_status() {
     echo "$rc"
 }
 
+command_label="${1:-}"
+if ! [[ "$command_label" =~ ^[a-zA-Z][a-zA-Z0-9-]*$ ]]; then
+    command_label="command"
+fi
 status=0
 pulumi "$@" > "$output" 2>&1 || status=$?
 

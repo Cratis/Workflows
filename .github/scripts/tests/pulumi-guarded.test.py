@@ -114,14 +114,8 @@ class AdmissionSpecs(GuardCase):
         ("-C", "d", "config", "-s", "s", "get", "k"),
         ("--", "config", "get", "k"),
         ("--unknown", "config", "get", "k"),
-        ("--unknown=value", "preview"),
         ("config", "--unknown", "get", "k"),
         ("env", "--unknown=value", "open", "TESTONLYENV"),
-        ("config", "--stack"),
-        ("--color",),
-        ("--non-interactive",),
-        ("config get", "TESTONLYKEY"),
-        ("",),
         ("--show-secrets", "preview"),
         ("preview", "--show-secrets"),
         ("preview", "--", "--show-secrets=true"),
@@ -146,15 +140,15 @@ class AdmissionSpecs(GuardCase):
         ("esc", "--env=x", "open"),
         ("esc", "--", "run", "x", "--", "cmd"),
         ("esc", "--env", "x", "--unknown", "open"),
-        ("config", "--env", "x", "set", "k", "v"),
-        ("env", "--config-file=f.yaml", "ls"),
-        ("esc", "--env"),
         ("-Cdir", "config", "get", "k"),
         ("-eh", "esc", "open", "x"),
         ("config", "-js", "s", "get", "k"),
         ("config", "-sstack", "get", "k"),
         ("esc", "-hQ", "run", "x", "--", "cmd"),
         ("esc", "ls", "--show-secrets=false"),
+        ("preview", "--", "config", "set", "get"),
+        ("preview", "env", "ls", "--", "open"),
+        ("preview", "esc", "list", "--", "run"),
     )
 
     def assert_refused(self, run):
@@ -167,7 +161,7 @@ class AdmissionSpecs(GuardCase):
     def test_direct_rejections(self):
         output = self.work / "ordinary.txt"
         output.write_text("TESTONLY ordinary non-pattern value\n")
-        for args in (*self.REJECTED, ()):
+        for args in self.REJECTED:
             with self.subTest(args=args):
                 self.assert_refused(self.run_guard(output, args=args))
 
@@ -199,8 +193,22 @@ class AdmissionSpecs(GuardCase):
                     self.fixture("clean.txt"), action=(args[0], "", " ".join(args[1:])),
                 ))
 
-    def test_scoped_option_compatibility(self):
+    def test_option_compatibility(self):
         cases = (
+            ("config", "-ss", "set", "--help"),
+            ("-v0", "config", "set", "--help"),
+            ("-e=false", "config", "set", "--help"),
+            ("--help",),
+            ("--unknown-flag", "up"),
+            ("--unknown=value", "preview"),
+            ("config", "--stack"),
+            ("--color",),
+            ("--non-interactive",),
+            ("config get", "TESTONLYKEY"),
+            ("",),
+            ("config", "--env", "x", "set", "k", "v"),
+            ("env", "--config-file=f.yaml", "ls"),
+            ("esc", "--env"),
             ("config", "--config-file", "f.yaml", "set", "k", "v"),
             ("config", "--config-file=f.yaml", "set", "--help"),
             ("config", "--config-file", "f.yaml", "set", "--help"),
@@ -245,6 +253,13 @@ class AdmissionSpecs(GuardCase):
 
     def test_admitted_commands_preserve_argv(self):
         cases = (
+            (),
+            ("get", "config", "set"),
+            ("open", "env", "ls"),
+            ("run", "esc", "ls"),
+            ("config", "--option=get", "set", "k", "v"),
+            ("env", "--env=open", "ls"),
+            ("esc", "get-value"),
             ("config",),
             ("config", "--stack", "s"),
             ("config", "set", "TESTONLYKEY", "TESTONLYVALUE"),
@@ -339,6 +354,15 @@ class LeakSpecs(GuardCase):
     def test_annotation_names_command(self):
         run = self.run_guard(self.fixture("private-key.txt"), args=("up", "--yes"))
         self.assertIn("'pulumi up'", run.text)
+
+    def test_annotation_does_not_echo_option_values_or_invalid_labels(self):
+        for first in ("--tracing=TESTONLYARG", "up\nTESTONLYARG"):
+            with self.subTest(first=first):
+                run = self.run_guard(self.fixture("private-key.txt"), args=(first, "up"))
+                self.assert_withheld(run)
+                self.assertIn("'pulumi command'", run.text)
+                self.assertNotIn("TESTONLYARG", run.text)
+                self.assert_temp_clean(run)
 
 
 class PassThroughSpecs(GuardCase):

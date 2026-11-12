@@ -13,7 +13,7 @@ description: Runs a Pulumi command and withholds its output when it carries key,
 
 inputs:
   command:
-    description: Single Pulumi command token, such as preview, up, refresh, destroy or stack; config get and env/esc open/get/run are refused.
+    description: Single Pulumi command token; config followed later by get, and env/esc followed later by open/get/run, are refused anywhere in the arguments.
     required: true
   stack-name:
     description: Stack passed as --stack; omitted when empty.
@@ -24,7 +24,7 @@ inputs:
     required: false
     default: .
   args:
-    description: Extra Pulumi arguments, space-separated; --show-secrets is refused, as are unknown options before a config/env/esc subcommand.
+    description: Extra Pulumi arguments, space-separated; --show-secrets and its equals form are refused anywhere, and literal command words are scanned even after --.
     required: false
     default: ""
 
