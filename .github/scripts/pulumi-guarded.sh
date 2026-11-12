@@ -7,13 +7,73 @@
 # annotation names the command and the pattern class, never the matched text. There are no
 # exceptions: a value that must appear in output is marked as a Pulumi secret instead.
 #
-# Exit status: 1 when the scan matched or could not run (fail closed, wins over Pulumi's
-# status); otherwise Pulumi's own status.
+# Config reads, ESC plaintext reads and explicit secret output are refused before invocation.
+# Exit status: 1 when admission or scanning fails (wins over Pulumi's status); otherwise
+# Pulumi's own status. Pattern scanning cannot identify all unarmoured secrets.
 set -euo pipefail
 umask 077
 
+# Identify the command before accepting command-specific flags. These value-taking global
+# options come from the installed `pulumi --help`: --color, --cwd (-C), --memprofilerate,
+# --otel-traces, --profiling, --tracing, --verbose (-v). All other globals listed there
+# are boolean. Unknown options before identity is known fail closed; ordinary commands'
+# flags and positional values are otherwise left untouched.
+admit_command() {
+    local options_ended=0 token
+    command_label=""
+    for token in "$@"; do
+        case "$token" in
+            --show-secrets|--show-secrets=*) return 1 ;;
+        esac
+    done
+    while [ "$#" -gt 0 ]; do
+        if [ "$options_ended" -eq 0 ]; then
+            case "$1" in
+                --) options_ended=1; shift; continue ;;
+                --color|--cwd|-C|--memprofilerate|--otel-traces|--profiling|--tracing|--verbose|-v)
+                    [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
+                    shift 2; continue ;;
+                --color=*|--cwd=*|-C=*|--memprofilerate=*|--otel-traces=*|--profiling=*|--tracing=*|--verbose=*|-v=*)
+                    shift; continue ;;
+                --disable-integrity-checking|--emoji|-e|--fully-qualify-stack-names|-Q|--help|-h|--logflow|--logtostderr|--non-interactive|--version)
+                    shift; continue ;;
+                --disable-integrity-checking=*|--emoji=*|--fully-qualify-stack-names=*|--help=*|--logflow=*|--logtostderr=*|--non-interactive=*|--version=*)
+                    shift; continue ;;
+                --stack|-s)
+                    # The composite inserts this flag between config/env and their subcommand.
+                    [ -n "$command_label" ] && [ "$#" -ge 2 ] && [ -n "$2" ] || return 1
+                    shift 2; continue ;;
+                --stack=*|-s=*)
+                    [ -n "$command_label" ] || return 1
+                    shift; continue ;;
+                -*) return 1 ;;
+            esac
+        fi
+        [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9-]*$ ]] || return 1
+        if [ -z "$command_label" ]; then
+            command_label="$1"
+            case "$command_label" in
+                config|env) shift; continue ;;
+                *) return 0 ;;
+            esac
+        fi
+        case "$command_label:$1" in
+            config:get|env:open|env:get) return 1 ;;
+            *) return 0 ;;
+        esac
+    done
+    [ -n "$command_label" ]
+}
+
+if ! admit_command "$@"; then
+    echo "::error title=Pulumi output withheld::Pulumi invocation refused."
+    exit 1
+fi
+
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # name|extended regex
 CLASSES=(
@@ -33,7 +93,6 @@ match_status() {
     echo "$rc"
 }
 
-command_label="${1:-}"
 status=0
 pulumi "$@" > "$output" 2>&1 || status=$?
 
