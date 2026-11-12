@@ -49,7 +49,7 @@ match_status() {
 # Prints the body of every certificate block, one per line; UNTERMINATED for an open block.
 certificate_bodies() {
     awk -v begin="$CERT_BEGIN" -v end='-----END [A-Z0-9 ]*CERTIFICATE' '
-        $0 ~ begin { inside = 1; body = ""; next }
+        $0 ~ begin { if (inside) { print "UNTERMINATED"; inside = 0; next } inside = 1; body = ""; next }
         inside && $0 ~ end { print body; inside = 0; next }
         inside { gsub(/[ \t\r]/, ""); body = body $0 }
         END { if (inside) print "UNTERMINATED" }
@@ -70,7 +70,7 @@ certificate_status() {
     local bodies body fingerprint
     bodies="$(certificate_bodies)" || { echo 2; return; }
     while IFS= read -r body; do
-        [ -n "$body" ] || continue
+        [ -n "$body" ] || { echo 0; return; }
         [ "$body" != UNTERMINATED ] || { echo 0; return; }
         fingerprint="$(printf '%s' "$body" | sha256_of)" || { echo 2; return; }
         grep -Fxq -e "$fingerprint" "$allow" 2> /dev/null || { echo 0; return; }

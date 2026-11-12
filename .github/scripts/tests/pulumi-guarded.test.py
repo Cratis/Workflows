@@ -167,6 +167,32 @@ class AllowListSpecs(GuardCase):
         self.assert_withheld(run, "private-key")
 
 
+class MalformedCertificateSpecs(AllowListSpecs):
+    def listed(self, text):
+        path = self.work / "blocks.txt"
+        path.write_text(text)
+        fingerprint = hashlib.sha256(CERT_BODY.encode()).hexdigest()
+        return self.run_guard(path, extra=self.allow_file(fingerprint))
+
+    def test_nested_begin_is_withheld(self):
+        begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
+        run = self.listed(f"{begin}\nTESTONLYUNLISTED\n{begin}\n{CERT_BODY}\n{end}\n")
+        self.assert_withheld(run, "certificate")
+
+    def test_begin_without_end_is_withheld(self):
+        begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
+        run = self.listed(f"{begin}\n{CERT_BODY}\n{end}\n{begin}\nTESTONLYOPEN\n")
+        self.assert_withheld(run, "certificate")
+
+    def test_empty_certificate_body_is_withheld(self):
+        run = self.listed("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n")
+        self.assert_withheld(run, "certificate")
+
+    def test_other_pem_certificate_label_is_withheld(self):
+        run = self.listed("-----BEGIN X509 CERTIFICATE-----\nTESTONLYUNLISTED\n-----END X509 CERTIFICATE-----\n")
+        self.assert_withheld(run, "certificate")
+
+
 class ActionSpecs(unittest.TestCase):
     def setUp(self):
         self.action = yaml.safe_load(ACTION.read_text())
@@ -182,6 +208,39 @@ class ActionSpecs(unittest.TestCase):
     def test_runs_the_shared_script(self):
         self.assertIn("pulumi-guarded.sh", self.step["env"]["PULUMI_GUARD_SCRIPT"])
         self.assertIn("--yes --skip-preview --non-interactive", self.step["run"])
+
+    def run_body(self, stack, args, allow="", command="up"):
+        recorded = Path(tempfile.mkdtemp()) / "args.txt"
+        self.addCleanup(lambda: recorded.parent.exists() and __import__("shutil").rmtree(recorded.parent))
+        stub = recorded.parent / "stub.sh"
+        stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$RECORD"\nprintf "%s" "${PULUMI_GUARD_ALLOW_FILE:-}" > "$RECORD.allow"\n')
+        env = {
+            "PATH": os.environ["PATH"],
+            "PULUMI_GUARD_COMMAND": command,
+            "PULUMI_GUARD_STACK": stack,
+            "PULUMI_GUARD_ARGS": args,
+            "PULUMI_GUARD_ALLOW_INPUT": allow,
+            "PULUMI_GUARD_SCRIPT": str(stub),
+            "GITHUB_WORKSPACE": "/workspace",
+            "RECORD": str(recorded),
+        }
+        subprocess.run(["bash", "-c", self.step["run"]], env=env, check=True)
+        return recorded.read_text().splitlines(), Path(f"{recorded}.allow").read_text()
+
+    def test_run_body_splits_args_from_env(self):
+        lines, _ = self.run_body("prod", "--refresh --diff --target urn:x")
+        self.assertEqual(
+            lines,
+            ["up", "--stack", "prod", "--yes", "--skip-preview", "--non-interactive", "--refresh", "--diff", "--target", "urn:x"],
+        )
+
+    def test_run_body_without_stack_or_args(self):
+        lines, _ = self.run_body("", "", command="preview")
+        self.assertEqual(lines, ["preview"])
+
+    def test_run_body_resolves_relative_allow_file(self):
+        _, allow = self.run_body("", "", allow="infra/allow.txt", command="preview")
+        self.assertEqual(allow, "/workspace/infra/allow.txt")
 
     def test_declares_the_interface(self):
         self.assertEqual(
