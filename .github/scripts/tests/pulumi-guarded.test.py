@@ -3,6 +3,7 @@
 """Offline checks of the pulumi-guarded script and composite action, using a fake pulumi."""
 from pathlib import Path
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -228,6 +229,15 @@ class ActionSpecs(unittest.TestCase):
 
 
 class OutputFileSpecs(GuardCase):
+    def setUp(self):
+        super().setUp()
+        self.runner_temp = self.work / "runner-temp"
+        self.runner_temp.mkdir()
+
+    def assert_temp_clean(self, run):
+        super().assert_temp_clean(run)
+        self.assertEqual(list(self.runner_temp.iterdir()), [], "config temp file must be removed")
+
     def run_action(self, stdout="clean.txt", stderr=None, status=0, destination=None,
                    command="stack", args="output clusterId", output_mode=True):
         step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
@@ -236,7 +246,7 @@ class OutputFileSpecs(GuardCase):
         env = {
             "PATH": os.pathsep.join([str(FIXTURES), os.environ["PATH"]]),
             "TMPDIR": str(self.tmp),
-            "RUNNER_TEMP": str(self.tmp),
+            "RUNNER_TEMP": str(self.runner_temp),
             "GITHUB_WORKSPACE": str(self.work),
             "PULUMI_GUARD_COMMAND": command,
             "PULUMI_GUARD_STACK": "",
@@ -304,12 +314,102 @@ class OutputFileSpecs(GuardCase):
                     self.assertFalse(self.destination.exists())
 
     def test_read_commands_reach_pulumi(self):
-        for command, args in (("stack", "output clusterId"), ("config", "get chronicleImage"),
-                              ("preview", "--json")):
+        for command, args in (("stack", "output clusterId"), ("preview", "--json")):
             with self.subTest(command=command):
                 run = self.run_action(command=command, args=args)
                 self.assertEqual(run.code, 0, run.text)
                 self.assertEqual(run.args.read_text().strip(), f"{command} {args}")
+
+    def config_response(self, response):
+        path = self.work / "FAKE-config.json"
+        path.write_text(json.dumps(response))
+        return path
+
+    def test_config_get_log_mode_refuses_before_invoking_pulumi(self):
+        run = self.run_action(command="config", args="get exampleKey", output_mode=False)
+        self.assertEqual(run.code, 1)
+        self.assertIn("output-file", run.text)
+        self.assertFalse(run.args.exists())
+        self.assert_temp_clean(run)
+
+    def test_other_config_subcommands_keep_their_behavior(self):
+        run = self.run_action(command="config", args="set exampleKey get", output_mode=False)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.args.read_text().strip(), "config set exampleKey get")
+        self.assertFalse(self.destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_secret_config_is_refused_and_stale_output_removed(self):
+        response = self.config_response({"secret": True, "value": "FAKE ordinary password"})
+        destination = self.work / "result.txt"
+        destination.write_text("stale")
+        run = self.run_action(command="config", args="get exampleKey", stdout=response)
+        self.assertEqual(run.code, 1)
+        self.assertIn("exampleKey", run.text)
+        self.assertNotIn("FAKE ordinary password", run.text)
+        self.assertFalse(destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_nonsecret_config_value_matches_plain_printing(self):
+        for value in ("FAKE example value", "FAKE first\nsecond\n", "", "  FAKE spaces  "):
+            with self.subTest(value=value):
+                response = self.config_response({"secret": False, "value": value})
+                run = self.run_action(command="config", args="get exampleKey", stdout=response)
+                self.assertEqual(run.code, 0, run.text)
+                self.assertEqual(run.text, "")
+                self.assertEqual(run.args.read_text().strip(), "config get exampleKey --json")
+                self.assertEqual(self.destination.read_bytes(), (value + "\n").encode())
+                self.assertEqual(self.destination.stat().st_mode & 0o777, 0o600)
+                self.assert_temp_clean(run)
+
+    def test_unparseable_or_missing_config_flags_are_refused(self):
+        responses = ("FAKE not JSON", '{"secret": false', '{}',
+                     '{"secret": "false", "value": "FAKE"}',
+                     '{"secret": null, "value": "FAKE"}', '{"secret": false}',
+                     '{"secret": false, "value": 1}',
+                     '{"secret": false, "value": "FAKE"} {"secret": false, "value": "FAKE"}')
+        for response in responses:
+            with self.subTest(response=response):
+                path = self.work / "FAKE-invalid.json"
+                path.write_text(response)
+                run = self.run_action(command="config", args="get exampleKey", stdout=path)
+                self.assertEqual(run.code, 1)
+                self.assertIn("exampleKey", run.text)
+                self.assertNotIn("FAKE", run.text)
+                self.assertFalse(self.destination.exists())
+                self.assert_temp_clean(run)
+
+    def test_config_get_with_stack_flag_checks_json(self):
+        response = self.config_response({"secret": True, "value": "FAKE ordinary password"})
+        destination = self.work / "result.txt"
+        run = self.run_guard(response, args=("config", "--stack", "example", "get", "exampleKey"),
+                             extra={"PULUMI_GUARD_OUTPUT_FILE": str(destination),
+                                    "GITHUB_WORKSPACE": str(self.work),
+                                    "RUNNER_TEMP": str(self.runner_temp)})
+        self.assertEqual(run.code, 1)
+        self.assertNotIn("FAKE ordinary password", run.text)
+        self.assertFalse(destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_config_command_failure_does_not_publish(self):
+        response = self.config_response({"secret": False, "value": "FAKE value"})
+        run = self.run_action(command="config", args="get exampleKey", stdout=response, status=23)
+        self.assertEqual(run.code, 23, run.text)
+        self.assertFalse(self.destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_config_value_and_stderr_are_scanned(self):
+        response = self.config_response({"secret": False, "value": "FAKE ordinary value"})
+        run = self.run_action(command="config", args="get exampleKey", stdout=response,
+                              stderr="private-key.txt")
+        self.assert_withheld(run)
+        self.assertFalse(self.destination.exists())
+        self.assert_temp_clean(run)
+        response = self.config_response({"secret": False, "value": GENERATED["github-token"]})
+        run = self.run_action(command="config", args="get exampleKey", stdout=response)
+        self.assert_withheld(run)
+        self.assertFalse(self.destination.exists())
+        self.assert_temp_clean(run)
 
     def test_relative_path_is_workspace_relative_not_work_dir(self):
         run = self.run_action(destination="relative.txt")

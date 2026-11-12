@@ -71,6 +71,53 @@ for arg in "$@"; do
     esac
 done
 
+# Recognize get even after global flags such as --stack inserted by the action.
+config_get=0
+config_key=""
+if [ "${1:-}" = config ]; then
+    skip_value=0
+    conservative=0
+    for arg in "${@:2}"; do
+        if [ "$config_get" -eq 1 ]; then config_key="$arg"; break; fi
+        if [ "$skip_value" -eq 1 ]; then skip_value=0; continue; fi
+        case "$arg" in
+            --stack|-s|--cwd|-C|--color|--config-file|--profiling|--tracing|--verbose|-v)
+                skip_value=1 ;;
+            --*=*|--non-interactive|--logflow|--logtostderr|--disable-integrity-checking|--help|-h|--json|-j|--)
+                ;;
+            get) config_get=1 ;;
+            -*) conservative=1 ;; # Unknown flags must not hide a later get.
+            *) if [ "$conservative" -eq 0 ]; then break; fi ;;
+        esac
+    done
+fi
+if [ "$config_get" -eq 1 ] && [ -z "$destination" ]; then
+    echo "::error title=Pulumi config refused::config get requires output-file and a non-secret key." >&2
+    exit 1
+fi
+
+refuse_config() {
+    echo "::error title=Pulumi config withheld::Config key '${config_key}' was withheld: only parsed, non-secret values may be written." >&2
+    exit 1
+}
+
+capture_config() {
+    [ -n "$config_key" ] && [[ "$config_key" != -* ]] || refuse_config
+    [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ] || refuse_config
+    local config_json
+    config_json="$(mktemp "$RUNNER_TEMP/pulumi-config.XXXXXXXX")" || refuse_config
+    temporary_files+=("$config_json")
+    chmod 0600 "$config_json"
+    pulumi "$@" --json > "$config_json" 2> "$stderr" || status=$?
+    # Slurp requires exactly one JSON object. Missing/non-boolean flags fail closed.
+    # jq -r preserves the decoded string and adds one newline, like plain config get.
+    jq -ser '
+        if length == 1 and (.[0] | type == "object")
+            and .[0].secret == false and (.[0].value | type == "string")
+        then .[0].value else error("refused") end
+    ' "$config_json" > "$output" 2>/dev/null || refuse_config
+}
+
 command_label="${1:-}"
 status=0
 scan_files=("$output")
@@ -78,7 +125,11 @@ if [ -n "$destination" ]; then
     stderr="$(mktemp)"
     temporary_files+=("$stderr")
     scan_files+=("$stderr")
-    pulumi "$@" > "$output" 2> "$stderr" || status=$?
+    if [ "$config_get" -eq 1 ]; then
+        capture_config "$@"
+    else
+        pulumi "$@" > "$output" 2> "$stderr" || status=$?
+    fi
 else
     pulumi "$@" > "$output" 2>&1 || status=$?
 fi

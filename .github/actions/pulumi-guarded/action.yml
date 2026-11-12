@@ -33,8 +33,11 @@ inputs:
       GITHUB_WORKSPACE or RUNNER_TEMP; directories and symlink targets are rejected.
       An existing file is removed before running. Only successful, clean output is
       published atomically with mode 0600. Clean stderr is logged separately.
-      Use command stack with args 'output <name>', config with 'get <key>', or
-      preview with '--json'; --show-secrets is rejected in every mode.
+      Config get is allowed only with output-file and only for non-secret keys:
+      the action privately checks 'config get <key> --json' using jq, then writes
+      the decoded string value plus one newline, as plain config get would print.
+      Stack output never permits --show-secrets. Preview --json masks marked
+      secrets; --show-secrets is rejected in every mode.
     required: false
     default: ""
 

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Fake pulumi for specs: prints PULUMI_FAKE_OUTPUT, records its arguments, exits PULUMI_FAKE_STATUS.
 printf '%s\n' "$*" > "${PULUMI_FAKE_ARGS:-/dev/null}"
-cat "${PULUMI_FAKE_OUTPUT:-/dev/null}"
+# Config responses supplied by specs are JSON; plain get deliberately differs.
+if [[ " $* " == *" config "* && " $* " == *" get "* && " $* " != *" --json "* ]]; then
+    printf '%s\n' 'FAKE plaintext config value'
+else
+    cat "${PULUMI_FAKE_OUTPUT:-/dev/null}"
+fi
 cat "${PULUMI_FAKE_STDERR:-/dev/null}" >&2
 exit "${PULUMI_FAKE_STATUS:-0}"
