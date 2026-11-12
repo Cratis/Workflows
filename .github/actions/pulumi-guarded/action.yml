@@ -5,9 +5,9 @@
 # installed (pulumi/actions without `command`); passphrase and backend credentials are
 # inherited from the caller's environment, never passed as inputs.
 # The scan catches armoured and well-known token shapes; it cannot catch unarmoured secrets,
-# so mark credential values as Pulumi secrets too. Config get, ESC env open/get and
-# --show-secrets are refused. Unknown options before command identity (or before a
-# config/env subcommand) fail closed; flags after other commands pass through unchanged.
+# so mark credential values as Pulumi secrets too. Before running, every argument token is
+# scanned: --show-secrets, config followed later by get, and env/esc followed later by
+# open/get/run are refused. Options are not parsed, so all other invocations pass through.
 name: Pulumi guarded
 description: Runs a Pulumi command and withholds its output when it carries key, certificate or token material.
 
