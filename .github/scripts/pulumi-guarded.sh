@@ -33,11 +33,6 @@ admit_command() {
     return 0
 }
 
-if ! admit_command "$@"; then
-    echo "::error title=Pulumi output withheld::Pulumi invocation refused."
-    exit 1
-fi
-
 output="$(mktemp)"
 temporary_files=("$output")
 trap 'rm -f -- "${temporary_files[@]}"' EXIT
@@ -82,13 +77,49 @@ prepare_destination() {
         "$root/"*) ;;
         *) invalid_path ;;
     esac
+    workspace_root="$root"
+    destination_parent="$parent"
     destination="$parent/$(basename -- "$requested")"
     rm -f -- "$destination"
+}
+
+publication_path_is_safe() {
+    local parent
+    parent="$(cd -- "$destination_parent" 2>/dev/null && pwd -P)" || return 1
+    [ "$parent" = "$destination_parent" ] || return 1
+    case "$parent/" in
+        "$workspace_root/"*) ;;
+        *) return 1 ;;
+    esac
+    [ ! -L "$destination" ] && [ ! -d "$destination" ]
+}
+
+publication_failed() {
+    echo "::error title=Pulumi output withheld::Pulumi output file could not be published." >&2
+    exit 1
+}
+
+publish_destination() {
+    local staged
+    publication_path_is_safe || publication_failed
+    staged="$(mktemp "$destination_parent/.pulumi-guarded.XXXXXXXX" 2>/dev/null)" || publication_failed
+    temporary_files+=("$staged")
+    cat "$output" > "$staged" || publication_failed
+    chmod 0600 "$staged" 2>/dev/null || publication_failed
+    publication_path_is_safe || publication_failed
+    mv -f -T -- "$staged" "$destination" 2>/dev/null || publication_failed
 }
 
 destination=""
 if [ -n "${PULUMI_GUARD_OUTPUT_FILE:-}" ]; then
     prepare_destination "$PULUMI_GUARD_OUTPUT_FILE"
+fi
+
+# Prepare the destination and remove stale output before admission, so refused
+# commands cannot leave a previous result behind. Admission itself is unchanged.
+if ! admit_command "$@"; then
+    echo "::error title=Pulumi output withheld::Pulumi invocation refused."
+    exit 1
 fi
 
 command_label="${1:-}"
@@ -133,11 +164,7 @@ fi
 if [ -n "$destination" ]; then
     cat "$stderr" >&2
     if [ "$status" -eq 0 ]; then
-        staged="$(mktemp "$(dirname -- "$destination")/.pulumi-guarded.XXXXXXXX")"
-        temporary_files+=("$staged")
-        cat "$output" > "$staged"
-        chmod 0600 "$staged"
-        mv -f -- "$staged" "$destination"
+        publish_destination
     fi
 else
     cat "$output"
