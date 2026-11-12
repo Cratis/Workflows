@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 # Fake pulumi for specs: prints PULUMI_FAKE_OUTPUT, records its arguments, exits PULUMI_FAKE_STATUS.
+set -euo pipefail
 printf '%s\n' "$*" > "${PULUMI_FAKE_ARGS:-/dev/null}"
+case "${PULUMI_FAKE_MUTATION:-}" in
+    parent-symlink)
+        mv -f -T -- "$PULUMI_FAKE_PARENT" "$PULUMI_FAKE_PARENT.saved"
+        ln -s -- "$PULUMI_FAKE_TARGET" "$PULUMI_FAKE_PARENT" ;;
+    destination-symlink)
+        ln -s -- "$PULUMI_FAKE_TARGET" "$PULUMI_FAKE_DESTINATION" ;;
+    destination-directory)
+        mkdir -- "$PULUMI_FAKE_DESTINATION" ;;
+esac
+if [ -n "${PULUMI_FAKE_SIGNAL:-}" ]; then
+    kill -s "$PULUMI_FAKE_SIGNAL" "$PPID"
+fi
 cat "${PULUMI_FAKE_OUTPUT:-/dev/null}"
+cat "${PULUMI_FAKE_STDERR:-/dev/null}" >&2
 exit "${PULUMI_FAKE_STATUS:-0}"

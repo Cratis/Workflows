@@ -62,6 +62,39 @@ jobs:
           expected='up --stack selftest --yes --skip-preview --non-interactive --refresh --diff'
           actual="$(cat "$ARGS_FILE")"
           [ "$actual" = "$expected" ] || { echo "::error title=verify-pulumi-guarded::unexpected arguments"; exit 1; }
+      - name: Clean stdout is published privately
+        uses: ./.github/actions/pulumi-guarded
+        env:
+          PULUMI_FAKE_OUTPUT: ${{ github.workspace }}/.github/scripts/tests/fixtures/pulumi-guarded/clean.txt
+        with:
+          command: stack
+          args: output clusterId
+          output-file: pulumi-result.txt
+      - name: Check exact file content and permissions
+        env:
+          RESULT: ${{ github.workspace }}/pulumi-result.txt
+          EXPECTED: ${{ github.workspace }}/.github/scripts/tests/fixtures/pulumi-guarded/clean.txt
+        run: |
+          cmp "$RESULT" "$EXPECTED"
+          [ "$(stat -c '%a' "$RESULT")" = 600 ]
+      - name: Secret stderr withholds the file
+        id: file-leak
+        continue-on-error: true
+        uses: ./.github/actions/pulumi-guarded
+        env:
+          PULUMI_FAKE_OUTPUT: ${{ github.workspace }}/.github/scripts/tests/fixtures/pulumi-guarded/clean.txt
+          PULUMI_FAKE_STDERR: ${{ github.workspace }}/.github/scripts/tests/fixtures/pulumi-guarded/private-key.txt
+        with:
+          command: preview
+          args: --json
+          output-file: pulumi-result.txt
+      - name: Withheld run removed the stale file
+        env:
+          OUTCOME: ${{ steps.file-leak.outcome }}
+          RESULT: ${{ github.workspace }}/pulumi-result.txt
+        run: |
+          [ "$OUTCOME" = failure ]
+          [ ! -e "$RESULT" ]
       - name: Key material must fail the step
         id: leak
         continue-on-error: true

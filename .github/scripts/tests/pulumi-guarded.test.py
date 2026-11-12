@@ -5,6 +5,7 @@ from pathlib import Path
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -54,6 +55,20 @@ class GuardCase(unittest.TestCase):
         self.work = Path(self._dir.name)
         self.tmp = self.work / "tmp"
         self.tmp.mkdir()
+        self.platform_dirs = []
+        if sys.platform == "darwin":
+            # BSD mv lacks -T. Linux CI exercises the real GNU command; locally
+            # os.replace supplies the same no-target-directory rename semantics.
+            platform_bin = self.work / "platform-bin"
+            platform_bin.mkdir()
+            mv = platform_bin / "mv"
+            mv.write_text(
+                f'#!{sys.executable}\nimport os, sys\n'
+                'if len(sys.argv) != 6 or sys.argv[1:4] != ["-f", "-T", "--"]: sys.exit(2)\n'
+                'os.replace(sys.argv[4], sys.argv[5])\n'
+            )
+            mv.chmod(0o755)
+            self.platform_dirs.append(platform_bin)
 
     def fixture(self, name):
         return FIXTURES / name
@@ -66,7 +81,7 @@ class GuardCase(unittest.TestCase):
     def run_guard(self, output, status=0, args=("preview", "--stack", "production", "--yes"), extra=None, path_dirs=(), action=None):
         recorded = self.work / "args.txt"
         env = {
-            "PATH": os.pathsep.join([*map(str, path_dirs), str(FIXTURES), os.environ["PATH"]]),
+            "PATH": os.pathsep.join([*map(str, (*path_dirs, *self.platform_dirs)), str(FIXTURES), os.environ["PATH"]]),
             "TMPDIR": str(self.tmp),
             "PULUMI_FAKE_OUTPUT": str(output),
             "PULUMI_FAKE_STATUS": str(status),
@@ -442,6 +457,7 @@ class ActionSpecs(unittest.TestCase):
 
     def test_inputs_reach_the_script_through_env(self):
         self.assertEqual(self.step["env"]["PULUMI_GUARD_COMMAND"], "${{ inputs.command }}")
+        self.assertEqual(self.step["env"]["PULUMI_GUARD_OUTPUT_FILE"], "${{ inputs.output-file }}")
         self.assertEqual(self.step["working-directory"], "${{ inputs.work-dir }}")
 
     def test_runs_the_shared_script(self):
@@ -478,8 +494,211 @@ class ActionSpecs(unittest.TestCase):
     def test_declares_the_interface(self):
         self.assertEqual(
             set(self.action["inputs"]),
-            {"command", "stack-name", "work-dir", "args"},
+            {"command", "stack-name", "work-dir", "args", "output-file"},
         )
+
+
+class OutputFileAdmissionSpecs(AdmissionSpecs):
+    def run_guard(self, *args, extra=None, **kwargs):
+        (self.work / "result.txt").write_text("stale")
+        return super().run_guard(*args, extra={
+            "GITHUB_WORKSPACE": str(self.work),
+            "PULUMI_GUARD_OUTPUT_FILE": "result.txt",
+            **(extra or {}),
+        }, **kwargs)
+
+    def assert_refused(self, run):
+        super().assert_refused(run)
+        self.assertFalse((self.work / "result.txt").exists())
+
+
+class OutputFileSpecs(GuardCase):
+    def run_action(self, stdout="clean.txt", stderr=None, status=0, destination="result.txt",
+                   command="stack", args="output clusterId", output_mode=True, path_dirs=(), extra=None):
+        step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
+        self.destination = self.work / destination
+        recorded = self.work / "args.txt"
+        env = {
+            "PATH": os.pathsep.join([*map(str, (*path_dirs, *self.platform_dirs)), str(FIXTURES), os.environ["PATH"]]),
+            "TMPDIR": str(self.tmp),
+            "RUNNER_TEMP": str(self.tmp),
+            "GITHUB_WORKSPACE": str(self.work),
+            "PULUMI_GUARD_COMMAND": command,
+            "PULUMI_GUARD_STACK": "",
+            "PULUMI_GUARD_ARGS": args,
+            "PULUMI_GUARD_SCRIPT": str(SCRIPT),
+            "PULUMI_FAKE_OUTPUT": str(self.fixture(stdout)),
+            "PULUMI_FAKE_STDERR": str(self.fixture(stderr)) if stderr else "/dev/null",
+            "PULUMI_FAKE_STATUS": str(status),
+            "PULUMI_FAKE_ARGS": str(recorded),
+            **(extra or {}),
+        }
+        if output_mode:
+            env["PULUMI_GUARD_OUTPUT_FILE"] = str(destination)
+        process = subprocess.run(["bash", "-c", step["run"]], env=env,
+                                 cwd=self.tmp, capture_output=True, text=True, check=False)
+        return Run(process, recorded, self.tmp)
+
+    def test_absent_input_keeps_stdout_and_stderr_in_log(self):
+        run = self.run_action(stderr="clean.txt", output_mode=False)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.text, self.fixture("clean.txt").read_text() * 2)
+        self.assertFalse(self.destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_clean_stdout_is_exact_private_file_not_log(self):
+        run = self.run_action()
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.text, "")
+        self.assertEqual(self.destination.read_bytes(), self.fixture("clean.txt").read_bytes())
+        self.assertEqual(self.destination.stat().st_mode & 0o777, 0o600)
+        self.assert_temp_clean(run)
+        self.assertEqual(list(self.work.glob(".pulumi-guarded.*")), [])
+
+    def test_stdout_bytes_and_empty_output_replace_stale_file(self):
+        source = self.work / "stdout.txt"
+        for content in (b"TESTONLY\x00exact\r\nno trailing newline", b""):
+            with self.subTest(content=content):
+                source.write_bytes(content)
+                (self.work / "result.txt").write_text("stale")
+                run = self.run_action(stdout=source)
+                self.assertEqual(run.code, 0, run.text)
+                self.assertEqual(run.text, "")
+                self.assertEqual(self.destination.read_bytes(), content)
+                self.assertEqual(self.destination.stat().st_mode & 0o777, 0o600)
+                self.assert_temp_clean(run)
+
+    def test_clean_stderr_is_logged_separately(self):
+        run = self.run_action(stderr="clean.txt")
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.process.stdout, "")
+        self.assertEqual(run.process.stderr, self.fixture("clean.txt").read_text())
+        self.assertEqual(self.destination.read_bytes(), self.fixture("clean.txt").read_bytes())
+        self.assert_temp_clean(run)
+
+    def test_every_secret_class_in_either_stream_withholds_stale_file(self):
+        samples = {label: self.fixture(name) for label, name in FILES.items()}
+        samples.update({label: self.generated(label) for label in GENERATED})
+        for label, sample in samples.items():
+            for stream in ("stdout", "stderr"):
+                with self.subTest(label=label, stream=stream):
+                    (self.work / "result.txt").write_text("stale")
+                    run = self.run_action(**{stream: sample})
+                    self.assert_withheld(run, label)
+                    self.assertFalse(self.destination.exists())
+                    self.assert_temp_clean(run)
+
+    def test_failure_removes_stale_file_and_preserves_exit_code(self):
+        (self.work / "result.txt").write_text("stale")
+        run = self.run_action(status=23, stderr="clean.txt")
+        self.assertEqual(run.code, 23, run.text)
+        self.assertEqual(run.process.stdout, "")
+        self.assertEqual(run.process.stderr, self.fixture("clean.txt").read_text())
+        self.assertFalse(self.destination.exists())
+        self.assert_temp_clean(run)
+
+    def test_scan_error_in_either_stream_withholds_stale_file(self):
+        fake = self.work / "bin"
+        fake.mkdir()
+        grep = fake / "grep"
+        stdout, stderr = self.work / "stdout.txt", self.work / "stderr.txt"
+        stdout.write_text("TESTONLYstdout")
+        stderr.write_text("TESTONLYstderr")
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                grep.write_text(f'#!/usr/bin/env bash\n[ "$(cat "$4")" = TESTONLY{stream} ] && exit 2\nexit 1\n')
+                grep.chmod(0o755)
+                (self.work / "result.txt").write_text("stale")
+                run = self.run_action(stdout=stdout, stderr=stderr, path_dirs=[fake])
+                self.assert_withheld(run)
+                self.assertIn("could not be checked", run.text)
+                self.assertFalse(self.destination.exists())
+                self.assert_temp_clean(run)
+
+    def test_read_commands_reach_pulumi(self):
+        for command, args in (("stack", "output clusterId"), ("preview", "--json")):
+            with self.subTest(command=command):
+                run = self.run_action(command=command, args=args)
+                self.assertEqual(run.code, 0, run.text)
+                self.assertEqual(run.args.read_text().strip(), f"{command} {args}")
+
+    def test_relative_path_is_workspace_relative_not_work_dir(self):
+        run = self.run_action(destination="relative.txt")
+        self.assertEqual(run.code, 0, run.text)
+        self.assertTrue((self.work / "relative.txt").is_file())
+        self.assertFalse((self.tmp / "relative.txt").exists())
+        self.assert_temp_clean(run)
+
+    def assert_publication_race_fails(self, mutation):
+        outside_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_dir.cleanup)
+        outside = Path(outside_dir.name)
+        protected = outside / "protected.txt"
+        protected.write_text("untouched")
+        parent = self.work / "publish"
+        parent.mkdir()
+        destination = parent / "result.txt"
+        destination.write_text("stale")
+        run = self.run_action(destination="publish/result.txt", extra={
+            "PULUMI_FAKE_MUTATION": mutation,
+            "PULUMI_FAKE_PARENT": str(parent),
+            "PULUMI_FAKE_DESTINATION": str(destination),
+            "PULUMI_FAKE_TARGET": str(outside if mutation == "parent-symlink" else protected),
+        })
+        self.assertEqual(run.code, 1, run.text)
+        self.assertTrue(run.args.exists(), "the mutation must happen during Pulumi")
+        self.assertEqual(run.process.stdout, "")
+        self.assertEqual(run.process.stderr, ANNOTATION + "Pulumi output file could not be published.\n")
+        self.assertEqual(protected.read_text(), "untouched")
+        self.assertEqual(list(outside.iterdir()), [protected])
+        self.assertEqual(list(self.work.rglob(".pulumi-guarded.*")), [])
+        self.assert_temp_clean(run)
+        return parent, destination
+
+    def test_parent_swapped_for_outside_symlink_before_publish_is_refused(self):
+        parent, destination = self.assert_publication_race_fails("parent-symlink")
+        self.assertTrue(parent.is_symlink())
+        self.assertFalse(destination.exists())
+        self.assertFalse((self.work / "publish.saved" / "result.txt").exists())
+
+    def test_destination_swapped_for_symlink_before_publish_is_refused(self):
+        _, destination = self.assert_publication_race_fails("destination-symlink")
+        self.assertTrue(destination.is_symlink())
+
+    def test_destination_swapped_for_directory_before_publish_is_refused(self):
+        _, destination = self.assert_publication_race_fails("destination-directory")
+        self.assertTrue(destination.is_dir())
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_signals_remove_stale_output_and_all_capture_files(self):
+        for signal, status in (("TERM", 143), ("INT", 130)):
+            with self.subTest(signal=signal):
+                (self.work / "result.txt").write_text("stale")
+                run = self.run_action(extra={"PULUMI_FAKE_SIGNAL": signal})
+                self.assertEqual(run.code, status, run.text)
+                self.assertEqual(run.text, "")
+                self.assertFalse(self.destination.exists())
+                self.assert_temp_clean(run)
+                self.assertEqual(list(self.work.rglob(".pulumi-guarded.*")), [])
+
+    def test_invalid_paths_are_rejected_before_running(self):
+        alias = self.work / "alias"
+        alias.symlink_to(self.work.parent, target_is_directory=True)
+        target = self.work / "target.txt"
+        target.write_text("untouched")
+        (self.work / "link.txt").symlink_to(target)
+        (self.work / "dangling.txt").symlink_to(self.work / "missing.txt")
+        for destination in (self.work, self.work / "result.txt", self.tmp / "result.txt",
+                            "../outside.txt", "tmp/../result.txt", "alias/outside.txt",
+                            "link.txt", "dangling.txt", "tmp", "missing/result", ".", " "):
+            with self.subTest(destination=destination):
+                run = self.run_action(destination=destination)
+                self.assertEqual(run.code, 1, run.text)
+                self.assertIn("Invalid Pulumi output path", run.text)
+                self.assertFalse(run.args.exists())
+                self.assert_temp_clean(run)
+        self.assertEqual(target.read_text(), "untouched")
+        self.assertFalse((self.work / "missing.txt").exists())
 
 
 if __name__ == "__main__":
