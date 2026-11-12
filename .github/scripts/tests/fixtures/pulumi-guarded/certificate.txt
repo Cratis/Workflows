@@ -1,0 +1,4 @@
+Previewing update
+  + caCertificate: "-----BEGIN CERTIFICATE-----
+TESTONLYCERTBODY
+-----END CERTIFICATE-----"

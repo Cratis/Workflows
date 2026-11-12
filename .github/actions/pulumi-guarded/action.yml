@@ -1,0 +1,64 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+# Runs a Pulumi command with its output held back and scanned for key, certificate and token
+# material. A hit fails the step and withholds the output. The Pulumi CLI must already be
+# installed (pulumi/actions without `command`); passphrase and backend credentials are
+# inherited from the caller's environment, never passed as inputs.
+# The scan catches armoured and well-known token shapes; it cannot catch unarmoured secrets,
+# so mark credential values as Pulumi secrets too.
+name: Pulumi guarded
+description: Runs a Pulumi command and withholds its output when it carries key, certificate or token material.
+
+inputs:
+  command:
+    description: Pulumi command to run, such as preview, up, refresh, destroy or stack.
+    required: true
+  stack-name:
+    description: Stack passed as --stack; omitted when empty.
+    required: false
+    default: ""
+  work-dir:
+    description: Directory containing the Pulumi project.
+    required: false
+    default: .
+  args:
+    description: Extra Pulumi flags, space-separated, such as "--refresh --diff --target urn".
+    required: false
+    default: ""
+  allow-patterns-file:
+    description: >-
+      Optional file (repository-relative or absolute) with one SHA-256 per line, the fingerprint
+      of a certificate body that may appear in output. Never tolerates private keys or tokens.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Run pulumi ${{ inputs.command }} (guarded)
+      shell: bash
+      working-directory: ${{ inputs.work-dir }}
+      env:
+        PULUMI_GUARD_COMMAND: ${{ inputs.command }}
+        PULUMI_GUARD_STACK: ${{ inputs.stack-name }}
+        PULUMI_GUARD_ARGS: ${{ inputs.args }}
+        PULUMI_GUARD_ALLOW_INPUT: ${{ inputs.allow-patterns-file }}
+        PULUMI_GUARD_SCRIPT: ${{ github.action_path }}/../../scripts/pulumi-guarded.sh
+      run: |
+        set -euo pipefail
+        args=("$PULUMI_GUARD_COMMAND")
+        if [ -n "$PULUMI_GUARD_STACK" ]; then
+          args+=(--stack "$PULUMI_GUARD_STACK")
+        fi
+        if [ "$PULUMI_GUARD_COMMAND" = up ]; then
+          args+=(--yes --skip-preview --non-interactive)
+        fi
+        if [ -n "$PULUMI_GUARD_ARGS" ]; then
+          read -r -a extra <<< "$PULUMI_GUARD_ARGS"
+          args+=("${extra[@]}")
+        fi
+        allow="$PULUMI_GUARD_ALLOW_INPUT"
+        if [ -n "$allow" ] && [ "${allow#/}" = "$allow" ]; then
+          allow="$GITHUB_WORKSPACE/$allow"
+        fi
+        PULUMI_GUARD_ALLOW_FILE="$allow" bash "$PULUMI_GUARD_SCRIPT" "${args[@]}"
