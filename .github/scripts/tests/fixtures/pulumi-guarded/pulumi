@@ -2,4 +2,5 @@
 # Fake pulumi for specs: prints PULUMI_FAKE_OUTPUT, records its arguments, exits PULUMI_FAKE_STATUS.
 printf '%s\n' "$*" > "${PULUMI_FAKE_ARGS:-/dev/null}"
 cat "${PULUMI_FAKE_OUTPUT:-/dev/null}"
+cat "${PULUMI_FAKE_STDERR:-/dev/null}" >&2
 exit "${PULUMI_FAKE_STATUS:-0}"

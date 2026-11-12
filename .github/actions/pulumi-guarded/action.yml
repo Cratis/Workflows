@@ -28,6 +28,19 @@ inputs:
     required: false
     default: ""
 
+  output-file:
+    description: >-
+      Optional workspace-relative path for scanned stdout instead of logging it,
+      independent of work-dir. Absolute paths, .. components, directories, symlink
+      targets and parents resolving outside GITHUB_WORKSPACE are rejected. The
+      parent must exist. An existing file is removed before running. Only
+      successful output with clean stdout and stderr scans is published atomically
+      with mode 0600. Clean stderr is logged separately. Use command stack with
+      args 'output <name>' or preview with '--json'; the same invocation refusals
+      apply in every mode, including config get and --show-secrets.
+    required: false
+    default: ""
+
 runs:
   using: composite
   steps:
@@ -38,6 +51,7 @@ runs:
         PULUMI_GUARD_COMMAND: ${{ inputs.command }}
         PULUMI_GUARD_STACK: ${{ inputs.stack-name }}
         PULUMI_GUARD_ARGS: ${{ inputs.args }}
+        PULUMI_GUARD_OUTPUT_FILE: ${{ inputs.output-file }}
         PULUMI_GUARD_SCRIPT: ${{ github.action_path }}/../../scripts/pulumi-guarded.sh
       run: |
         set -euo pipefail
