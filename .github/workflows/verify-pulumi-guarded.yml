@@ -1,0 +1,76 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Pulumi Guarded
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/pulumi-guarded/**
+      - .github/scripts/pulumi-guarded.sh
+      - .github/scripts/tests/pulumi-guarded.test.py
+      - .github/scripts/tests/fixtures/pulumi-guarded/**
+      - .github/workflows/verify-pulumi-guarded.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/pulumi-guarded/**
+      - .github/scripts/pulumi-guarded.sh
+      - .github/scripts/tests/pulumi-guarded.test.py
+      - .github/scripts/tests/fixtures/pulumi-guarded/**
+      - .github/workflows/verify-pulumi-guarded.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the guard offline
+        run: python3 -B .github/scripts/tests/pulumi-guarded.test.py
+
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Put the fake pulumi on PATH
+        run: echo "$GITHUB_WORKSPACE/.github/scripts/tests/fixtures/pulumi-guarded" >> "$GITHUB_PATH"
+      - name: Clean output passes through
+        uses: ./.github/actions/pulumi-guarded
+        env:
+          PULUMI_FAKE_OUTPUT: ${{ github.workspace }}/.github/scripts/tests/fixtures/pulumi-guarded/clean.txt
+          PULUMI_FAKE_ARGS: ${{ runner.temp }}/pulumi-args.txt
+        with:
+          command: up
+          stack-name: selftest
+          args: --refresh --diff
+      - name: Check the arguments the action built
+        env:
+          ARGS_FILE: ${{ runner.temp }}/pulumi-args.txt
+        run: |
+          expected='up --stack selftest --yes --skip-preview --non-interactive --refresh --diff'
+          actual="$(cat "$ARGS_FILE")"
+          [ "$actual" = "$expected" ] || { echo "::error title=verify-pulumi-guarded::unexpected arguments"; exit 1; }
+      - name: Key material must fail the step
+        id: leak
+        continue-on-error: true
+        uses: ./.github/actions/pulumi-guarded
+        env:
+          PULUMI_FAKE_OUTPUT: ${{ github.workspace }}/.github/scripts/tests/fixtures/pulumi-guarded/private-key.txt
+        with:
+          command: preview
+      - name: The leak step failed
+        env:
+          LEAK_OUTCOME: ${{ steps.leak.outcome }}
+        run: '[ "$LEAK_OUTCOME" = failure ]'

@@ -1,0 +1,1 @@
+kubeconfig: TESTONLY LS0tLS1CRUdJTiBUT0tFTg==

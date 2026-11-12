@@ -727,6 +727,39 @@ The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <
 
 ---
 
+## Guarded Pulumi runs
+
+`Cratis/Workflows/.github/actions/pulumi-guarded@main` runs a Pulumi command, holds all of its output back and scans it for key, certificate and token material before anything reaches the log. On a match the step fails and the output is withheld; the annotation names the command and the kind of material, never the matched text. If the scan itself cannot run, the output is withheld too. A scan failure wins over Pulumi's own status; otherwise the step exits with Pulumi's status and the output is printed, so a failed run stays diagnosable.
+
+`pulumi/actions` with `command:` streams output straight into the log and cannot be guarded, so replace those steps with this action. Keep `pulumi/actions` without `command` to install the CLI.
+
+```yaml
+- uses: pulumi/actions@v5 # install only, no command
+- uses: Cratis/Workflows/.github/actions/pulumi-guarded@main
+  with:
+    command: preview
+    stack-name: production
+    work-dir: Deployment
+    args: --diff --refresh
+```
+
+| Input | Default |
+|---|---|
+| `command` | required (`preview`, `up`, `refresh`, `destroy`, `stack`, ...) |
+| `stack-name` | none (`--stack` is omitted) |
+| `work-dir` | `.` |
+| `args` | none; extra flags, space-separated |
+
+`up` adds `--yes --skip-preview --non-interactive`. Passphrase and backend credentials come from the step's environment, never from inputs.
+
+The scan covers PEM private keys and certificates, kubeconfig credential fields, base64-encoded PEM armour, GitHub tokens, JWTs and AWS access key IDs. It cannot see unarmoured secrets, so mark every value that carries a credential as a Pulumi secret; a secret prints as `[secret]`.
+
+There are no exceptions and no allow-list: a certificate in the output, including an intentionally public CA certificate, withholds it. Fix a false positive at the source by marking that Pulumi output as a secret, or by not exporting it.
+
+`verify-pulumi-guarded.yml` runs `.github/scripts/tests/pulumi-guarded.test.py` against a fake `pulumi` and calls the action in a self-test.
+
+---
+
 ## Skip scheduled runs that already ran on this commit
 
 `Cratis/Workflows/.github/actions/skip-if-already-ran@main` reports `skip=true` when the same workflow already succeeded on the same commit for an event in `events` (default: `schedule`). Failed or cancelled runs do not count. Manual dispatches and manual re-runs always run; API errors warn and run normally. `previous-run-url` links to the prior success. See [#205](https://github.com/Cratis/Workflows/issues/205).
