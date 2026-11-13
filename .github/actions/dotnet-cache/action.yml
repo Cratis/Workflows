@@ -38,6 +38,17 @@ inputs:
     description: "auto (save only on the default branch, schedule or workflow_dispatch on the default branch), restore (never save) or save (always save-capable)."
     required: false
     default: auto
+  prune-on-miss:
+    description: >-
+      Opt-in ('true' or 'false'). On an exact-key miss in save mode the restore-keys prefix
+      restores an older cache and the post-save would store old plus new, so stale package
+      versions accumulate. When 'true' the contents of the default ~/.nuget/packages folder are
+      emptied after the restore, so the job's own restore/build repopulates it and the saved cache
+      holds only current versions. Only for jobs that run a full restore/build of everything the
+      cache must contain; leave narrow jobs on the default and give them mode restore. Never runs
+      on a hit, in restore mode, or with a custom path.
+    required: false
+    default: "false"
 
 outputs:
   cache-hit:
@@ -121,6 +132,33 @@ runs:
         path: ${{ steps.resolve.outputs.path }}
         key: ${{ steps.resolve.outputs.key }}
         restore-keys: ${{ steps.resolve.outputs.restore-key }}
+
+    - name: Prune stale NuGet packages on a cache miss
+      if: inputs.prune-on-miss == 'true' && steps.resolve.outputs.mode == 'save' && steps.restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      # A find or rm failure fails the job on purpose: the post-job save only runs on success,
+      # so a half-pruned cache is never saved.
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        if [ "$INPUT_PATH" != "~/.nuget/packages" ]; then
+          echo "::notice title=dotnet-cache::prune-on-miss supports only the default ~/.nuget/packages path; nothing pruned"
+          exit 0
+        fi
+        dir="${NUGET_PACKAGES:-$HOME/.nuget/packages}"
+        dir="${dir//$'\r'/}"
+        while [ "${dir%/}" != "$dir" ] && [ -n "${dir%/}" ]; do
+          dir="${dir%/}"
+        done
+        if [ -L "$HOME" ] || [ -L "$HOME/.nuget" ] || [ "$dir" != "$HOME/.nuget/packages" ] || [ -L "$dir" ] || [ ! -d "$dir" ] \
+          || [ "$(cd "$dir" && pwd -P)" != "$(cd "$HOME" && pwd -P)/.nuget/packages" ]; then
+          echo "::notice title=dotnet-cache::prune-on-miss skipped; the global-packages folder is not an existing real \$HOME/.nuget/packages directory; nothing pruned"
+          exit 0
+        fi
+        count="$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+        find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        echo "dotnet-cache: pruned ${count} entries from ${dir} after an exact-key miss"
 
     # Registers the post-job save without downloading again. actions/cache skips the
     # save when the exact key already exists.

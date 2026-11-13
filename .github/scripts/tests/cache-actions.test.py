@@ -274,6 +274,133 @@ class DotnetExcludeTests(unittest.TestCase):
         self.assertEqual(output["restore-key"], "nuget-v1-Linux-")
 
 
+PRUNE_NAME = "Prune stale NuGet packages on a cache miss"
+PRUNE_CONDITION = ("inputs.prune-on-miss == 'true' && steps.resolve.outputs.mode == 'save' "
+                   "&& steps.restore.outputs.cache-hit != 'true' "
+                   "&& github.event_name != 'pull_request' && github.event_name != 'pull_request_target'")
+
+
+def condition_allows(condition, event_name):
+    """Evaluate the prune condition for an event, assuming every other clause is true."""
+    for clause in condition.split(" && "):
+        left, op, right = clause.split(" ")
+        if left == "github.event_name":
+            matches = event_name == right.strip("'")
+            if (op == "==") != matches:
+                return False
+    return True
+
+
+def prune_step():
+    return next((s for s in load("dotnet-cache")["runs"]["steps"] if s.get("name") == PRUNE_NAME), None)
+
+
+def prune(home, *, nuget_packages=None, path="~/.nuget/packages"):
+    """Run the production prune script against a fake HOME; PATH has no dotnet."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "INPUT_PATH": path}
+    if nuget_packages is not None:
+        env["NUGET_PACKAGES"] = nuget_packages
+    return subprocess.run([BASH, "-c", prune_step()["run"]], env=env, capture_output=True, text=True)
+
+
+class DotnetPruneOnMissTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name) / "home"
+        self.packages = self.home / ".nuget/packages"
+        self.packages.mkdir(parents=True)
+        (self.packages / "pkg/1.0.0").mkdir(parents=True)
+        (self.packages / "pkg/1.0.0/a.nupkg").write_text("x")
+        (self.packages / ".hidden").mkdir()
+        (self.packages / ".hidden/f").write_text("x")
+        (self.packages / "other").mkdir()
+
+    def test_input_is_opt_in_and_defaults_to_false(self):
+        self.assertEqual(load("dotnet-cache")["inputs"]["prune-on-miss"]["default"], "false")
+
+    def test_step_runs_only_on_a_save_mode_miss_between_restore_and_save(self):
+        steps = load("dotnet-cache")["runs"]["steps"]
+        names = [s.get("name") for s in steps]
+        self.assertEqual(names.index(PRUNE_NAME), names.index("Restore NuGet packages") + 1)
+        self.assertEqual(names.index(PRUNE_NAME) + 1, names.index("Save NuGet packages at the end of the job"))
+        self.assertEqual(prune_step()["if"], PRUNE_CONDITION)
+        self.assertEqual(prune_step()["shell"], "bash")
+        self.assertNotIn("${{", prune_step()["run"])
+
+    def test_populated_folder_is_emptied_including_hidden_entries(self):
+        result = prune(self.home)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.packages.is_dir())
+        self.assertEqual(list(self.packages.iterdir()), [])
+        self.assertIn("3", result.stdout)
+
+    def test_trailing_slash_nuget_packages_is_accepted(self):
+        result = prune(self.home, nuget_packages=f"{self.packages}//")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(self.packages.iterdir()), [])
+
+    def test_unsafe_nuget_packages_is_refused_and_nothing_is_deleted(self):
+        other = Path(self.temp.name) / "elsewhere"
+        other.mkdir()
+        (other / "keep").write_text("x")
+        for unsafe in [str(other), "/", str(self.home), f"{self.packages}/pkg", f"{self.packages}/../packages"]:
+            with self.subTest(unsafe):
+                result = prune(self.home, nuget_packages=unsafe)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::notice", result.stdout)
+                self.assertTrue((other / "keep").exists())
+                self.assertTrue((self.packages / "pkg/1.0.0/a.nupkg").exists())
+                self.assertTrue((self.packages / ".hidden/f").exists())
+
+    def test_condition_rejects_pull_request_events(self):
+        condition = prune_step()["if"]
+        self.assertIn("github.event_name != 'pull_request'", condition)
+        self.assertIn("github.event_name != 'pull_request_target'", condition)
+        for event in ["pull_request", "pull_request_target"]:
+            with self.subTest(event):
+                self.assertFalse(condition_allows(condition, event))
+        for event in ["push", "workflow_dispatch", "schedule"]:
+            with self.subTest(event):
+                self.assertTrue(condition_allows(condition, event))
+
+    def test_symlinked_dot_nuget_is_refused_and_the_external_target_survives(self):
+        external = Path(self.temp.name) / "external"
+        (external / "packages/sentinel").mkdir(parents=True)
+        shutil.rmtree(self.home / ".nuget")
+        (self.home / ".nuget").symlink_to(external)
+        result = prune(self.home)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::notice", result.stdout)
+        self.assertTrue((external / "packages/sentinel").is_dir())
+
+    def test_symlinked_home_is_refused_and_the_target_survives(self):
+        link = Path(self.temp.name) / "homelink"
+        link.symlink_to(self.home)
+        result = prune(link)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::notice", result.stdout)
+        self.assertTrue((self.packages / "pkg/1.0.0/a.nupkg").exists())
+
+    def test_carriage_return_in_nuget_packages_is_stripped(self):
+        result = prune(self.home, nuget_packages=f"{self.packages}\r")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(self.packages.iterdir()), [])
+
+    def test_non_default_path_is_a_noop(self):
+        result = prune(self.home, path="~/.nuget/packages\n~/other")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("::notice", result.stdout)
+        self.assertTrue((self.packages / "pkg/1.0.0/a.nupkg").exists())
+
+    def test_missing_directory_is_a_noop(self):
+        shutil.rmtree(self.packages)
+        result = prune(self.home)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("::notice", result.stdout)
+        self.assertFalse(self.packages.exists())
+
+
 class YarnPathTests(unittest.TestCase):
     def test_default_path_is_the_yarn_cache_of_the_working_directory(self):
         _, output = resolve("yarn-cache", working_directory=FIXTURE)
