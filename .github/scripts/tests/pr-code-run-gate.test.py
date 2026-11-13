@@ -76,6 +76,11 @@ class WaitForCodeRun(unittest.TestCase):
         first = [run("T [meta]", "completed", "success") for _ in range(100)]
         self.assertEqual(run_script(first, [run("T [code]", "completed", "success")]).returncode, 0)
 
+    def test_fails_closed_on_a_newer_run_without_a_marker(self):
+        runs = [run("Old [code]", "completed", "success", "2026-01-01T00:00:00Z"),
+                run("New title", "completed", "failure", "2026-01-01T01:00:00Z")]
+        self.assertEqual(run_script(runs).returncode, 1)
+
     def test_uses_the_latest_code_run(self):
         runs = [run("Add thing [code]", "completed", "failure", "2026-01-01T00:00:00Z"),
                 run("Add thing [code]", "completed", "success", "2026-01-01T01:00:00Z")]

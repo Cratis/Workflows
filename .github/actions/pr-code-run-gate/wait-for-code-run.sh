@@ -13,13 +13,14 @@ poll="${POLL_SECONDS:-30}"
 deadline=$((SECONDS + timeout))
 
 find_code_run() {
-  # Newest first; follow pages until a code run is found.
+  # Newest first; follow pages until a non-meta run is found. It must carry the code marker: a newer run
+  # without it (one that predates the markers) is not trusted, so the gate fails closed rather than skip it.
   local page=1 body found
   while [ "$page" -le 20 ]; do
     body=$(curl -fsS --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
       "${api}/repos/${repo}/actions/workflows/${WORKFLOW_FILE}/runs?head_sha=${HEAD_SHA}&event=pull_request&per_page=100&page=${page}")
     found=$(printf '%s' "$body" | jq -c --arg m "$CODE_MARKER" \
-      '[.workflow_runs[] | select((.display_title // "") | endswith(" " + $m))] | sort_by(.created_at) | last // empty')
+      '[.workflow_runs[] | select(((.display_title // "") | endswith(" [meta]")) | not)] | sort_by(.created_at) | last // empty')
     if [ -n "$found" ]; then
       printf '%s' "$found"
       return 0
@@ -33,6 +34,10 @@ while true; do
   code=$(find_code_run)
   if [ -z "$code" ]; then
     echo "::error title=code run::No code run found for ${HEAD_SHA}; push a commit or re-run the pull request workflow."
+    exit 1
+  fi
+  if ! printf '%s' "$code" | jq -e --arg m "$CODE_MARKER" '(.display_title // "") | endswith(" " + $m)' > /dev/null; then
+    echo "::error title=code run::The latest run for ${HEAD_SHA} is not marked as a code run; push a commit or re-run the pull request workflow."
     exit 1
   fi
   status=$(printf '%s' "$code" | jq -r '.status')
