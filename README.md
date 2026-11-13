@@ -730,10 +730,10 @@ The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <
 
 ### `pr-code-run-gate`
 
-For repositories whose single `Pull Requests` workflow also runs on `edited`, `labeled` and `unlabeled`. Those runs build nothing: the caller skips its heavy jobs on them, gives them their own concurrency group (so they never cancel an in-flight code run) and ends their `run-name` with a marker (default `[meta]`). In the `gate` job of such a run this action waits for the latest code run of the same head commit and fails unless it succeeded, so `gate` never turns green for a commit that was not built. It needs `actions: read` on the calling job and runs on a light runner (it only polls).
+For repositories whose single `Pull Requests` workflow also runs on `edited`, `labeled` and `unlabeled`. Those runs build nothing: the caller skips its heavy jobs on them, gives them their own concurrency group (so they never cancel an in-flight code run) and every pull request run ends its `run-name` with a marker the workflow controls (`[code]` for code runs, `[meta]` for these), so a pull request title cannot pose as or hide a code run. In the `gate` job of such a run this action waits for the latest code run of the same head commit and fails unless it succeeded, so `gate` never turns green for a commit that was not built. It needs `actions: read` on the calling job and runs on a light runner (it only polls).
 
 ```yaml
-run-name: ${{ github.event.pull_request.title }}${{ contains(fromJSON('["edited","labeled","unlabeled"]'), github.event.action) && ' [meta]' || '' }}
+run-name: ${{ github.event.pull_request.title }}${{ contains(fromJSON('["edited","labeled","unlabeled"]'), github.event.action) && ' [meta]' || ' [code]' }}
 # in the gate job, after the needs check:
 - if: ${{ contains(fromJSON('["edited","labeled","unlabeled"]'), github.event.action) }}
   uses: Cratis/Workflows/.github/actions/pr-code-run-gate@main
@@ -745,7 +745,7 @@ run-name: ${{ github.event.pull_request.title }}${{ contains(fromJSON('["edited"
 |---|---|
 | `head-sha` | required |
 | `workflow-file` | `pull-requests.yml` |
-| `marker` | `[meta]` |
+| `code-marker` | `[code]` |
 | `timeout-seconds` | `5400` |
 | `poll-seconds` | `30` |
 

@@ -5,8 +5,9 @@ description: >-
   For the label and edit events of a pull request, whose own run builds nothing: waits for the
   code run (opened, synchronize, reopened, ready_for_review) of the same head commit and fails
   unless it succeeded, so the gate never reports green for a commit that was not built. The
-  caller marks its label/edit runs with `run-name` ending in the marker (default `[meta]`), so
-  this action can tell the two kinds of run apart. Needs `actions: read` on the calling job.
+  caller ends the `run-name` of every pull request run with a marker it controls (`[code]` for
+  code runs, `[meta]` for label/edit runs) and only runs ending in the code marker are awaited, so
+  a pull request title cannot pose as a code run or hide one. Needs `actions: read` on the calling job.
 
 inputs:
   head-sha:
@@ -16,10 +17,10 @@ inputs:
     description: File name of the pull request workflow whose code run is awaited.
     required: false
     default: pull-requests.yml
-  marker:
-    description: Suffix the caller adds to the run name of label and edit runs.
+  code-marker:
+    description: Suffix the caller adds to the run name of code runs.
     required: false
-    default: "[meta]"
+    default: "[code]"
   timeout-seconds:
     description: How long to wait for the code run to finish.
     required: false
@@ -42,7 +43,7 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         HEAD_SHA: ${{ inputs.head-sha }}
         WORKFLOW_FILE: ${{ inputs.workflow-file }}
-        MARKER: ${{ inputs.marker }}
+        CODE_MARKER: ${{ inputs.code-marker }}
         TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
         POLL_SECONDS: ${{ inputs.poll-seconds }}
       run: bash "${{ github.action_path }}/wait-for-code-run.sh"

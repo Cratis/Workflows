@@ -39,7 +39,7 @@ def run_script(*responses):
             **os.environ,
             "PATH": f"{tmp}:{os.environ['PATH']}",
             "GH_TOKEN": "x", "HEAD_SHA": "abc", "WORKFLOW_FILE": "pull-requests.yml",
-            "MARKER": "[meta]", "GITHUB_REPOSITORY": "Cratis/Example",
+            "CODE_MARKER": "[code]", "GITHUB_REPOSITORY": "Cratis/Example",
             "TIMEOUT_SECONDS": "3", "POLL_SECONDS": "1",
         }
         return subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True, text=True)
@@ -52,11 +52,11 @@ def run(title, status, conclusion, created="2026-01-01T00:00:00Z"):
 @unittest.skipUnless(JQ, "jq is required")
 class WaitForCodeRun(unittest.TestCase):
     def test_passes_when_the_code_run_succeeded(self):
-        self.assertEqual(run_script([run("Add thing", "completed", "success")]).returncode, 0)
+        self.assertEqual(run_script([run("Add thing [code]", "completed", "success")]).returncode, 0)
 
     def test_fails_when_the_code_run_failed_or_was_cancelled(self):
         for conclusion in ("failure", "cancelled"):
-            self.assertEqual(run_script([run("Add thing", "completed", conclusion)]).returncode, 1)
+            self.assertEqual(run_script([run("Add thing [code]", "completed", conclusion)]).returncode, 1)
 
     def test_fails_without_a_code_run(self):
         self.assertEqual(run_script([]).returncode, 1)
@@ -66,18 +66,28 @@ class WaitForCodeRun(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("No code run", result.stdout + result.stderr)
 
+    def test_a_pull_request_title_cannot_hide_or_pose_as_a_code_run(self):
+        runs = [run("Old [code]", "completed", "success", "2026-01-01T00:00:00Z"),
+                run("Attacker [meta] [code]", "completed", "failure", "2026-01-01T01:00:00Z")]
+        self.assertEqual(run_script(runs).returncode, 1)
+        self.assertEqual(run_script([run("Attacker [code] [meta]", "completed", "success")]).returncode, 1)
+
+    def test_finds_a_code_run_beyond_the_first_page(self):
+        first = [run("T [meta]", "completed", "success") for _ in range(100)]
+        self.assertEqual(run_script(first, [run("T [code]", "completed", "success")]).returncode, 0)
+
     def test_uses_the_latest_code_run(self):
-        runs = [run("Add thing", "completed", "failure", "2026-01-01T00:00:00Z"),
-                run("Add thing", "completed", "success", "2026-01-01T01:00:00Z")]
+        runs = [run("Add thing [code]", "completed", "failure", "2026-01-01T00:00:00Z"),
+                run("Add thing [code]", "completed", "success", "2026-01-01T01:00:00Z")]
         self.assertEqual(run_script(runs).returncode, 0)
 
     def test_waits_for_an_unfinished_code_run(self):
-        result = run_script([run("Add thing", "in_progress", None)], [run("Add thing", "completed", "success")])
+        result = run_script([run("Add thing [code]", "in_progress", None)], [run("Add thing [code]", "completed", "success")])
         self.assertEqual(result.returncode, 0)
         self.assertIn("Waiting for", result.stdout)
 
     def test_times_out_when_the_code_run_never_finishes(self):
-        self.assertEqual(run_script([run("Add thing", "in_progress", None)]).returncode, 1)
+        self.assertEqual(run_script([run("Add thing [code]", "in_progress", None)]).returncode, 1)
 
 
 class ActionDefinition(unittest.TestCase):
