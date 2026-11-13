@@ -276,7 +276,19 @@ class DotnetExcludeTests(unittest.TestCase):
 
 PRUNE_NAME = "Prune stale NuGet packages on a cache miss"
 PRUNE_CONDITION = ("inputs.prune-on-miss == 'true' && steps.resolve.outputs.mode == 'save' "
-                   "&& steps.restore.outputs.cache-hit != 'true'")
+                   "&& steps.restore.outputs.cache-hit != 'true' "
+                   "&& github.event_name != 'pull_request' && github.event_name != 'pull_request_target'")
+
+
+def condition_allows(condition, event_name):
+    """Evaluate the prune condition for an event, assuming every other clause is true."""
+    for clause in condition.split(" && "):
+        left, op, right = clause.split(" ")
+        if left == "github.event_name":
+            matches = event_name == right.strip("'")
+            if (op == "==") != matches:
+                return False
+    return True
 
 
 def prune_step():
@@ -340,6 +352,40 @@ class DotnetPruneOnMissTests(unittest.TestCase):
                 self.assertTrue((other / "keep").exists())
                 self.assertTrue((self.packages / "pkg/1.0.0/a.nupkg").exists())
                 self.assertTrue((self.packages / ".hidden/f").exists())
+
+    def test_condition_rejects_pull_request_events(self):
+        condition = prune_step()["if"]
+        self.assertIn("github.event_name != 'pull_request'", condition)
+        self.assertIn("github.event_name != 'pull_request_target'", condition)
+        for event in ["pull_request", "pull_request_target"]:
+            with self.subTest(event):
+                self.assertFalse(condition_allows(condition, event))
+        for event in ["push", "workflow_dispatch", "schedule"]:
+            with self.subTest(event):
+                self.assertTrue(condition_allows(condition, event))
+
+    def test_symlinked_dot_nuget_is_refused_and_the_external_target_survives(self):
+        external = Path(self.temp.name) / "external"
+        (external / "packages/sentinel").mkdir(parents=True)
+        shutil.rmtree(self.home / ".nuget")
+        (self.home / ".nuget").symlink_to(external)
+        result = prune(self.home)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::notice", result.stdout)
+        self.assertTrue((external / "packages/sentinel").is_dir())
+
+    def test_symlinked_home_is_refused_and_the_target_survives(self):
+        link = Path(self.temp.name) / "homelink"
+        link.symlink_to(self.home)
+        result = prune(link)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::notice", result.stdout)
+        self.assertTrue((self.packages / "pkg/1.0.0/a.nupkg").exists())
+
+    def test_carriage_return_in_nuget_packages_is_stripped(self):
+        result = prune(self.home, nuget_packages=f"{self.packages}\r")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(self.packages.iterdir()), [])
 
     def test_non_default_path_is_a_noop(self):
         result = prune(self.home, path="~/.nuget/packages\n~/other")

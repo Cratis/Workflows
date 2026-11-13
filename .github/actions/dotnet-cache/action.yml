@@ -134,7 +134,9 @@ runs:
         restore-keys: ${{ steps.resolve.outputs.restore-key }}
 
     - name: Prune stale NuGet packages on a cache miss
-      if: inputs.prune-on-miss == 'true' && steps.resolve.outputs.mode == 'save' && steps.restore.outputs.cache-hit != 'true'
+      if: inputs.prune-on-miss == 'true' && steps.resolve.outputs.mode == 'save' && steps.restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      # A find or rm failure fails the job on purpose: the post-job save only runs on success,
+      # so a half-pruned cache is never saved.
       shell: bash
       env:
         INPUT_PATH: ${{ inputs.path }}
@@ -149,7 +151,8 @@ runs:
         while [ "${dir%/}" != "$dir" ] && [ -n "${dir%/}" ]; do
           dir="${dir%/}"
         done
-        if [ "$dir" != "$HOME/.nuget/packages" ] || [ -L "$dir" ] || [ ! -d "$dir" ]; then
+        if [ -L "$HOME" ] || [ -L "$HOME/.nuget" ] || [ "$dir" != "$HOME/.nuget/packages" ] || [ -L "$dir" ] || [ ! -d "$dir" ] \
+          || [ "$(cd "$dir" && pwd -P)" != "$(cd "$HOME" && pwd -P)/.nuget/packages" ]; then
           echo "::notice title=dotnet-cache::prune-on-miss skipped; the global-packages folder is not an existing real \$HOME/.nuget/packages directory; nothing pruned"
           exit 0
         fi
