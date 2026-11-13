@@ -728,6 +728,29 @@ The key is `<key-prefix>-<runner.os>-<hashFiles(<working-directory>/yarn.lock, <
 
 `verify-cache-actions.yml` runs `.github/scripts/tests/cache-actions.test.py` (mode resolution, shared path and key, pinned actions) and calls both actions against `.github/scripts/tests/fixtures/cache-actions/` under `selftest-*` prefixes, so the self-test never touches a real cache.
 
+### `pr-code-run-gate`
+
+For repositories whose single `Pull Requests` workflow also runs on `edited`, `labeled` and `unlabeled`. Those runs build nothing: the caller skips its heavy jobs on them, gives them their own concurrency group (so they never cancel an in-flight code run) and every pull request run ends its `run-name` with a marker the workflow controls (`[code]` for code runs, `[meta]` for these), so a pull request title cannot pose as or hide a code run. In the `gate` job of such a run this action waits for the latest code run of the same head commit and fails unless it succeeded, so `gate` never turns green for a commit that was not built. It needs `actions: read` on the calling job and runs on a light runner (it only polls).
+
+```yaml
+run-name: ${{ github.event.pull_request.title }}${{ contains(fromJSON('["edited","labeled","unlabeled"]'), github.event.action) && ' [meta]' || ' [code]' }}
+# in the gate job, after the needs check:
+- if: ${{ contains(fromJSON('["edited","labeled","unlabeled"]'), github.event.action) }}
+  uses: Cratis/Workflows/.github/actions/pr-code-run-gate@main
+  with:
+    head-sha: ${{ github.event.pull_request.head.sha }}
+```
+
+| Input | Default |
+|---|---|
+| `head-sha` | required |
+| `workflow-file` | `pull-requests.yml` |
+| `code-marker` | `[code]` |
+| `timeout-seconds` | `5400` |
+| `poll-seconds` | `30` |
+
+`verify-pr-code-run-gate.yml` runs `.github/scripts/tests/pr-code-run-gate.test.py` against a stubbed GitHub API.
+
 ---
 
 ## Guarded Pulumi runs
