@@ -81,6 +81,19 @@ jobs:
           key-prefix: selftest-nuget-v1
           mode: restore
 
+      - name: dotnet-cache (exclude)
+        id: exclude
+        uses: ./.github/actions/dotnet-cache
+        with:
+          path: .github/scripts/tests/fixtures/cache-actions/nuget
+          exclude: |
+            .github/scripts/tests/fixtures/cache-actions/nuget/**/*.nupkg
+
+            !.github/scripts/tests/fixtures/cache-actions/nuget/skipped
+          key-files: .github/scripts/tests/fixtures/cache-actions/global.json
+          key-prefix: selftest-nuget-exclude-v1
+          mode: restore
+
       - name: dotnet-cache (unknown mode must fail)
         id: bad-mode
         continue-on-error: true
@@ -102,6 +115,8 @@ jobs:
           YARN_HIT: ${{ steps.yarn.outputs.cache-hit }}
           YARN_MATCHED: ${{ steps.yarn.outputs.matched-key }}
           FORCED_MODE: ${{ steps.forced-restore.outputs.mode }}
+          EXCLUDE_MODE: ${{ steps.exclude.outputs.mode }}
+          EXCLUDE_KEY: ${{ steps.exclude.outputs.key }}
           BAD_OUTCOME: ${{ steps.bad-mode.outcome }}
         run: |
           set -euo pipefail
@@ -145,8 +160,10 @@ jobs:
           check "explicit restore mode" "$FORCED_MODE" restore
           check "unknown mode outcome" "$BAD_OUTCOME" failure
           check_key "dotnet key" "$DOTNET_KEY" selftest-nuget-v1
+          check "exclude mode" "$EXCLUDE_MODE" restore
+          check_key "exclude key" "$EXCLUDE_KEY" selftest-nuget-exclude-v1
           check_key "yarn key" "$YARN_KEY" selftest-yarn-v1
           check_hit dotnet "$DOTNET_HIT" "$DOTNET_MATCHED" "$DOTNET_KEY" selftest-nuget-v1
           check_hit yarn "$YARN_HIT" "$YARN_MATCHED" "$YARN_KEY" selftest-yarn-v1
-          echo "checked 8 assertions, failures: ${failures}"
+          echo "checked 10 assertions, failures: ${failures}"
           [ "$failures" -eq 0 ]

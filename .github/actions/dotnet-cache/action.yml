@@ -11,6 +11,14 @@ inputs:
     description: Newline-separated paths to cache. Keep it identical everywhere; a different path list is a different cache.
     required: false
     default: ~/.nuget/packages
+  exclude:
+    description: >-
+      Opt-in, newline-separated glob patterns to leave out of the cache, for example
+      ~/.nuget/packages/**/*.nupkg. Each is appended to the path list as a negated (!) pattern, so
+      the same list is used by restore and save. Blank lines are ignored and a leading ! is
+      optional. Empty (default) changes nothing. A different path list is a different cache.
+    required: false
+    default: ""
   key-files:
     description: Newline-separated hashFiles patterns the cache key is computed from.
     required: false
@@ -54,6 +62,7 @@ runs:
       env:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_PATH: ${{ inputs.path }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
         CACHE_KEY_PREFIX: ${{ inputs.key-prefix }}-${{ runner.os }}-
         CACHE_KEY_HASH: ${{ hashFiles(inputs.key-files) }}
         EVENT_NAME: ${{ github.event_name }}
@@ -89,6 +98,18 @@ runs:
           echo "key=${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
           echo "path<<${delimiter}"
           printf '%s\n' "$INPUT_PATH"
+          # actions/glob strips each leading ! (toggling negation) before it expands ~, so !~/... works.
+          while IFS= read -r pattern || [ -n "$pattern" ]; do
+            pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+            pattern="${pattern%"${pattern##*[![:space:]]}"}"
+            while [ "${pattern#!}" != "$pattern" ]; do
+              pattern="${pattern#!}"
+              pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+            done
+            if [ -n "$pattern" ]; then
+              printf '!%s\n' "$pattern"
+            fi
+          done <<< "$INPUT_EXCLUDE"
           echo "${delimiter}"
         } >> "$GITHUB_OUTPUT"
         echo "dotnet-cache: mode=${mode} key=${CACHE_KEY_PREFIX}${CACHE_KEY_HASH}"
