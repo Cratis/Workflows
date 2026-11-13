@@ -1,0 +1,48 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Cratis pull request code-run gate
+description: >-
+  For the label and edit events of a pull request, whose own run builds nothing: waits for the
+  code run (opened, synchronize, reopened, ready_for_review) of the same head commit and fails
+  unless it succeeded, so the gate never reports green for a commit that was not built. The
+  caller marks its label/edit runs with `run-name` ending in the marker (default `[meta]`), so
+  this action can tell the two kinds of run apart. Needs `actions: read` on the calling job.
+
+inputs:
+  head-sha:
+    description: Head commit of the pull request.
+    required: true
+  workflow-file:
+    description: File name of the pull request workflow whose code run is awaited.
+    required: false
+    default: pull-requests.yml
+  marker:
+    description: Suffix the caller adds to the run name of label and edit runs.
+    required: false
+    default: "[meta]"
+  timeout-seconds:
+    description: How long to wait for the code run to finish.
+    required: false
+    default: "5400"
+  poll-seconds:
+    description: Seconds between checks.
+    required: false
+    default: "30"
+  token:
+    description: Token with actions read access.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for the code run of this commit
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        WORKFLOW_FILE: ${{ inputs.workflow-file }}
+        MARKER: ${{ inputs.marker }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        POLL_SECONDS: ${{ inputs.poll-seconds }}
+      run: bash "${{ github.action_path }}/wait-for-code-run.sh"

@@ -1,0 +1,35 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify PR Code-Run Gate
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/pr-code-run-gate/**
+      - .github/scripts/tests/pr-code-run-gate.test.py
+      - .github/workflows/verify-pr-code-run-gate.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/pr-code-run-gate/**
+      - .github/scripts/tests/pr-code-run-gate.test.py
+      - .github/workflows/verify-pr-code-run-gate.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the code-run gate offline
+        run: python3 -B .github/scripts/tests/pr-code-run-gate.test.py
+
