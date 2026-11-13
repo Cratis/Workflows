@@ -695,7 +695,10 @@ Caches NuGet packages only. Build output (`obj`) is not cached because it goes s
 | `path` | `~/.nuget/packages` |
 | `key-files` | `**/packages.lock.json`, `**/*.props`, `**/*.targets`, `**/*.csproj`, `**/[Nn]u[Gg]et.[Cc]onfig`, `*.slnx`, `global.json` (one per line) |
 | `key-prefix` | `nuget-v1` |
+| `exclude` | empty (one glob per line, opt-in) |
 | `mode` | `auto` |
+
+`exclude` appends each non-blank line to the path list as a `!` negation (for example `~/.nuget/packages/**/*.nupkg`), identically for restore and save. Empty leaves the path, key and restore key exactly as before. It changes the path list, so it is a different cache: warm it from the default branch before relying on it.
 
 The key is `<key-prefix>-<runner.os>-<hashFiles(key-files)>`, with `<key-prefix>-<runner.os>-` as the restore key. The action fails when `key-files` matches no file, because a key without a content hash would make every run share one stale cache.
 

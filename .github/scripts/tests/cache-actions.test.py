@@ -42,7 +42,7 @@ def step(action, uses_prefix):
 
 def resolve(name, *, mode="auto", event="pull_request", ref="refs/pull/1/merge",
             default_branch="main", path=None, working_directory=None, key_hash="abc123", cwd=ROOT,
-            yarn=None):
+            yarn=None, exclude=None):
     """Run the action's production resolve script with the env GitHub would give it.
 
     PATH holds only a temporary bin directory, so the script sees no yarn unless the
@@ -70,6 +70,8 @@ def resolve(name, *, mode="auto", event="pull_request", ref="refs/pull/1/merge",
             "GIT_REF": ref,
             "DEFAULT_BRANCH": default_branch,
         }
+        if "exclude" in action["inputs"]:
+            env["INPUT_EXCLUDE"] = exclude or ""
         if working_directory is not None:
             env["WORKING_DIRECTORY"] = working_directory
         result = subprocess.run([BASH, "-c", script], env=env, cwd=cwd,
@@ -233,6 +235,43 @@ class CacheModeResolutionTests(unittest.TestCase):
     def test_multi_line_paths_survive_the_output(self):
         _, output = resolve("dotnet-cache", path="~/.nuget/packages\n~/.local/share/NuGet")
         self.assertEqual(output["path"], "~/.nuget/packages\n~/.local/share/NuGet")
+
+
+class DotnetExcludeTests(unittest.TestCase):
+    DEFAULT_PATH = "~/.nuget/packages"
+
+    def test_exclude_is_opt_in_and_empty_by_default(self):
+        self.assertEqual(load("dotnet-cache")["inputs"]["exclude"]["default"], "")
+        env = next(s for s in load("dotnet-cache")["runs"]["steps"] if s.get("id") == "resolve")["env"]
+        self.assertEqual(env["INPUT_EXCLUDE"], "${{ inputs.exclude }}")
+
+    def test_empty_or_unset_exclude_leaves_the_path_byte_identical(self):
+        for exclude in [None, "", "\n", "  \n\t\n"]:
+            with self.subTest(exclude=exclude):
+                _, output = resolve("dotnet-cache", exclude=exclude)
+                self.assertEqual(output["path"], self.DEFAULT_PATH)
+                self.assertEqual(output["key"], "nuget-v1-Linux-abc123")
+                self.assertEqual(output["restore-key"], "nuget-v1-Linux-")
+
+    def test_exclude_adds_negated_lines_after_the_path(self):
+        _, output = resolve("dotnet-cache", exclude="~/.nuget/packages/**/*.nupkg\n~/.nuget/packages/ilcompiler*")
+        self.assertEqual(output["path"], "\n".join([
+            self.DEFAULT_PATH, "!~/.nuget/packages/**/*.nupkg", "!~/.nuget/packages/ilcompiler*"]))
+
+    def test_blank_lines_and_surrounding_whitespace_are_ignored(self):
+        _, output = resolve("dotnet-cache", exclude="\n  \n  ~/.nuget/packages/**/*.nupkg  \n\n")
+        self.assertEqual(output["path"], f"{self.DEFAULT_PATH}\n!~/.nuget/packages/**/*.nupkg")
+
+    def test_an_existing_negation_is_not_doubled(self):
+        # A second ! would cancel the first inside actions/glob and re-include the files.
+        _, output = resolve("dotnet-cache", exclude="!~/.nuget/packages/**/*.nupkg\n! ~/x")
+        self.assertEqual(output["path"], f"{self.DEFAULT_PATH}\n!~/.nuget/packages/**/*.nupkg\n!~/x")
+
+    def test_exclude_composes_with_a_custom_path_and_leaves_the_keys_alone(self):
+        _, output = resolve("dotnet-cache", path="a\nb", exclude="c")
+        self.assertEqual(output["path"], "a\nb\n!c")
+        self.assertEqual(output["key"], "nuget-v1-Linux-abc123")
+        self.assertEqual(output["restore-key"], "nuget-v1-Linux-")
 
 
 class YarnPathTests(unittest.TestCase):
