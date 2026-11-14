@@ -1,0 +1,19 @@
+name: Check Batched Releases
+
+# Mirrors the shape of the real Cratis/Workflows/check-batched-releases.yml: a read-only sweep that
+# reports on release health rather than performing a release, so it needs no 'queue: max' protection
+# despite the workflow-level group lacking one.
+concurrency:
+  group: sweep
+  cancel-in-progress: true
+
+on:
+  schedule:
+    - cron: "41 * * * *"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo check

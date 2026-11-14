@@ -105,6 +105,10 @@ class FixtureTests(unittest.TestCase):
         result = scan("not-a-subject")
         self.assertEqual((result.files, result.subjects, result.violations), (1, 0, []))
 
+    def test_check_batched_releases_is_not_a_subject(self):
+        result = scan("check-sweep")
+        self.assertEqual((result.files, result.subjects, result.violations), (1, 0, []))
+
     def test_documentation_workflow_is_not_a_subject(self):
         result = scan("documentation")
         self.assertEqual((result.files, result.subjects, result.violations), (1, 0, []))
@@ -112,6 +116,11 @@ class FixtureTests(unittest.TestCase):
     def test_arc_chronicle_dependency_bump_is_allowlisted(self):
         result = checker.Scan()
         result.check("Arc", "chronicle-published.yml", UNQUEUED)
+        self.assertEqual((result.subjects, result.violations), (1, []))
+
+    def test_direct_publish_runner_reusable_dispatch_is_allowlisted(self):
+        result = checker.Scan()
+        result.check("Direct", "publish-runner.yml", UNQUEUED)
         self.assertEqual((result.subjects, result.violations), (1, []))
 
     def test_allowlisted_file_passes_only_for_its_repository(self):
@@ -130,7 +139,7 @@ class SubjectNameTests(unittest.TestCase):
             self.assertTrue(checker.is_subject_name(name), name)
         for name in ["verify-publish.yml", "verify-release-notes.yml", "release-notes.yml",
                      "release-intent.yml", "auto-approve-publish-deployments.yml", "build.yml", "publish.txt",
-                     "publish-documentation.yml"]:
+                     "publish-documentation.yml", "check-batched-releases.yml"]:
             self.assertFalse(checker.is_subject_name(name), name)
 
 
