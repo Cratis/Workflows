@@ -114,6 +114,31 @@ class StalenessDecision(unittest.TestCase):
         self.assertEqual(staleness.parse_window("          release-window: 0\n"), 0)
 
 
+class Report(unittest.TestCase):
+    def test_no_organization_repositories_cannot_run(self):
+        lines, code = staleness.report(0, [])
+        self.assertEqual(code, 2)
+        self.assertTrue(any(line.startswith("::error::") for line in lines))
+
+    def test_none_opted_in_is_a_clean_empty_run(self):
+        lines, code = staleness.report(12, [])
+        self.assertEqual(code, 0)
+        self.assertFalse(any(line.startswith("::error::") for line in lines))
+        self.assertIn("checked 0 of 12", lines[0])
+
+    def test_opted_in_and_fresh_passes(self):
+        verdict = decide([pull(1, "2026-01-01T10:30:00Z", "minor")])
+        lines, code = staleness.report(5, [verdict])
+        self.assertEqual(code, 0)
+        self.assertFalse(any(line.startswith("::error::") for line in lines))
+
+    def test_opted_in_and_stale_fails(self):
+        verdict = decide([pull(2, "2026-01-01T09:00:00Z", "patch")])
+        lines, code = staleness.report(5, [verdict])
+        self.assertEqual(code, 1)
+        self.assertTrue(any(line.startswith("::error::") for line in lines))
+
+
 class MergedPullsQuery(unittest.TestCase):
     def test_starts_at_the_latest_published_release(self):
         draft = {"created_at": "2026-03-01T00:00:00Z", "draft": True}
