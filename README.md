@@ -994,6 +994,7 @@ The path filter is intentional: this workflow is **not a required check**.
 | Not smokeable | `update-packages.yml`, `cleanup-pr-artifacts.yml` | Secrets and repository writes/deletions |
 | Not smokeable | `trigger-documentation-build.yml` | Cross-repository dispatch and a secret |
 | Not smokeable | `normalize-dependabot-labels.yml` | Writes labels |
+| Not smokeable | `verify-ai-corpus-impact.yml` | Reads live PR state with pull-requests: read; offline spec instead |
 | Not smokeable | `verify-pull-request-policy.yml`, `verify-release-notes.yml`, `verify-release-intent.yml` | Holds Workflows PRs to consumer release policy; decide separately |
 
 `auto-approve-publish-deployments.yml` uses `workflow_run`, not `workflow_call`,
@@ -1139,6 +1140,52 @@ Exit codes: `0` ran and found nothing, `1` ran and found violations (one line pe
 The checker is `.github/scripts/verify-no-work-records.mjs`. The reusable workflow downloads it from an immutable Workflows commit into the runner's temporary directory and runs it over the caller's checkout; download or prerequisite failure exits `2`. The downloaded script's SHA-256 must match the workflow's reviewed checksum before execution. When changing the script, commit it first and update the workflow's script pin and checksum. Offline tests compare the checksum with the tested source without needing the script commit in a shallow or squash-merged checkout.
 
 Run `node .github/scripts/verify-no-work-records.mjs --self-test` to plant one defect per rule in temporary repositories and check the exit codes and clean counts; `VERIFY_SELF_TEST_BREAK=1` makes the self-test fail. `verify-workflow-programs.yml` runs `.github/scripts/tests/verify-no-work-records.test.py` on every guard change, including the self-test, mixed-case fixtures, NUL-delimited filenames, listing failures and the pinned workflow wrapper.
+
+---
+
+### `verify-ai-corpus-impact.yml`
+
+A reusable guard that requires exactly one corpus-impact decision on a pull request that touches the paths you configure. It reads the live pull request (labels, changed files, comments, cross-references) through the API and needs no checkout.
+
+A pull request that changes a matching path (including the previous name of a renamed file) needs exactly one label:
+
+- `ai-corpus: tracked`: the PR body or a comment links an existing issue or pull request in the corpus repository (`Cratis/AI#123` or `https://github.com/Cratis/AI/issues/123`), or that issue or pull request links back to this PR.
+- `ai-corpus: none`: a comment line `Corpus impact: none - <reason>` (`-`, an en or em dash, or `:` as separator). The reason needs letters and must not defer work (`later`, `follow-up`, `TBD`, `todo`).
+
+Draft and Dependabot pull requests are skipped; pull requests with no matching path pass. Failures print the exact `gh` commands that fix them.
+
+Inputs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `paths` | required | Globs for paths whose changes can affect the corpus, one per line or comma-separated |
+| `exclude-paths` | empty | Globs removed from the match, for example `**/for_*/**` |
+| `corpus-repository` | `Cratis/AI` | Public `owner/name` repository that tracks corpus adaptation |
+| `runs-on` | `ubuntu-latest` | Runner label; callers in private repositories pass their self-hosted scale-set label |
+
+Globs are repository-relative: `**` crosses directories, `**/` also matches zero directories, `*` and `?` stay inside one path segment, and nothing else is special. Patterns starting with `/` or containing `..` are rejected.
+
+Exit codes: `0` pass or skip, `1` policy failure, `2` could not run (empty `paths`, invalid `corpus-repository`, no pull request number, API failure, incomplete file list, or a download or checksum failure).
+
+Call it from `pull_request` jobs only (a push has no pull request and exits `2`) and grant `pull-requests: read`. Include `labeled`, `unlabeled`, `edited` and `synchronize` in the caller's `pull_request` types, or re-run the check after fixing the evidence; decisions are read live, so a re-run sees the new state.
+
+```yaml
+ai-corpus:
+  if: ${{ github.event_name == 'pull_request' }}
+  uses: Cratis/Workflows/.github/workflows/verify-ai-corpus-impact.yml@main
+  with:
+    paths: |
+      Source/Public/**
+      Documentation/**
+    exclude-paths: |
+      **/for_*/**
+      **/*.Specs/**
+  permissions: {contents: read, pull-requests: read}
+```
+
+Limitation: the guard authenticates with the caller's `github.token`, so the corpus repository must be public; a private one answers 404, which reads as a missing link.
+
+The script is `.github/scripts/verify-ai-corpus-impact.mjs`. The workflow downloads it from an immutable Workflows commit and checks its SHA-256 before running it; download or checksum failure exits `2`. When changing the script, commit it first, then update the workflow's script pin and checksum. `verify-workflow-programs.yml` runs `.github/scripts/tests/verify-ai-corpus-impact.spec.mjs` offline, including the pin and checksum check.
 
 ---
 
