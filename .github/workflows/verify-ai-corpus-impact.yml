@@ -1,0 +1,85 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify AI Corpus Impact
+
+# Reusable guard for pull requests that touch paths the AI corpus documents.
+# It reads the live pull request (labels, files, comments) through the API, so
+# there is no checkout. The script is fetched at an immutable Workflows commit
+# and verified by SHA-256. Update the script pin and checksum whenever the
+# script changes. Call it from pull_request events only.
+# Exit codes: 0 pass or skip, 1 policy failure, 2 could not run.
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: >-
+          Glob patterns, one per line or comma-separated, for repository paths
+          whose changes can affect the AI corpus (for example src/Public/**).
+          ** crosses directories, * does not.
+        type: string
+        required: true
+      exclude-paths:
+        description: Glob patterns for paths excluded from the match (for example **/for_*/** and **/*.Specs/**)
+        type: string
+        required: false
+        default: ""
+      corpus-repository:
+        description: Public owner/name repository whose issue or pull request tracks the corpus adaptation
+        type: string
+        required: false
+        default: Cratis/AI
+      runs-on:
+        description: >-
+          Runner label the guard job runs on. Callers in private repositories
+          should pass their self-hosted scale-set label (for example cratis-arc)
+          so the guard does not consume billed GitHub-hosted minutes.
+        type: string
+        required: false
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    name: ai-corpus / verify
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Verify the corpus impact decision
+        env:
+          CORPUS_PATHS: ${{ inputs.paths }}
+          CORPUS_EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
+          CORPUS_REPOSITORY: ${{ inputs.corpus-repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if ! command -v curl >/dev/null || ! command -v node >/dev/null; then
+            echo 'could not run: curl and node are required' >&2
+            exit 2
+          fi
+          script="$RUNNER_TEMP/verify-ai-corpus-impact.mjs"
+          if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            'https://raw.githubusercontent.com/Cratis/Workflows/0883005d27971268b5446ba197c00b2f3d62cbee/.github/scripts/verify-ai-corpus-impact.mjs' \
+            --output "$script"; then
+            echo 'could not run: downloading the pinned corpus-impact guard failed' >&2
+            exit 2
+          fi
+          script_sha256='0355f8c1630f5e633ee25d64e0356b2480be4a415fbca405eda6cb255a04930c'
+          if ! node --input-type=module --eval '
+            import { createHash } from "node:crypto";
+            import { readFileSync } from "node:fs";
+            const digest = createHash("sha256").update(readFileSync(process.argv[1])).digest("hex");
+            if (digest !== process.argv[2]) process.exit(2);
+          ' "$script" "$script_sha256"; then
+            echo 'could not run: pinned corpus-impact guard checksum mismatch' >&2
+            exit 2
+          fi
+          node "$script"
