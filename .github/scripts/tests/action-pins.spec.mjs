@@ -143,7 +143,7 @@ test("Dependabot maintains exactly one monthly all-actions group in this reposit
         "version: 2",
         "updates:",
         "  - package-ecosystem: github-actions",
-        "    directory: /",
+        '    directories: ["/", "/.github/actions/*"]',
         "    schedule:",
         "      interval: monthly",
         "    groups:",
