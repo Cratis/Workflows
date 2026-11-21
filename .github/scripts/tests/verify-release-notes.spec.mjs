@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf8");
+const POLICY_WORKFLOW = readFileSync(".github/workflows/verify-pull-request-policy.yml", "utf8");
 const PROGRAM_WORKFLOW = readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8");
 const SPEC_SOURCE = readFileSync(".github/scripts/tests/verify-release-notes.spec.mjs", "utf8");
 const TEMPLATE = readFileSync(".github/pull_request_template.md", "utf8");
@@ -32,7 +33,8 @@ writeFileSync(PROGRAM_FILE, PROGRAM);
 const DRIFT_FILE = join(directory, "drift.cjs");
 writeFileSync(DRIFT_FILE, PROGRAMS["release-notes-drift"]);
 
-function run(body, { labels = ["minor"], author = "someone", base = "main", defaultBranch = "main", live } = {}) {
+function run(body, { labels = ["minor"], author = "someone", base = "main", defaultBranch = "main", live,
+    agentAuthors = "", requireAgentTrace = false } = {}) {
     const summaryFile = join(directory, `summary-${Math.random().toString(16).slice(2)}.md`);
     writeFileSync(summaryFile, "");
     // `live` is what the "Read the pull request as it is now" step wrote: a pull request object, or raw file text.
@@ -48,6 +50,8 @@ function run(body, { labels = ["minor"], author = "someone", base = "main", defa
             PR_BODY: body,
             PR_LABELS: JSON.stringify(labels),
             PR_AUTHOR: author,
+            AGENT_AUTHORS: agentAuthors,
+            REQUIRE_AGENT_TRACE: String(requireAgentTrace),
             PR_BASE: base,
             DEFAULT_BRANCH: defaultBranch,
             GITHUB_REPOSITORY: "Cratis/Example",
@@ -94,6 +98,8 @@ test("the programs reach the runner only through the environment", () => {
         "PR_BODY: ${{ github.event.pull_request.body }}",
         "PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}",
         "PR_AUTHOR: ${{ github.event.pull_request.user.login }}",
+        "AGENT_AUTHORS: ${{ inputs.agent-authors }}",
+        "REQUIRE_AGENT_TRACE: ${{ inputs.require-agent-trace }}",
         "PR_BASE: ${{ github.event.pull_request.base.ref }}",
         "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
         "GH_TOKEN: ${{ github.token }}",
@@ -101,6 +107,13 @@ test("the programs reach the runner only through the environment", () => {
         "workflow_call:",
         "runs-on: ${{ inputs.runs-on }}"])
         assert(WORKFLOW.includes(variable), variable);
+    for (const [name, variable] of [["agent-authors", "AGENT_AUTHORS"], ["require-agent-trace", "REQUIRE_AGENT_TRACE"]]) {
+        const marker = `      ${name}:\n`;
+        const input = WORKFLOW.split(marker)[1].split(/\n(?= {0,6}\S)/)[0].trim();
+        const policyInput = POLICY_WORKFLOW.split(marker)[1].split(/\n(?= {0,6}\S)/)[0].trim();
+        assert.equal(policyInput, input, `${name} has the same description, type and defaults in both workflows`);
+        assert(POLICY_WORKFLOW.includes(`${variable}: \${{ inputs.${name} }}`), `the combined policy passes through ${name}`);
+    }
     // A called workflow can only narrow its caller's grant: a cap here would take away pull-requests: read.
     assert.equal(/^\s*permissions:/m.test(WORKFLOW), false, "the reusable workflow sets no permissions of its own");
 });
@@ -316,6 +329,67 @@ test("a bold-only line naming a forbidden heading fails like the heading", () =>
         assert.match(result.errors[0].message, /pull request comment|Remove the heading/);
     }
     passes("## Added\n\n- **Breaking:** renamed `Foo` to `Bar`; rename call sites (#1)\n\n**Note** that this is fine\n");
+});
+
+test("a trailing agent trace is accepted with only notes or with a summary and optional fields", () => {
+    for (const body of [GOOD, "## Added\n\n- A new thing (#12)\n"]) {
+        for (const marker of ["<!-- agent-trace:v1 session=abc -->",
+            "<!-- agent-trace:v1 session=abc orchestrator=lead work=task issue=Cratis/AI#858 model=example-v1 -->"]) {
+            assert.deepEqual(passes(`${body}\n${marker}\n \t\n`).warned, []);
+        }
+    }
+});
+
+test("invalid agent traces explain malformed fields, count, position and forbidden references or keywords", () => {
+    for (const [marker, message] of [
+        ["<!-- agent-trace:v2 session=abc -->", /agent-trace:v1/],
+        ["<!-- agent-trace:v1 session=abc extra=value -->", /Unknown agent-trace key: extra/],
+        ["<!-- agent-trace:v1 session=abc session=def -->", /Duplicate agent-trace key: session/],
+        ["<!-- agent-trace:v1 model=example -->", /requires a session key/],
+        ["<!-- agent-trace:v1 -->", /key=value/],
+        ["<!-- agent-trace:v1 session= -->", /non-empty value/],
+        ["<!-- agent-trace:v1 session=abc stray -->", /key=value/],
+        ["<!-- agent-trace:v1 session=two words -->", /key=value/],
+        ["<!-- agent-trace:v1 session=abc issue=858 -->", /Owner\/Repo#n/],
+        ["<!-- agent-trace:v1 session=abc issue=Cratis/AI#x -->", /Owner\/Repo#n/],
+        ["<!-- agent-trace:v1 session=abc", /Close the agent-trace marker/],
+        ["<!-- agent-trace:v1 session=abc-->suffix -->", /key=value/],
+    ]) {
+        const result = fails(`${GOOD}\n${marker}`, ["Malformed agent trace"]);
+        assert.match(result.errors[0].message, message);
+        assert.match(result.errors[0].message, /Line 11 /);
+    }
+    const marker = "<!-- agent-trace:v1 session=abc -->";
+    fails(`${GOOD}\n${marker}\n${marker}`, ["Multiple agent traces"]);
+    fails(`${GOOD}\n${marker}\n<!-- agent-trace:v1 session=unclosed`, ["Multiple agent traces"]);
+    fails(`${marker}\n${GOOD}`, ["Agent trace not trailing"]);
+    fails(`${GOOD}\n${marker}\n<!-- another comment -->`, ["Agent trace not trailing"]);
+    fails(`${GOOD}\n<!-- agent-trace:v1 session=abc work=(#12) -->`, ["Agent trace issue reference"]);
+    fails(`${GOOD}\n<!-- agent-trace:v1 session=abc(#12) -->`, ["Agent trace issue reference"]);
+    for (const keyword of ["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved", "ref", "refs", "references"]) {
+        fails(`${GOOD}\n<!-- agent-trace:v1 session=abc work=${keyword} -->`, ["Agent trace keyword"]);
+    }
+});
+
+test("removing an agent trace preserves ordinary release-note diagnostic line numbers", () => {
+    const result = fails("## Added\r\n\r\n- A thing (#1) mid-bullet\r\n\r\n<!-- agent-trace:v1 session=abc -->\r\n", ["Issue reference position"]);
+    assert.match(result.errors[0].message, /Line 3 /);
+});
+
+test("only explicitly listed agent authors warn without a marker; enforcement is opt-in", () => {
+    assert.deepEqual(passes(GOOD, { agentAuthors: "explicit-agent", requireAgentTrace: true }).warned, []);
+    assert.deepEqual(passes(GOOD, { author: "agent[bot]" }).warned, []);
+    for (const agentAuthors of ["other, explicit-agent", "other\nEXPLICIT-AGENT\r\n"]) {
+        const result = passes(GOOD, { author: "explicit-agent", agentAuthors });
+        assert.deepEqual(result.warned, ["Missing agent trace"]);
+        assert.match(result.warnings[0].message, /last non-blank content/);
+    }
+    for (const labels of [["minor"], ["no-release"], []]) {
+        fails(GOOD, ["Missing agent trace"], { author: "explicit-agent", agentAuthors: "explicit-agent", requireAgentTrace: true, labels });
+    }
+    assert.deepEqual(passes(`${GOOD}\n<!-- agent-trace:v1 session=abc -->`, {
+        author: "explicit-agent", agentAuthors: "explicit-agent", requireAgentTrace: true,
+    }).warned, []);
 });
 
 test("an unclosed HTML comment fails because GitHub hides the rest", () => {
