@@ -108,6 +108,21 @@ reading as "no changes".
 repository opts in to .NET 11 by pinning an SDK 11 there; callers without a pin keep SDK 10. The
 [publish template](/.github/templates/publish.template.yml) lists `DOTNET11_VERSION` next to 8, 9 and 10.
 
+**Cratis NuGet families move together.** Before the SDK runs, an embedded resolver
+(`.github/scripts/update-cratis-nuget.mjs`) groups every locally pinned Cratis package by its
+family (`Cratis.<name>` plus dot descendants; bare `Cratis` belongs to `Cratis.Arc`) and moves
+all members to the highest stable version NuGet.org lists for every member. It never lowers a
+pin: the target is at or above the highest current pin, so an existing split is repaired upward.
+When no such version exists, the family is left unchanged with a `::warning::`. An entry in
+`nuget-package-exclusions` holds its whole family. Central `PackageVersion` pins and non-central
+`PackageReference` pins are edited in place; a version property (`$(ArcVersion)`) is updated at
+its single definition only when every use is a version of the same family, otherwise the family
+is deferred, as are conditional, ranged or floating versions. Cratis packages never reach
+`dotnet package update`. SDK exit 3 rolls back only the resolver's edits; any other unexpected
+manifest change fails the step, so nothing is published. Preview without writing:
+`node .github/scripts/update-cratis-nuget.mjs --dry-run --root <checkout>` (or `--stdin
+--manifest-path Directory.Packages.props`, which does not evaluate imports or other consumers).
+
 **NuGet packages come from the Actions cache.** When .NET is detected, the workflow
 restores `~/.nuget/packages` with `actions/cache/restore` under
 `nuget-v1-<runner OS>-<hash>`, hashed before any update from `**/packages.lock.json`,

@@ -229,6 +229,10 @@ else:
                "DOTNET_OUTDATED" if "--outdated" in args else "DOTNET_INVENTORY")
         print(os.environ.get(key, os.environ.get("DOTNET_OUTDATED", "")))
         sys.exit(int(os.environ.get("LIST_EXIT", "0")))
+    if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_REWRITE"):
+        # Simulates the SDK writing a manifest: FILE|OLD|NEW.
+        target, old, new = os.environ["UPDATE_REWRITE"].split("|")
+        Path(target).write_text(Path(target).read_text().replace(old, new))
     if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_EXIT"):
         print(os.environ.get("UPDATE_OUTPUT", ""))
         sys.exit(int(os.environ["UPDATE_EXIT"]))
@@ -596,6 +600,9 @@ class UpdatePackagesTests(unittest.TestCase):
             path = self.bin / name
             path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(STUB))
             path.chmod(0o755)
+        # The Cratis family resolver is real Node; only package indexes are offline.
+        (self.bin / "node").symlink_to(shutil.which("node"))
+        self.env["CRATIS_NUGET_INDEX_DIR"] = str(self.root / "nuget-index")
         self.git("init", "--bare", "--initial-branch=main", str(self.remote), cwd=self.root)
         self.git("clone", str(self.remote), str(self.repo), cwd=self.root)
         self.git("config", "user.name", "Fixture")
@@ -898,6 +905,105 @@ class UpdatePackagesTests(unittest.TestCase):
         self.env["FAIL_NATIVE"] = "dotnet package list --outdated --format json"
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
         self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+
+    PROPS = "Directory.Packages.props"
+
+    def cratis_family(self, pins, index, eligible=("Serilog",), files=None):
+        """A caller with the given Cratis pins, offline NuGet indexes and a mixed SDK inventory."""
+        items = "".join(f'    <PackageVersion Include="{i}" Version="{v}" />\n' for i, v in pins)
+        self.props_text = f"<Project>\n  <ItemGroup>\n{items}    <PackageVersion Include=\"Serilog\" Version=\"1.0.0\" />\n  </ItemGroup>\n</Project>\n"
+        (self.repo / self.PROPS).write_text(self.props_text)
+        for path, text in (files or {}).items():
+            (self.repo / path).write_text(text)
+        (self.root / "nuget-index").mkdir()
+        for package, versions in index.items():
+            (self.root / "nuget-index" / f"{package.lower()}.json").write_text(json.dumps({"versions": versions}))
+
+        def listing(ids):
+            return json.dumps({"version": 1, "projects": [{"path": "A.csproj", "frameworks": [{"framework": "net10.0",
+                "topLevelPackages": [{"id": i, "requestedVersion": "1.0.0"} for i in ids]}]}]})
+        self.env["DOTNET_INVENTORY"] = listing([*(i for i, _ in pins), "Serilog"])
+        self.env["DOTNET_OUTDATED"] = listing([*(i for i, _ in pins), *eligible])
+
+    def sdk_updates(self):
+        return [call for call in self.calls("dotnet") if call[1:3] == ["package", "update"]]
+
+    def test_nuget_complete_cratis_family_updates_together_and_never_reaches_the_sdk(self):
+        self.cratis_family([("Cratis.Chronicle", "1.0.0"), ("Cratis.Chronicle.Api", "1.0.0")],
+                           {"Cratis.Chronicle": ["1.0.0", "1.0.9", "1.0.10"], "Cratis.Chronicle.Api": ["1.0.0", "1.0.9", "1.0.10"]})
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text.replace('Chronicle" Version="1.0.0"', 'Chronicle" Version="1.0.10"').replace('Api" Version="1.0.0"', 'Api" Version="1.0.10"'))
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Serilog"]])
+
+    def test_nuget_mid_publication_family_is_deferred_visibly_and_unchanged(self):
+        self.cratis_family([("Cratis.Chronicle", "1.0.0"), ("Cratis.Chronicle.Api", "1.0.9")],
+                           {"Cratis.Chronicle": ["1.0.0", "1.0.9"], "Cratis.Chronicle.Api": ["1.0.0"]})
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertIn("::warning::Cratis NuGet family Cratis.Chronicle was left unchanged", self.last_result.stdout)
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Serilog"]])
+
+    def test_nuget_excluded_member_holds_the_whole_family(self):
+        self.cratis_family([("Cratis.Chronicle", "1.0.0"), ("Cratis.Chronicle.Api", "1.0.0")],
+                           {"Cratis.Chronicle": ["1.0.0", "1.0.9"], "Cratis.Chronicle.Api": ["1.0.0", "1.0.9"]})
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "cratis.chronicle.api"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Serilog"]])
+        self.assertNotIn("not referenced", self.last_result.stdout)
+
+    def test_nuget_non_central_references_update_and_a_family_only_caller_skips_the_sdk(self):
+        project = '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Cratis.Arc" Version="1.0.0" /></ItemGroup></Project>\n'
+        self.cratis_family([], {"Cratis.Arc": ["1.0.0", "1.1.0"]}, eligible=(), files={"A.csproj": project})
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual((self.repo / "A.csproj").read_text(), project.replace("1.0.0", "1.1.0"))
+        self.assertEqual(self.sdk_updates(), [])
+
+    def test_nuget_exit_3_rolls_back_only_the_family_edits(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.env["UPDATE_EXIT"] = "3"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertIn("skipping NuGet update", self.last_result.stdout)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+
+    def test_nuget_exit_3_with_unexpected_manifest_changes_fails(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.env.update(UPDATE_EXIT="3", UPDATE_REWRITE=f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="2.0.0')
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+
+    def test_nuget_sdk_edit_to_a_family_pin_fails_and_nothing_publishes(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.env["UPDATE_REWRITE"] = f'{self.PROPS}|Arc" Version="1.1.0|Arc" Version="1.0.5'
+        self.assertFalse(self.run_steps([PREFLIGHT, "Update NuGet packages", "Build .NET"]))
+        self.assertNotIn(["dotnet", "build", "--configuration", "Release"], self.calls("dotnet"))
+        self.assert_not_published()
+
+    def test_nuget_sdk_failure_after_family_edits_fails_the_step(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.env["FAIL_NATIVE"] = "dotnet package update Serilog"
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+
+    def test_nuget_unavailable_package_index_fails_without_writes_or_sdk_update(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {})
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(self.sdk_updates(), [])
+
+    def test_nuget_cratis_package_unknown_to_manifests_in_an_edited_family_rolls_back(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.env["DOTNET_INVENTORY"] = self.env["DOTNET_INVENTORY"].replace('"Serilog"', '"Cratis.Arc.Hidden"')
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+
+    def test_nuget_embedded_cratis_resolver_matches_script(self):
+        embedded = shell("Update NuGet packages").split("<<'MJS'\n", 1)[1].split("\nMJS\n", 1)[0] + "\n"
+        self.assertEqual(embedded, (ROOT / ".github/scripts/update-cratis-nuget.mjs").read_text())
+
+    def test_nuget_node_is_set_up_for_nuget_only_callers(self):
+        for name in ("Setup Node.js", "Validate Node.js version"):
+            self.assertIn("steps.detect.outputs.update_nuget == 'true'", STEPS[name])
+        self.assertIn("update_npm == 'true'", STEPS["Install NPM dependencies"])
+        self.assertNotIn("update_nuget", STEPS["Install NPM dependencies"])
 
     def test_direct_default_preflight_only_records_git_base(self):
         self.env["PUBLICATION_MODE"] = "direct"
