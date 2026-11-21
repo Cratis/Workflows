@@ -71,8 +71,38 @@ elif method == 'POST' and endpoint.endswith('/git/commits'):
     sha = oid(body)
     r['commits'][sha] = {'tree':{'sha':body['tree']},'parents':body['parents'],'message':body['message']}
     result = {'sha':sha}
+elif endpoint in s.get('api_errors', {}):
+    error = s['api_errors'][endpoint]
+elif method == 'POST' and endpoint.endswith('/git/refs'):
+    if r.get('bootstrap_head'): error = 'Reference already exists (HTTP 422)'
+    else:
+        r['bootstrap_head'] = fields['sha']
+        result = {'object':{'sha':fields['sha']}}
+elif method == 'PATCH' and endpoint.endswith('/git/refs/heads/bootstrap/common-workflows'):
+    assert fields['force'] == 'true'
+    r['bootstrap_head'] = fields['sha']
+    result = {'object':{'sha':fields['sha']}}
+elif method == 'GET' and '/pulls?' in endpoint:
+    assert endpoint.endswith('?head=Cratis:bootstrap/common-workflows&state=open')
+    result = r.get('pulls', [])
+elif method == 'POST' and endpoint.endswith('/pulls'):
+    result = dict(fields, number=42, html_url='https://github.com/Cratis/'+name+'/pull/42')
+    result['base'] = {'ref':fields['base']}
+    r.setdefault('pulls', []).append(result)
+elif method == 'POST' and endpoint.endswith('/labels'):
+    if '/issues/' in endpoint:
+        assert body == {'labels':['no-release']}
+        r['pr_labels'] = body['labels']
+    else:
+        assert fields['name'] == 'no-release'
+    result = []
 elif method == 'PATCH' and '/git/refs/heads/' in endpoint:
-    if r['commits'][fields['sha']]['parents'] != [r['head']]:
+    errors = r.get('push_errors', [])
+    if errors:
+        rejection = errors.pop(0)
+        error = rejection['error']
+        result = {'message':rejection.get('message', '')}
+    elif r['commits'][fields['sha']]['parents'] != [r['head']]:
         error = 'Update is not a fast forward (HTTP 422)'
     else:
         r['head'] = fields['sha']
@@ -82,6 +112,7 @@ else:
     error = 'UNEXPECTED API CALL '+repr(a)
 p.write_text(json.dumps(s))
 if error:
+    if result is not None: print(json.dumps(result))
     print(error,file=sys.stderr)
     sys.exit(1)
 if '--jq' in a:
@@ -151,6 +182,11 @@ class BootstrapRolloutTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, output)
         self.state = json.loads(self.state_file.read_text())
         return output
+
+    def reject_push(self, error, message='', **repo_state):
+        state = json.loads(self.state_file.read_text())
+        state['repos']['Alpha'].update(repo_state, push_errors=[{'error': error, 'message': message}])
+        self.state_file.write_text(json.dumps(state))
 
     def message(self, name):
         repo = self.state['repos'][name]
@@ -276,6 +312,106 @@ class BootstrapRolloutTests(unittest.TestCase):
         self.assertEqual(self.state['events'], [])
         self.assertFalse([call for call in self.state['calls'] if any('/actions/runs' in arg for arg in call)])
         self.assertIn('Processed 2 repo(s), pushed 0 commit(s)', out)
+
+    def test_required_checks_create_a_branch_and_pull_request_without_a_push_or_wait(self):
+        self.initialize(['Alpha', 'Beta'])
+        self.reject_push('gh: HTTP 422', '2 of 2 required status checks are expected.')
+        out = self.run_bootstrap(['Alpha', 'Beta'])
+        repo = self.state['repos']['Alpha']
+        pr = repo['pulls'][0]
+        commit = repo['commits'][repo['bootstrap_head']]
+        self.assertEqual(repo['head'], 'a'*40)
+        self.assertEqual(commit['parents'], [repo['head']])
+        self.assertEqual(pr['title'], commit['message'])
+        self.assertEqual(pr['head'], 'bootstrap/common-workflows')
+        self.assertEqual(pr['base'], {'ref': 'main'})
+        self.assertIn("default branch's rules require checks", pr['body'])
+        for token in SKIP_TOKENS:
+            self.assertNotIn(token, (pr['title'] + pr['body']).lower())
+        self.assertEqual(repo['pr_labels'], ['no-release'])
+        self.assertIn('Opened/updated pull request https://github.com/Cratis/Alpha/pull/42 in Alpha:', out)
+        self.assertIn('pull requests opened/updated: 1', out)
+        self.assertRegex(out, r'Summary:\s+0 failure\(s\)')
+        self.assertEqual(self.state['events'], ['push Beta'] + [f'sleep {POLL}'] * (SETTLE // POLL))
+        self.assertEqual(list(self.state['run_reads']), ['Beta'])
+
+    def test_a_single_required_status_check_also_creates_a_pull_request(self):
+        self.initialize(['Alpha'])
+        self.reject_push("gh: Required status check 'commitlint' is expected. (HTTP 422)")
+        out = self.run_bootstrap(['Alpha'])
+        self.assertEqual(self.state['repos']['Alpha']['pr_labels'], ['no-release'])
+        self.assertIn('pull requests opened/updated: 1', out)
+        self.assertRegex(out, r'Summary:\s+0 failure\(s\)')
+
+    def test_existing_branch_is_force_updated_and_matching_open_pull_request_reused(self):
+        self.initialize(['Alpha'])
+        existing = [{'number': 12, 'html_url': 'https://github.com/Cratis/Alpha/pull/12',
+                     'base': {'ref': 'other'}},
+                    {'number': 13, 'html_url': 'https://github.com/Cratis/Alpha/pull/13',
+                     'base': {'ref': 'main'}}]
+        self.reject_push('gh: Repository rule violations (HTTP 422)', bootstrap_head='c'*40, pulls=existing)
+        out = self.run_bootstrap(['Alpha'])
+        repo = self.state['repos']['Alpha']
+        self.assertNotEqual(repo['bootstrap_head'], 'c'*40)
+        self.assertEqual(repo['commits'][repo['bootstrap_head']]['parents'], [repo['head']])
+        self.assertEqual(repo['pulls'], existing)
+        self.assertEqual(repo['pr_labels'], ['no-release'])
+        self.assertFalse([call for call in self.state['calls'] if '-X' in call
+                          and call[call.index('-X') + 1] == 'POST' and call[call.index('-X') + 2].endswith('/pulls')])
+        self.assertIn('Opened/updated pull request https://github.com/Cratis/Alpha/pull/13', out)
+        self.assertIn('Processed 1 repo(s), pushed 0 commit(s)', out)
+        self.assertIn('pull requests opened/updated: 1', out)
+        self.assertEqual(self.state['events'], [])
+        self.assertEqual(self.state['run_reads'], {})
+
+    def test_unrelated_rejection_and_non_422_rule_errors_still_fail(self):
+        for error in ['gh: Validation failed (HTTP 422)', 'gh: protected branch (HTTP 403)']:
+            with self.subTest(error=error):
+                self.initialize(['Alpha'])
+                self.reject_push(error)
+                out = self.run_bootstrap(['Alpha'], expected=1)
+                self.assertIn(error, out)
+                self.assertRegex(out, r'Summary:\s+1 failure\(s\)')
+                self.assertIn('pull requests opened/updated: 0', out)
+                self.assertNotIn('bootstrap_head', self.state['repos']['Alpha'])
+
+    def test_non_fast_forward_is_retried_before_considering_the_rule_fallback(self):
+        self.initialize(['Alpha'])
+        self.reject_push('gh: Not a fast forward; protected branch (HTTP 422)')
+        out = self.run_bootstrap(['Alpha'])
+        self.assertIn('Branch moved; retrying once from fresh HEAD', out)
+        self.assertEqual(self.state['events'][0], 'push Alpha')
+        self.assertNotIn('bootstrap_head', self.state['repos']['Alpha'])
+        self.assertIn('pull requests opened/updated: 0', out)
+        pushes = [call for call in self.state['calls'] if 'repos/Cratis/Alpha/git/refs/heads/main' in call]
+        self.assertEqual(len(pushes), 2)
+
+    def test_fallback_api_failures_fail_the_repository_except_label_creation(self):
+        endpoints = ['git/refs', 'git/refs/heads/bootstrap/common-workflows',
+                     'pulls?head=Cratis:bootstrap/common-workflows&state=open', 'pulls',
+                     'labels', 'issues/42/labels']
+        for endpoint in endpoints:
+            with self.subTest(endpoint=endpoint):
+                self.initialize(['Alpha'])
+                branch = {'bootstrap_head': 'c'*40} if endpoint.startswith('git/refs/heads/') else {}
+                self.reject_push('gh: protected branch (HTTP 422)', **branch)
+                state = json.loads(self.state_file.read_text())
+                state['api_errors'] = {'repos/Cratis/Alpha/' + endpoint: 'gh: API unavailable (HTTP 503)'}
+                self.state_file.write_text(json.dumps(state))
+                out = self.run_bootstrap(['Alpha'], expected=0 if endpoint == 'labels' else 1)
+                self.assertIn('API unavailable (HTTP 503)', out)
+                self.assertIn('pull requests opened/updated: ' + ('1' if endpoint == 'labels' else '0'), out)
+                if endpoint == 'labels':
+                    self.assertEqual(self.state['repos']['Alpha']['pr_labels'], ['no-release'])
+
+    def test_a_fallback_after_a_push_does_not_reuse_the_pushed_sha_or_trigger_another_stagger(self):
+        self.initialize(['Fundamentals', 'Alpha', 'Beta'])
+        self.reject_push('gh: Ruleset requires status checks (HTTP 422)')
+        out = self.run_bootstrap(['Fundamentals', 'Alpha', 'Beta'])
+        self.assertIn('Processed 3 repo(s), pushed 2 commit(s)', out)
+        self.assertIn('pull requests opened/updated: 1', out)
+        self.assertEqual(self.state['events'], ['push Fundamentals'] + [f'sleep {POLL}'] * (SETTLE // POLL)
+                         + [f'sleep {STAGGER}', 'push Beta'])
 
     def test_an_invalid_timing_setting_cannot_run(self):
         self.initialize(['Fundamentals'])

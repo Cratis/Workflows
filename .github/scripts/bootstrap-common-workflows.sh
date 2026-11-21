@@ -35,6 +35,7 @@
 #   GH_TOKEN      - PAT with repo + Workflows permissions; the PAT owner must
 #                   be a bypass actor on target repos' branch protection rulesets
 #                   so that direct pushes to the default branch are allowed.
+#                   Pull requests: Write is needed for the branch-rule fallback.
 #   REPOS_FILE    - path to a JSON file containing the repos array
 #                   (written by the "Get all Cratis repositories" step)
 #   REPOS_IGNORE  - JSON array of repo names to skip (e.g. '["Workflows"]')
@@ -91,6 +92,7 @@ fi
 
 # Commits pushed so far in this run; the first one is the canary.
 pushes_done=0
+pull_requests_done=0
 # Set by update_repo to the commit it pushed, empty when it pushed nothing.
 pushed_sha=""
 # Set after each push; the next repository waits STAGGER_SECONDS before reading its HEAD.
@@ -383,6 +385,48 @@ patch|ace006|Fix: merging releases a new patch version
 no-release|ededed|Merging publishes no package, image, release, or deployment
 LABELS
   echo "  ✓ All four release-intent labels exist in $repo"
+}
+
+# The bootstrap owns this branch and rebuilds it from the current default-branch HEAD on every run.
+open_bootstrap_pull_request() {
+  local repo="$1" base="$2" sha="$3" message="$4"
+  local branch="bootstrap/common-workflows" ref_error ref_response prs pr number url
+  pushed_sha=""
+  ref_error=$(mktemp)
+  if ! ref_response=$(gh api -X POST "repos/Cratis/$repo/git/refs" \
+    -f ref="refs/heads/$branch" -f sha="$sha" 2>"$ref_error"); then
+    if grep -q 'HTTP 422' "$ref_error" \
+      && grep -Eqi 'reference already exists|already_exists' <<<"$ref_response $(cat "$ref_error")"; then
+      rm -f "$ref_error"
+      gh api -X PATCH "repos/Cratis/$repo/git/refs/heads/$branch" \
+        -f sha="$sha" -F force=true >/dev/null || return 1
+    else
+      echo "    API error: $ref_response $(cat "$ref_error")"
+      rm -f "$ref_error"
+      return 1
+    fi
+  else
+    rm -f "$ref_error"
+  fi
+
+  prs=$(gh api "repos/Cratis/$repo/pulls?head=Cratis:$branch&state=open") || return 1
+  pr=$(printf '%s' "$prs" | jq -c --arg base "$base" \
+    '[.[] | select(.base.ref == $base)][0] // empty') || return 1
+  if [ -z "$pr" ]; then
+    pr=$(gh api -X POST "repos/Cratis/$repo/pulls" \
+      -f head="$branch" -f base="$base" -f title="$message" \
+      -f body="The default branch's rules require checks, so the bootstrap proposes its change as a pull request.") || return 1
+  fi
+  number=$(printf '%s' "$pr" | jq -er '.number') || return 1
+  url=$(printf '%s' "$pr" | jq -er '.html_url') || return 1
+  if ! gh api -X POST "repos/Cratis/$repo/labels" -f name=no-release -f color=ededed >/dev/null; then
+    echo "  ⚠ Could not create no-release label in $repo; trying to apply the existing label"
+  fi
+  printf '%s' '{"labels":["no-release"]}' | \
+    gh api -X POST "repos/Cratis/$repo/issues/$number/labels" --input - >/dev/null || return 1
+
+  pull_requests_done=$((pull_requests_done + 1))
+  echo "  ✓ Opened/updated pull request $url in $repo: $message"
 }
 
 # ================================================================
@@ -790,6 +834,11 @@ update_repo() {
       echo "  Branch moved; retrying once from fresh HEAD"
       return 75
     fi
+    if grep -qi 'HTTP 422' <<<"$push_api_error" \
+      && grep -Eqi 'required status checks?|protected branch|Repository rule violations|ruleset' <<<"$push_api_error $push_msg"; then
+      open_bootstrap_pull_request "$repo" "$default_branch" "$new_commit_sha" "$commit_message"
+      return $?
+    fi
     return 1
   fi
   rm -f "$push_error"
@@ -834,6 +883,7 @@ rm -f "$failures_file"
 
 echo ""
 echo "Processed $repos_processed repo(s), pushed $pushes_done commit(s)"
+echo "pull requests opened/updated: $pull_requests_done"
 echo "Summary: $total_failures failure(s)"
 
 if [ -n "$actions_unreadable" ]; then
