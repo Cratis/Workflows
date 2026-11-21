@@ -223,7 +223,7 @@ jobs:
       # builds must not start until every ecosystem's dependencies are actually in place.
       - name: Setup .NET
         if: steps.detect.outputs.update_nuget == 'true'
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         env:
           # Self-hosted scale-set containers cannot write /usr/share/dotnet, the action's
           # default install location, so callers that pass a self-hosted runs-on label
@@ -281,7 +281,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.detect.outputs.update_npm == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node-version }}
           # setup-node v5+ auto-enables caching when package.json declares npm as its
@@ -307,7 +307,7 @@ jobs:
 
       - name: Setup Java
         if: steps.detect.outputs.update_gradle == 'true'
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
@@ -959,7 +959,7 @@ jobs:
       - name: Mint publication App token
         id: app-token
         if: steps.publication-auth.outputs.use-app == 'true'
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           app-id: ${{ vars.CRATIS_AUTOMATION_APP_ID }}
           private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
