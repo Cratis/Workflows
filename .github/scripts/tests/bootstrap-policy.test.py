@@ -411,14 +411,18 @@ jobs:
         self.assertIn('  pull_request:\n', wrapper)
         self.assertNotIn('workflow_call', wrapper)
 
-    def test_unreadable_workflow_does_not_write_the_policy_file(self):
+    def test_unreadable_workflow_leaves_the_repository_untouched(self):
         files = {p: base64.b64decode(PAYLOADS[p]).decode() for p in LEGACY}
         other = '.github/workflows/pull-requests.yml'
         files[other] = 'jobs: {}\n'
         self.initialize(files, fail_blobs=[blob(files[other])])
-        out = self.run_bootstrap()
-        self.assertIn('Not writing ' + POLICY, out)
-        self.assertNotIn(POLICY, self.files())
+        out = self.run_bootstrap(expected=1)
+        self.assertIn('could not tell whether a local workflow calls ' + POLICY, out)
+        self.assertEqual(self.state['tree_writes'], [])
+        self.assertEqual(self.state['patches'], 0)
+        self.assertEqual(self.state['head'], 'a'*40)
+        for path in LEGACY:
+            self.assertIn(path, self.files())
 
     def test_known_hash_table_covers_every_historical_payload_per_path(self):
         history = subprocess.check_output(['git', 'log', '-p', 'HEAD', '--', '.github/scripts/bootstrap-common-workflows.sh'], cwd=ROOT, text=True)

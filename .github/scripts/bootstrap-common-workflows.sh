@@ -664,8 +664,8 @@ update_repo() {
         0) file_b64="$POLICY_REUSABLE_WRAPPER"
            echo "  ℹ A local workflow calls $file_path; writing the reusable variant" ;;
         1) ;;
-        *) echo "  ⚠ Not writing $file_path in Cratis/$repo: could not tell whether a local workflow calls it"
-           continue ;;
+        *) echo "  ⚠ Skipping Cratis/$repo: could not tell whether a local workflow calls $file_path"
+           return 1 ;;
       esac
       file_content=$(printf '%s' "$file_b64" | base64 -d)
       file_b64=$(render_policy_wrapper "$file_content" "$repo_releases" "$repo_runner" | base64 | tr -d '\n')
