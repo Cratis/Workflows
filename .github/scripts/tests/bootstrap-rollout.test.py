@@ -335,6 +335,14 @@ class BootstrapRolloutTests(unittest.TestCase):
         self.assertEqual(self.state['events'], ['push Beta'] + [f'sleep {POLL}'] * (SETTLE // POLL))
         self.assertEqual(list(self.state['run_reads']), ['Beta'])
 
+    def test_a_single_required_status_check_also_creates_a_pull_request(self):
+        self.initialize(['Alpha'])
+        self.reject_push("gh: Required status check 'commitlint' is expected. (HTTP 422)")
+        out = self.run_bootstrap(['Alpha'])
+        self.assertEqual(self.state['repos']['Alpha']['pr_labels'], ['no-release'])
+        self.assertIn('pull requests opened/updated: 1', out)
+        self.assertRegex(out, r'Summary:\s+0 failure\(s\)')
+
     def test_existing_branch_is_force_updated_and_matching_open_pull_request_reused(self):
         self.initialize(['Alpha'])
         existing = [{'number': 12, 'html_url': 'https://github.com/Cratis/Alpha/pull/12',

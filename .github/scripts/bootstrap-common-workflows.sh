@@ -835,7 +835,7 @@ update_repo() {
       return 75
     fi
     if grep -qi 'HTTP 422' <<<"$push_api_error" \
-      && grep -Eqi 'required status checks|protected branch|Repository rule violations|ruleset' <<<"$push_api_error $push_msg"; then
+      && grep -Eqi 'required status checks?|protected branch|Repository rule violations|ruleset' <<<"$push_api_error $push_msg"; then
       open_bootstrap_pull_request "$repo" "$default_branch" "$new_commit_sha" "$commit_message"
       return $?
     fi
