@@ -477,13 +477,21 @@ jobs:
           }
 
           function agentTrace(body) {
-              const starts = [...body.matchAll(/<!--\s*agent-trace\b/g)];
+              const normalized = body.replace(/\r\n?/g, match => match.length === 2 ? " \n" : "\n");
+              const scanned = blank(blank(normalized, FENCED_CODE, " "), INLINE_CODE, " ");
+              const starts = [...scanned.matchAll(/<!--\s*agent-trace\b/g)];
               if (starts.length === 0) {
-                  return { body, present: false };
+                  return { body, present: false, valid: false };
+              }
+              let cleaned = body;
+              for (const { index } of starts) {
+                  const close = body.indexOf("-->", index);
+                  const end = close < 0 ? body.length : close + 3;
+                  cleaned = cleaned.slice(0, index) + body.slice(index, end).replace(/[^\r\n]/g, " ") + cleaned.slice(end);
               }
               const start = starts[0].index;
               const line = body.slice(0, start).split(/\r\n?|\n/).length;
-              const invalid = (rule, fix) => ({ present: true, violations: [{ rule, line,
+              const invalid = (rule, fix) => ({ body: cleaned, present: true, valid: false, violations: [{ rule, line,
                   text: quote(body.split(/\r\n?|\n/)[line - 1]), fix }] });
               if (starts.length > 1) {
                   return invalid("Multiple agent traces", "Keep exactly one agent-trace marker at the end of the description.");
@@ -496,7 +504,8 @@ jobs:
               if (/\(#\d+\)/.test(marker)) {
                   return invalid("Agent trace issue reference", "Never put `(#n)` inside an agent-trace marker; use `issue=Owner/Repo#n` for attribution.");
               }
-              if ((marker.match(/\b[\w]+\b/g) || []).some(word => KEYWORD_TEXT.test(word))) {
+              if (marker.split(/[=\s]+/).some(token => KEYWORD_TEXT.test(token))
+                  || [...marker.matchAll(KEYWORD)].length > 0 || [...marker.matchAll(KEYWORD_URL)].length > 0) {
                   return invalid("Agent trace keyword", "Remove closing or linking keywords from the agent-trace marker.");
               }
               const fields = /^<!-- agent-trace:v1 (.+) -->$/.exec(marker);
@@ -527,8 +536,7 @@ jobs:
               if (body.slice(close + 3).trim()) {
                   return invalid("Agent trace not trailing", "Move the agent-trace marker after all other non-blank content.");
               }
-              // Blank only the validated marker, retaining every original line number.
-              return { body: body.slice(0, start) + marker.replace(/[^\r\n]/g, " ") + body.slice(close + 3), present: true };
+              return { body: cleaned, present: true, valid: true };
           }
 
           function check({ body, repository, defaultBranch }) {
@@ -831,24 +839,23 @@ jobs:
           // release-bound, so its violations are reported as warnings.
           const trace = agentTrace(body);
           const agentAuthors = (process.env.AGENT_AUTHORS || "").split(/[,\r\n]+/).map(login => login.trim().toLowerCase()).filter(Boolean);
-          if (!trace.present && agentAuthors.includes(author.toLowerCase())) {
-              const required = process.env.REQUIRE_AGENT_TRACE === "true";
-              const message = "This author is listed in agent-authors, but the description has no agent-trace marker. Add `<!-- agent-trace:v1 session=<value> -->` as the last non-blank content.";
-              console.log(`::${required ? "error" : "warning"} title=${escapeProperty("Release notes: Missing agent trace")}::${escapeData(message)}`);
-              summary(`### Agent trace\n\n${message}`);
-              if (required) {
-                  process.exit(1);
-              }
+          const missingTrace = !trace.valid && agentAuthors.includes(author.toLowerCase());
+          const requiredTrace = missingTrace && process.env.REQUIRE_AGENT_TRACE === "true";
+          const traceMessage = "This author is listed in agent-authors, but the description has no valid agent-trace marker. Add `<!-- agent-trace:v1 session=<value> -->` as the last non-blank content.";
+          if (missingTrace && !requiredTrace) {
+              console.log(`::warning title=${escapeProperty("Release notes: Missing agent trace")}::${escapeData(traceMessage)}`);
+              summary(`### Agent trace\n\n${traceMessage}`);
           }
           const releaseLabels = [...new Set(labels.filter(label => ["major", "minor", "patch"].includes(label)))];
           const noRelease = labels.includes("no-release");
           const releaseBound = releaseLabels.length > 0;
-          const violations = (trace.violations || check({
-              body: trace.body,
-              repository: process.env.GITHUB_REPOSITORY || "Cratis/<Repository>",
-              defaultBranch,
+          const failing = releaseBound || (trace.present && !trace.valid) || requiredTrace;
+          const violations = [
+              ...(trace.violations || []),
+              ...(requiredTrace ? [{ rule: "Missing agent trace", line: null, text: "", fix: traceMessage }] : []),
+              ...check({ body: trace.body, repository: process.env.GITHUB_REPOSITORY || "Cratis/<Repository>", defaultBranch }),
           // A no-release pull request publishes nothing, so having no change list is not a mistake there.
-          })).filter(violation => releaseBound || !noRelease || violation.rule !== "No release notes");
+          ].filter(violation => releaseBound || !noRelease || violation.rule !== "No release notes");
 
           const status = releaseBound ? ""
               : noRelease ? "The pull request is labelled no-release, so this description is not published now. "
@@ -859,8 +866,9 @@ jobs:
               process.exit(0);
           }
 
-          const level = releaseBound ? "error" : "warning";
+          const level = failing ? "error" : "warning";
           const consequence = releaseBound ? VERBATIM
+              : failing ? "Agent attribution must be valid regardless of the release label."
               : `${noRelease ? "Labelled no-release, so this is a warning" : "Not labelled yet, so this is a warning"}: it fails once the pull request is labelled major, minor or patch. ${VERBATIM}`;
           for (const violation of violations) {
               const where = violation.line === null ? "The description" : `Line ${violation.line} \`${violation.text}\``;
@@ -871,13 +879,13 @@ jobs:
           summary([
               "### Release notes",
               "",
-              `${violations.length} release-note ${releaseBound ? "violation(s)" : "warning(s)"}. ${consequence}`,
+              `${violations.length} release-note ${failing ? "violation(s)" : "warning(s)"}. ${consequence}`,
               "",
               "| Line | Rule | Text |",
               "| --- | --- | --- |",
               ...rows,
           ].join("\n"));
-          process.exit(releaseBound ? 1 : 0);
+          process.exit(failing ? 1 : 0);
           JS
       - name: Require exactly one release-intent label
         id: intent
