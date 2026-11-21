@@ -193,9 +193,11 @@ class BootstrapPolicyTests(unittest.TestCase):
         self.assertEqual(set(LEGACY), {e['path'] for e in entries if e['sha'] is None})
         wrapper = self.files()[POLICY]
         self.assertIn('release-intent: true', wrapper)
-        self.assertIn('needs: dependabot-labels', wrapper)
-        self.assertIn("user.login == 'dependabot[bot]' && github.event.pull_request.base.ref == 'main'", wrapper)
-        self.assertIn('pull-requests: write', wrapper)
+        self.assertNotIn('dependabot-labels', wrapper)
+        self.assertNotIn('normalize-dependabot-labels', wrapper)
+        self.assertNotIn('needs:', wrapper)
+        self.assertNotIn('    if: ${{ !cancelled() }}', wrapper)
+        self.assertNotIn('pull-requests: write', wrapper)
         self.run_bootstrap()
         self.assertEqual(len(self.state['tree_writes']), 1)
         self.assertEqual(self.files()[POLICY], wrapper)
@@ -268,15 +270,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  dependabot-labels:
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.base.ref == 'main'
-    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main
-    permissions:
-      pull-requests: write
-
   policy:
-    needs: dependabot-labels
-    if: ${{ !cancelled() }}
     uses: Cratis/Workflows/.github/workflows/verify-pull-request-policy.yml@main
     with:
       runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}
@@ -285,15 +279,7 @@ jobs:
         self.assertEqual(self.files()[POLICY], expected)
         self.initialize({})
         self.run_bootstrap()
-        nonreleasing = expected.replace('''  dependabot-labels:
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.base.ref == 'main'
-    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main
-    permissions:
-      pull-requests: write
-
-''', '').replace('''    needs: dependabot-labels
-    if: ${{ !cancelled() }}
-''', '').replace('release-intent: true', 'release-intent: false')
+        nonreleasing = expected.replace('release-intent: true', 'release-intent: false')
         self.assertEqual(self.files()[POLICY], nonreleasing)
         readme = (ROOT / 'README.md').read_text().split('## Verifying release intent and release notes', 1)[1]
         sample = re.search(r'```yaml\n(.*?)```', readme, re.S)[1].replace(' # A repository that does not release', '')
@@ -308,7 +294,7 @@ jobs:
         self.initialize(private=True)
         self.run_bootstrap()
         caller = self.files()[POLICY]
-        self.assertEqual(caller.count("runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc-small' }}"), 2)
+        self.assertEqual(caller.count("runs-on: ${{ vars.RUNNER_GATE || 'cratis-arc-small' }}"), 1)
         self.assertNotIn('ubuntu-latest', caller)
 
     def test_public_repository_never_routes_pull_request_jobs_to_self_hosted_runners(self):

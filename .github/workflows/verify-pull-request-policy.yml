@@ -920,7 +920,7 @@ jobs:
           const none = labels.filter(label => label === "no-release").length;
           if (author === "dependabot[bot]") {
               console.log(version === 0 && none === 1 ? "Dependabot pull request labelled no-release only."
-                  : "::notice title=Dependabot labels not corrected::Dependabot pull requests carry only no-release. The separate normalize-dependabot-labels job corrects them when possible; release-action never releases Dependabot PRs, so this passes.");
+                  : "::notice title=Dependabot labels not corrected::Dependabot pull requests carry only no-release. release-action never releases Dependabot PRs, so this passes.");
               process.exit(0);
           }
           if (version + none === 1) {

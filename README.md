@@ -832,10 +832,8 @@ them, so a label added right after opening cancels that run instead of leaving a
 failure; `verify-release-intent.yml` does the same.
 Notes retain the default-branch, release-label and Dependabot rules below. The
 reusable declares no permissions; callers grant `contents: read` and
-`pull-requests: read`. Releasing repositories also have a separate
-`dependabot-labels` job with `pull-requests: write`, limited to Dependabot PRs into
-`main`; `policy` runs even after skipped or failed normalization. The intent gate
-itself never mutates labels and never fails Dependabot for its labels.
+`pull-requests: read`. The intent gate never mutates labels and never fails
+Dependabot for its labels.
 
 ```yaml
 permissions:
@@ -851,9 +849,7 @@ jobs:
 ```
 
 This sample shows only the gate job. A complete caller also declares the triggers and
-the concurrency group above and, in a releasing repository, the `dependabot-labels`
-job (with `policy` declaring `needs: dependabot-labels` and `if: ${{ !cancelled() }}`).
-Notes and intent run only for `pull_request` events; a caller on another event gets
+the concurrency group above. Notes and intent run only for `pull_request` events; a caller on another event gets
 only the work-record policy.
 
 The merge-tree checkout uses `persist-credentials: false` and is scanned by the
@@ -872,7 +868,7 @@ The job checks `node`, `git` and `curl` availability and has a ten-minute timeou
 `verify-no-work-records.yml` remain unchanged and available for pinned or
 hand-maintained callers. The older release gates behave as follows:
 
-- **`verify-release-intent.yml`** (called by each repository's `verify-semver-label.yml`) requires exactly one of `major`, `minor`, `patch` or `no-release`, and only `no-release` on a Dependabot pull request: Dependabot applies `major`/`minor`/`patch` from the dependency's own version, and release-action never releases its pull requests. It never fails a Dependabot pull request for its labels: it replaces `major`/`minor`/`patch` with `no-release` itself when its token can write, and passes with a notice when it cannot, so callers that predate the normalizer (the repositories the bootstrap ignores) keep working. **`normalize-dependabot-labels.yml`** does the same ahead of the gate in the bootstrapped caller, whose gate job only has `pull-requests: read`.
+- **`verify-release-intent.yml`** (called by each repository's `verify-semver-label.yml`) requires exactly one of `major`, `minor`, `patch` or `no-release`, and only `no-release` on a Dependabot pull request: Dependabot applies `major`/`minor`/`patch` from the dependency's own version, and release-action never releases its pull requests. It never fails a Dependabot pull request for its labels: it replaces `major`/`minor`/`patch` with `no-release` itself when its token can write, and passes with a notice when it cannot (the bootstrapped caller's gate job only has `pull-requests: read`).
 - **`verify-release-notes.yml`** checks the pull request description, because [release-action](https://github.com/Cratis/release-action) publishes it verbatim as the GitHub release and closes every issue written as `(#n)` outside code.
 
 Both gates read the labels (and the release-notes gate the description, author and base) from the pull request as it is now, not from the event payload, so "Re-run" sees the current state instead of replaying the event that started the run. A caller grants `pull-requests: read` for that read; without it the gates fall back to the payload with a notice. The reusable workflows set no `permissions` of their own on purpose: a called workflow can only narrow its caller's grant.
@@ -910,22 +906,14 @@ jobs:
     uses: Cratis/Workflows/.github/workflows/verify-release-notes.yml@main
 ```
 
-The release-intent caller names its job `release-intent`, so its check reads `release-intent / verify` rather than `verify / verify`, and corrects a Dependabot pull request's labels before the gate:
+The release-intent caller names its job `release-intent`, so its check reads `release-intent / verify` rather than `verify / verify`,:
 
 ```yaml
 permissions:
   contents: read
 
 jobs:
-  dependabot-labels:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
-    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main
-    permissions:
-      pull-requests: write
-
   release-intent:
-    needs: dependabot-labels
-    if: ${{ !cancelled() }}
     uses: Cratis/Workflows/.github/workflows/verify-release-intent.yml@main
     permissions:
       contents: read
@@ -952,11 +940,11 @@ Git tree and commit, and a failed replacement aborts the update. Ref updates rem
 nonforce; a non-fast-forward retries once after re-reading the fresh HEAD and files.
 
 An old semver caller, an existing policy caller with `release-intent: true`, or a
-workflow using `Cratis/release-action` enables intent and the normalizer. Detection
+workflow using `Cratis/release-action` enables intent. Detection
 errors skip the repository rather than installing a nonreleasing caller. Repositories
 that never release receive `release-intent: false`; Arc.Kotlin also receives false
 because it retains its pinned semver caller. The canonical policy caller passes
-`runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. The bootstrap reads each repository's visibility and renders that default per repository: a public repository gets `ubuntu-latest` (its `pull_request` jobs never run on self-hosted runners, per `.cratis/ai/rules/github-actions.md`), a private repository gets `cratis-arc-small`, also for the Dependabot label normalizer, and a repository whose visibility cannot be read is skipped. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
+`runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}` to the gate. The bootstrap reads each repository's visibility and renders that default per repository: a public repository gets `ubuntu-latest` (its `pull_request` jobs never run on self-hosted runners, per `.cratis/ai/rules/github-actions.md`), a private repository gets `cratis-arc-small`, and a repository whose visibility cannot be read is skipped. `RUNNER_GATE` is an outage escape hatch, normally unset: a public repository sets it temporarily to reroute the job when the default runner is unavailable, and deletes it afterwards. It is not how a repository chooses its runner permanently.
 
 For repositories that receive the release-intent gate, the bootstrap also creates any missing `major`, `minor`, `patch` and `no-release` labels, even when workflow files are already up to date. Existing labels are matched case-insensitively and are never edited, renamed, recolored or deleted. Repositories that do not receive the release-intent gate get no labels.
 

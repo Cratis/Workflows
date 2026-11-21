@@ -275,8 +275,8 @@ BOOTSTRAPPED_FILES[".github/workflows/verify-semver-label.yml"]="bmFtZTogVmVyaWZ
 
 # Legacy payloads above are retained as migration fixtures, not installed anymore.
 # One caller now supplies the policy / verify context. Tokens below are rendered
-# per repository; only releasing repositories get the separate write-scoped job.
-BOOTSTRAPPED_FILES[".github/workflows/verify-pull-request-policy.yml"]="bmFtZTogVmVyaWZ5IFB1bGwgUmVxdWVzdCBQb2xpY3kKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbb3BlbmVkLCBlZGl0ZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkLCByZWFkeV9mb3JfcmV2aWV3XQogIHB1c2g6CiAgICBicmFuY2hlczogW21haW5dCgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKcGVybWlzc2lvbnM6CiAgY29udGVudHM6IHJlYWQKICBwdWxsLXJlcXVlc3RzOiByZWFkCgpqb2JzOgpfX0RFUEVOREFCT1RfSk9CX18gIHBvbGljeToKX19QT0xJQ1lfTkVFRFNfXyAgICB1c2VzOiBDcmF0aXMvV29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3ZlcmlmeS1wdWxsLXJlcXVlc3QtcG9saWN5LnltbEBtYWluCiAgICB3aXRoOgogICAgICBydW5zLW9uOiAke3sgdmFycy5SVU5ORVJfR0FURSB8fCAnX19QT0xJQ1lfUlVOTkVSX18nIH19CiAgICAgIHJlbGVhc2UtaW50ZW50OiBfX1JFTEVBU0VfSU5URU5UX18K"
+# per repository.
+BOOTSTRAPPED_FILES[".github/workflows/verify-pull-request-policy.yml"]="bmFtZTogVmVyaWZ5IFB1bGwgUmVxdWVzdCBQb2xpY3kKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbb3BlbmVkLCBlZGl0ZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkLCByZWFkeV9mb3JfcmV2aWV3XQogIHB1c2g6CiAgICBicmFuY2hlczogW21haW5dCgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKcGVybWlzc2lvbnM6CiAgY29udGVudHM6IHJlYWQKICBwdWxsLXJlcXVlc3RzOiByZWFkCgpqb2JzOgogIHBvbGljeToKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXB1bGwtcmVxdWVzdC1wb2xpY3kueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHJ1bnMtb246ICR7eyB2YXJzLlJVTk5FUl9HQVRFIHx8ICdfX1BPTElDWV9SVU5ORVJfXycgfX0KICAgICAgcmVsZWFzZS1pbnRlbnQ6IF9fUkVMRUFTRV9JTlRFTlRfXwo="
 
 # Blob ids of every historical bootstrap payload for each path (git log -p of
 # this script). Never accept an arbitrary wrapper just because its name matches.
@@ -292,30 +292,10 @@ done
 # reach self-hosted runners (any fork could run code there), and cratis-arc-small for private ones.
 # RUNNER_GATE overrides it per repository or organization.
 render_policy_wrapper() {
-  local file_content="$1" releases="$2" runner="$3" normalizer="" needs="" normalizer_with=""
-  # Bash 5.2+ expands an unquoted & in a substitution replacement to the match; the
-  # fragments contain &&. Quoting the replacement instead is not portable: Bash 3.2
-  # keeps the quotes literally.
+  local file_content="$1" releases="$2" runner="$3"
+  # Bash 5.2+ expands an unquoted & in a substitution replacement to the match; keep it
+  # off so the replacement values are inserted literally.
   shopt -u patsub_replacement 2>/dev/null || true
-  if [ "$runner" != ubuntu-latest ]; then
-    normalizer_with='    with:
-      runs-on: ${{ vars.RUNNER_GATE || '\''__POLICY_RUNNER__'\'' }}
-'
-  fi
-  if [ "$releases" = true ]; then
-    normalizer='  dependabot-labels:
-    if: github.event.pull_request.user.login == '\''dependabot[bot]'\'' && github.event.pull_request.base.ref == '\''main'\''
-    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main
-'"$normalizer_with"'    permissions:
-      pull-requests: write
-
-'
-    needs='    needs: dependabot-labels
-    if: ${{ !cancelled() }}
-'
-  fi
-  file_content="${file_content/__DEPENDABOT_JOB__/$normalizer}"
-  file_content="${file_content/__POLICY_NEEDS__/$needs}"
   file_content="${file_content/__RELEASE_INTENT__/$releases}"
   printf '%s\n' "${file_content//__POLICY_RUNNER__/$runner}"
 }
