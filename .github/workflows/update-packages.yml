@@ -364,8 +364,11 @@ jobs:
           const PACKAGE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
           const VERSION = /^(\d+(?:\.\d+){0,3})(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?(?:\+[0-9A-Za-z.-]+)?$/;
           const PROPERTY_REFERENCE = /^\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)$/;
+          const NUMERIC = /^\d+$/;
           const NUGET_TIMEOUT_MS = 20000;
-          const BLOCKING_UNRESOLVED_IMPORT = 'an MSBuild import could not be resolved to a scanned file';
+          const UNRESOLVED_IMPORT = 'an MSBuild import could not be resolved to a scanned file';
+
+          // ---------------------------------------------------------------- versions
 
           export function parseVersion(text) {
             const match = VERSION.exec(text);
@@ -373,6 +376,15 @@ jobs:
             const numbers = match[1].split('.').map(Number);
             while (numbers.length < 4) numbers.push(0);
             return { numbers, pre: match[2] ?? null, text };
+          }
+
+          function compareIdentifier(a, b) {
+            if (a === b) return 0;
+            const aNumeric = NUMERIC.test(a);
+            const bNumeric = NUMERIC.test(b);
+            if (aNumeric && bNumeric) return Number(a) < Number(b) ? -1 : 1;
+            if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+            return a < b ? -1 : 1;
           }
 
           function comparePre(left, right) {
@@ -384,13 +396,8 @@ jobs:
             for (let i = 0; i < Math.max(a.length, b.length); i++) {
               if (a[i] === undefined) return -1;
               if (b[i] === undefined) return 1;
-              const numeric = /^\d+$/.test(a[i]) && /^\d+$/.test(b[i]);
-              if (numeric && Number(a[i]) !== Number(b[i])) return Number(a[i]) < Number(b[i]) ? -1 : 1;
-              if (!numeric && a[i] !== b[i]) {
-                if (/^\d+$/.test(a[i])) return -1;
-                if (/^\d+$/.test(b[i])) return 1;
-                return a[i] < b[i] ? -1 : 1;
-              }
+              const result = compareIdentifier(a[i], b[i]);
+              if (result !== 0) return result;
             }
             return 0;
           }
@@ -407,16 +414,17 @@ jobs:
             return parts.join('.') + (version.pre === null ? '' : `-${version.pre}`);
           }
 
+          const highest = (versions) => versions.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b));
+
           export function familyKey(id) {
             const parts = id.toLowerCase().split('.');
             if (parts[0] !== 'cratis') return null;
             return `cratis.${parts[1] ?? 'arc'}`;
           }
 
-          function familyName(id) {
-            const parts = id.split('.');
-            return `Cratis.${parts[1] ?? 'Arc'}`;
-          }
+          const familyName = (id) => `Cratis.${id.split('.')[1] ?? 'Arc'}`;
+
+          // ------------------------------------------------------------ XML tokenizer
 
           function skipPast(text, terminator, from, label) {
             const index = text.indexOf(terminator, from);
@@ -424,31 +432,91 @@ jobs:
             return index + terminator.length;
           }
 
-          function readAttributes(text, start, element) {
+          function skipSpace(text, at) {
+            let next = at;
+            while (/\s/.test(text[next] ?? '')) next++;
+            return next;
+          }
+
+          function readAttribute(text, at, element) {
             const word = /[^\s=/>]+/y;
-            let at = start;
-            for (;;) {
-              while (/\s/.test(text[at] ?? '')) at++;
-              if (text[at] === '>') return at + 1;
-              if (text.startsWith('/>', at)) {
-                element.selfClosing = true;
-                return at + 2;
-              }
-              word.lastIndex = at;
-              const name = word.exec(text);
-              if (!name) throw new Error(`Malformed XML: bad attribute in <${element.name}>`);
-              at += name[0].length;
-              while (/\s/.test(text[at] ?? '')) at++;
-              if (text[at] !== '=') throw new Error(`Malformed XML: attribute ${name[0]} has no value`);
-              at++;
-              while (/\s/.test(text[at] ?? '')) at++;
-              const quote = text[at];
-              if (quote !== '"' && quote !== "'") throw new Error(`Malformed XML: attribute ${name[0]} is not quoted`);
-              const close = text.indexOf(quote, at + 1);
-              if (close < 0) throw new Error(`Malformed XML: unterminated attribute ${name[0]}`);
-              element.attrs.set(name[0].toLowerCase(), { name: name[0], value: text.slice(at + 1, close), start: at + 1, end: close });
-              at = close + 1;
+            word.lastIndex = at;
+            const name = word.exec(text);
+            if (!name) throw new Error(`Malformed XML: bad attribute in <${element.name}>`);
+            const equals = skipSpace(text, at + name[0].length);
+            if (text[equals] !== '=') throw new Error(`Malformed XML: attribute ${name[0]} has no value`);
+            const { start, end } = readQuoted(text, skipSpace(text, equals + 1), name[0]);
+            element.attrs.set(name[0].toLowerCase(), { name: name[0], value: text.slice(start, end), start, end });
+            return end + 1;
+          }
+
+          function readQuoted(text, open, name) {
+            const quote = text[open];
+            if (quote !== '"' && quote !== "'") throw new Error(`Malformed XML: attribute ${name} is not quoted`);
+            const close = text.indexOf(quote, open + 1);
+            if (close < 0) throw new Error(`Malformed XML: unterminated attribute ${name}`);
+            return { start: open + 1, end: close };
+          }
+
+          function readAttributes(text, start, element) {
+            let at = skipSpace(text, start);
+            while (text[at] !== '>' && !text.startsWith('/>', at)) {
+              at = skipSpace(text, readAttribute(text, at, element));
             }
+            element.selfClosing = text[at] === '/';
+            return at + (element.selfClosing ? 2 : 1);
+          }
+
+          function readOpenTag(text, lt, parent) {
+            const named = /[^\s/>]+/y;
+            named.lastIndex = lt + 1;
+            const name = named.exec(text);
+            if (!name) throw new Error('Malformed XML: element without a name');
+            const element = { name: name[0], lname: name[0].toLowerCase(), attrs: new Map(), parent, children: [], start: lt,
+              selfClosing: false, hasMarkup: false };
+            element.openEnd = readAttributes(text, lt + 1 + name[0].length, element);
+            if (element.selfClosing) {
+              element.contentEnd = element.openEnd;
+              element.end = element.openEnd;
+            }
+            return element;
+          }
+
+          function readCloseTag(text, lt, top) {
+            const close = skipPast(text, '>', lt + 2, 'closing tag');
+            const name = text.slice(lt + 2, close - 1).trim();
+            if (!top || top.name !== name) throw new Error(`Malformed XML: unexpected </${name}>`);
+            top.contentEnd = lt;
+            top.end = close;
+            return close;
+          }
+
+          // Comments, CDATA, processing instructions and declarations: returns the next index, or null for a tag.
+          const NON_ELEMENTS = [
+            { open: '<!--', close: '-->', label: 'comment', markup: true },
+            { open: '<![CDATA[', close: ']]>', label: 'CDATA section', markup: true },
+            { open: '<?', close: '?>', label: 'processing instruction', markup: false },
+            { open: '<!', close: '>', label: 'declaration', markup: false },
+          ];
+
+          function skipNonElement(text, lt, top) {
+            const kind = NON_ELEMENTS.find((candidate) => text.startsWith(candidate.open, lt));
+            if (!kind) return null;
+            if (top && kind.markup) top.hasMarkup = true;
+            return skipPast(text, kind.close, lt + kind.open.length, kind.label);
+          }
+
+          function readTag(text, lt, top, stack, elements) {
+            if (text[lt + 1] === '/') {
+              const next = readCloseTag(text, lt, top);
+              stack.pop();
+              return next;
+            }
+            const element = readOpenTag(text, lt, top ?? null);
+            top?.children.push(element);
+            elements.push(element);
+            if (!element.selfClosing) stack.push(element);
+            return element.openEnd;
           }
 
           // A bounded tokenizer: it records element and value spans so edits never reserialize the document.
@@ -456,53 +524,19 @@ jobs:
             const elements = [];
             const stack = [];
             let at = 0;
-            while (at < text.length) {
-              const lt = text.indexOf('<', at);
-              if (lt < 0) break;
+            for (let lt = text.indexOf('<', at); lt >= 0; lt = text.indexOf('<', at)) {
               const top = stack[stack.length - 1];
-              if (text.startsWith('<!--', lt)) {
-                if (top) top.hasMarkup = true;
-                at = skipPast(text, '-->', lt + 4, 'comment');
-              } else if (text.startsWith('<![CDATA[', lt)) {
-                if (top) top.hasMarkup = true;
-                at = skipPast(text, ']]>', lt + 9, 'CDATA section');
-              } else if (text.startsWith('<?', lt)) {
-                at = skipPast(text, '?>', lt + 2, 'processing instruction');
-              } else if (text.startsWith('<!', lt)) {
-                at = skipPast(text, '>', lt + 2, 'declaration');
-              } else if (text[lt + 1] === '/') {
-                const close = skipPast(text, '>', lt + 2, 'closing tag');
-                const name = text.slice(lt + 2, close - 1).trim();
-                if (!top || top.name !== name) throw new Error(`Malformed XML: unexpected </${name}>`);
-                top.contentEnd = lt;
-                top.end = close;
-                stack.pop();
-                at = close;
-              } else {
-                const named = /[^\s/>]+/y;
-                named.lastIndex = lt + 1;
-                const name = named.exec(text);
-                if (!name) throw new Error('Malformed XML: element without a name');
-                const element = { name: name[0], lname: name[0].toLowerCase(), attrs: new Map(), parent: top ?? null,
-                  children: [], start: lt, selfClosing: false, hasMarkup: false };
-                element.openEnd = readAttributes(text, lt + 1 + name[0].length, element);
-                if (top) top.children.push(element);
-                elements.push(element);
-                if (element.selfClosing) {
-                  element.contentEnd = element.openEnd;
-                  element.end = element.openEnd;
-                } else {
-                  stack.push(element);
-                }
-                at = element.openEnd;
-              }
+              at = skipNonElement(text, lt, top) ?? readTag(text, lt, top, stack, elements);
             }
             if (stack.length > 0) throw new Error(`Malformed XML: <${stack[stack.length - 1].name}> is not closed`);
             return elements;
           }
 
+          // ------------------------------------------------------------ manifest model
+
           function textValue(text, element) {
-            if (element.selfClosing || element.children.length > 0 || element.hasMarkup) return null;
+            const hasContent = !element.selfClosing && element.children.length === 0 && !element.hasMarkup;
+            if (!hasContent) return null;
             const content = text.slice(element.openEnd, element.contentEnd);
             const value = content.trim();
             const start = element.openEnd + (content.length - content.trimStart().length);
@@ -516,73 +550,90 @@ jobs:
             return false;
           }
 
+          function attributeSource(element, key) {
+            const attribute = element.attrs.get(key);
+            if (!attribute) return [];
+            return [{ kind: `attribute ${attribute.name}`, raw: attribute.value, start: attribute.start, end: attribute.end,
+              conditional: isConditional(element) }];
+          }
+
+          function childSource(text, child) {
+            const value = textValue(text, child);
+            return { kind: `element ${child.name}`, raw: value?.value ?? null, start: value?.start, end: value?.end,
+              conditional: isConditional(child) };
+          }
+
           function versionSources(text, element) {
-            const sources = [];
-            for (const key of ['version', 'versionoverride']) {
-              const attribute = element.attrs.get(key);
-              if (attribute) sources.push({ kind: `attribute ${attribute.name}`, raw: attribute.value, start: attribute.start,
-                end: attribute.end, conditional: isConditional(element) });
-            }
-            for (const child of element.children.filter((c) => c.lname === 'version' || c.lname === 'versionoverride')) {
-              const value = textValue(text, child);
-              sources.push({ kind: `element ${child.name}`, raw: value?.value ?? null, start: value?.start, end: value?.end,
-                conditional: isConditional(child) });
-            }
-            return sources;
+            const children = element.children.filter((c) => c.lname === 'version' || c.lname === 'versionoverride');
+            return [...attributeSource(element, 'version'), ...attributeSource(element, 'versionoverride'),
+              ...children.map((child) => childSource(text, child))];
+          }
+
+          const isCratisPackageId = (id) => Boolean(id) && PACKAGE_ID.test(id) && familyKey(id) !== null;
+
+          function packageDeclarations(file, text, element) {
+            const id = (element.attrs.get('include') ?? element.attrs.get('update'))?.value;
+            if (!isCratisPackageId(id)) return [];
+            return versionSources(text, element).map((source) => ({ file, id, ...source }));
           }
 
           function analyzeFile(file, text) {
-            const elements = parseXml(text);
             const result = { file, text, properties: [], declarations: [], imports: [] };
-            for (const element of elements) {
+            for (const element of parseXml(text)) {
               if (element.parent?.lname === 'propertygroup') {
-                const value = textValue(text, element);
-                result.properties.push({ name: element.lname, file, value, conditional: isConditional(element) });
+                result.properties.push({ name: element.lname, file, value: textValue(text, element), conditional: isConditional(element) });
               } else if (element.lname === 'import') {
                 result.imports.push({ project: element.attrs.get('project')?.value ?? null, sdk: element.attrs.has('sdk') });
               } else if (element.lname === 'packageversion' || element.lname === 'packagereference') {
-                const id = (element.attrs.get('include') ?? element.attrs.get('update'))?.value;
-                if (!id || !PACKAGE_ID.test(id) || !familyKey(id)) continue;
-                for (const source of versionSources(text, element)) result.declarations.push({ file, id, ...source });
+                result.declarations.push(...packageDeclarations(file, text, element));
               }
             }
             return result;
           }
 
-          function hasUnresolvedImport(analyses, files) {
-            for (const analysis of analyses) {
-              for (const entry of analysis.imports.filter((i) => !i.sdk)) {
-                const project = (entry.project ?? '$(').replace(/\$\((?:MSBuildThisFileDirectory|MSBuildProjectDirectory)\)[\\/]?/gi, '');
-                if (project.includes('$(')) return true;
-                const target = path.posix.normalize(path.posix.join(path.posix.dirname(analysis.file), project.replaceAll('\\', '/')));
-                if (!files.has(target)) return true;
-              }
-            }
-            return false;
+          const DIRECTORY_PROPERTY = /\$\((?:MSBuildThisFileDirectory|MSBuildProjectDirectory)\)[\\/]?/gi;
+
+          function importIsUnresolved(analysis, entry, files) {
+            if (entry.sdk) return false;
+            const project = (entry.project ?? '$(').replace(DIRECTORY_PROPERTY, '');
+            if (project.includes('$(')) return true;
+            const target = path.posix.normalize(path.posix.join(path.posix.dirname(analysis.file), project.replaceAll('\\', '/')));
+            return !files.has(target);
           }
+
+          const hasUnresolvedImport = (analyses, files) =>
+            analyses.some((analysis) => analysis.imports.some((entry) => importIsUnresolved(analysis, entry, files)));
 
           function countUses(analyses, name) {
             const pattern = new RegExp(`\\$\\(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'gi');
             return analyses.reduce((total, analysis) => total + (analysis.text.match(pattern)?.length ?? 0), 0);
           }
 
+          // ----------------------------------------------------------------- planning
+
+          const deferral = (reason) => ({ reason });
+
+          function resolveProperty(declaration, name, context) {
+            const definitions = context.properties.get(name.toLowerCase()) ?? [];
+            if (context.unresolvedImports) return deferral(`$(${name}) cannot be proven: ${UNRESOLVED_IMPORT}`);
+            if (definitions.length !== 1) return deferral(`$(${name}) has ${definitions.length} definitions, not exactly one`);
+            const [definition] = definitions;
+            const plain = definition.value && parseVersion(definition.value.value);
+            if (definition.conditional || !plain) return deferral(`$(${name}) is conditional or not a plain version`);
+            return { version: definition.value.value, property: name.toLowerCase(),
+              edit: { file: definition.file, start: definition.value.start, end: definition.value.end, before: definition.value.value } };
+          }
+
           function resolveDeclaration(declaration, context) {
             const { raw } = declaration;
-            if (declaration.conditional) return { reason: `${declaration.id} has a conditional version in ${declaration.file}` };
-            if (raw === null) return { reason: `${declaration.id} has a version that is not plain text in ${declaration.file}` };
-            if (parseVersion(raw)) return { version: raw, edit: { file: declaration.file, start: declaration.start, end: declaration.end, before: raw } };
-            const property = PROPERTY_REFERENCE.exec(raw);
-            if (!property) return { reason: `${declaration.id} uses the unsupported version '${raw}' in ${declaration.file}` };
-            const name = property[1].toLowerCase();
-            const definitions = context.properties.get(name) ?? [];
-            if (context.unresolvedImports) return { reason: `$(${property[1]}) cannot be proven: ${BLOCKING_UNRESOLVED_IMPORT}` };
-            if (definitions.length !== 1) return { reason: `$(${property[1]}) has ${definitions.length} definitions, not exactly one` };
-            const [definition] = definitions;
-            if (definition.conditional || !definition.value || !parseVersion(definition.value.value)) {
-              return { reason: `$(${property[1]}) is conditional or not a plain version` };
+            if (declaration.conditional) return deferral(`${declaration.id} has a conditional version in ${declaration.file}`);
+            if (raw === null) return deferral(`${declaration.id} has a version that is not plain text in ${declaration.file}`);
+            if (parseVersion(raw)) {
+              return { version: raw, edit: { file: declaration.file, start: declaration.start, end: declaration.end, before: raw } };
             }
-            return { version: definition.value.value, property: name,
-              edit: { file: definition.file, start: definition.value.start, end: definition.value.end, before: definition.value.value } };
+            const property = PROPERTY_REFERENCE.exec(raw);
+            if (!property) return deferral(`${declaration.id} uses the unsupported version '${raw}' in ${declaration.file}`);
+            return resolveProperty(declaration, property[1], context);
           }
 
           function stableCandidates(versions) {
@@ -594,38 +645,51 @@ jobs:
             return candidates;
           }
 
-          async function planFamily(family, context) {
-            const members = [...family.members.keys()];
+          function resolveFamilyPins(family, context) {
             const effective = [];
             for (const declaration of family.declarations) {
               const resolved = resolveDeclaration(declaration, context);
-              if (resolved.reason) return { outcome: 'deferred', reason: resolved.reason, members };
-              if (resolved.property) {
-                const uses = family.declarations.filter((d) => d.raw?.toLowerCase() === `$(${resolved.property})`).length;
-                if (countUses(context.analyses, resolved.property) !== uses) {
-                  return { outcome: 'deferred', reason: `$(${resolved.property}) is used outside this family's package versions`, members };
-                }
+              if (resolved.reason) return resolved;
+              const uses = resolved.property
+                ? family.declarations.filter((d) => d.raw?.toLowerCase() === `$(${resolved.property})`).length : 0;
+              if (resolved.property && countUses(context.analyses, resolved.property) !== uses) {
+                return deferral(`$(${resolved.property}) is used outside this family's package versions`);
               }
               effective.push(resolved);
             }
-            const floor = effective.map((e) => parseVersion(e.version)).reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b));
+            return { effective };
+          }
+
+          async function commonStableVersions(members, getVersions) {
             let common = null;
             for (const id of members) {
-              const stable = stableCandidates(await context.getVersions(id));
+              const stable = stableCandidates(await getVersions(id));
               common = common === null ? stable : new Map([...common].filter(([key]) => stable.has(key)));
             }
-            const eligible = [...common.values()].filter((version) => compareVersions(version, floor) >= 0);
+            return [...common.values()];
+          }
+
+          function editsTowards(effective, target) {
+            const edits = new Map();
+            for (const resolved of effective) {
+              if (compareVersions(parseVersion(resolved.version), target) === 0) continue;
+              edits.set(`${resolved.edit.file}:${resolved.edit.start}`, { ...resolved.edit, text: target.text });
+            }
+            return [...edits.values()];
+          }
+
+          async function planFamily(family, context) {
+            const members = [...family.members.keys()];
+            const pins = resolveFamilyPins(family, context);
+            if (pins.reason) return { outcome: 'deferred', reason: pins.reason, members };
+            const floor = highest(pins.effective.map((e) => parseVersion(e.version)));
+            const eligible = (await commonStableVersions(members, context.getVersions)).filter((v) => compareVersions(v, floor) >= 0);
             if (eligible.length === 0) {
               return { outcome: 'deferred', reason: `no stable version at or above ${floor.text} exists for every member`, members };
             }
-            const target = eligible.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b));
-            const edits = new Map();
-            for (const resolved of effective) {
-              if (compareVersions(parseVersion(resolved.version), target) !== 0) {
-                edits.set(`${resolved.edit.file}:${resolved.edit.start}`, { ...resolved.edit, text: target.text });
-              }
-            }
-            return { outcome: edits.size > 0 ? 'updated' : 'unchanged', target: target.text, members, edits: [...edits.values()] };
+            const target = highest(eligible);
+            const edits = editsTowards(pins.effective, target);
+            return { outcome: edits.length > 0 ? 'updated' : 'unchanged', target: target.text, members, edits };
           }
 
           export function parseExclusions(csv) {
@@ -639,20 +703,25 @@ jobs:
             return ids;
           }
 
-          export async function planUpdates({ files, exclusions = [], getVersions, checkImports = true }) {
-            const analyses = [...files].map(([file, text]) => {
+          function analyzeAll(files) {
+            return [...files].map(([file, text]) => {
               try {
                 return analyzeFile(file, text);
               } catch (error) {
                 throw new Error(`${file}: ${error.message}`);
               }
             });
+          }
+
+          function collectProperties(analyses) {
             const properties = new Map();
-            for (const analysis of analyses) {
-              for (const property of analysis.properties) properties.set(property.name, [...(properties.get(property.name) ?? []), property]);
+            for (const property of analyses.flatMap((a) => a.properties)) {
+              properties.set(property.name, [...(properties.get(property.name) ?? []), property]);
             }
-            const context = { analyses, properties, getVersions, unresolvedImports: checkImports && hasUnresolvedImport(analyses, files) };
-            const held = new Set(exclusions.map(familyKey).filter(Boolean));
+            return properties;
+          }
+
+          function groupFamilies(analyses) {
             const families = new Map();
             for (const declaration of analyses.flatMap((a) => a.declarations)) {
               const key = familyKey(declaration.id);
@@ -661,13 +730,20 @@ jobs:
               if (!family.members.has(declaration.id.toLowerCase())) family.members.set(declaration.id.toLowerCase(), declaration.id);
               families.set(key, family);
             }
+            return [...families.values()].sort((a, b) => a.key.localeCompare(b.key));
+          }
+
+          export async function planUpdates({ files, exclusions = [], getVersions, checkImports = true }) {
+            const analyses = analyzeAll(files);
+            const context = { analyses, properties: collectProperties(analyses), getVersions,
+              unresolvedImports: checkImports && hasUnresolvedImport(analyses, files) };
+            const held = new Set(exclusions.map(familyKey).filter(Boolean));
             const results = [];
             const edits = new Map();
-            for (const family of [...families.values()].sort((a, b) => a.key.localeCompare(b.key))) {
+            for (const family of groupFamilies(analyses)) {
               const members = [...family.members.values()];
               const planned = held.has(family.key)
-                ? { outcome: 'held', reason: 'a member is excluded', members }
-                : { ...(await planFamily({ ...family, members: family.members }, context)), members };
+                ? { outcome: 'held', reason: 'a member is excluded' } : await planFamily(family, context);
               results.push({ key: family.key, name: family.name, ...planned, members });
               for (const edit of planned.edits ?? []) edits.set(edit.file, [...(edits.get(edit.file) ?? []), edit]);
             }
@@ -700,6 +776,8 @@ jobs:
             return lines.sort().join('\n');
           }
 
+          // ------------------------------------------------------------------ output
+
           export function renderDiff(files, edits) {
             const output = [];
             for (const [file, fileEdits] of [...edits].sort(([a], [b]) => a.localeCompare(b))) {
@@ -715,63 +793,79 @@ jobs:
 
           const escapeAnnotation = (value) => value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 
-          export function describeOutcomes(plan, manifestCount) {
-            const lines = [];
-            const count = (outcome) => plan.families.filter((f) => f.outcome === outcome).length;
-            for (const family of plan.families) {
-              const members = family.members.join(', ');
-              if (family.outcome === 'deferred') {
-                lines.push(`::warning::Cratis NuGet family ${family.name} was left unchanged: ${escapeAnnotation(family.reason)} (${escapeAnnotation(members)})`);
-              } else if (family.outcome === 'held') {
-                lines.push(`::notice::Cratis NuGet family ${family.name} is held: ${family.reason} (${escapeAnnotation(members)})`);
-              } else {
-                lines.push(`Cratis NuGet family ${family.name}: ${family.outcome}${family.target ? ` at ${family.target}` : ''} (${members})`);
-              }
+          function describeFamily(family) {
+            const members = family.members.join(', ');
+            if (family.outcome === 'deferred') {
+              return `::warning::Cratis NuGet family ${family.name} was left unchanged: ${escapeAnnotation(family.reason)} (${escapeAnnotation(members)})`;
             }
-            lines.push(plan.families.length === 0
-              ? `No Cratis NuGet families found in ${manifestCount} manifest file(s).`
-              : `Cratis NuGet families: ${plan.families.length} found; ${count('updated')} updated, ${count('unchanged')} unchanged, ` +
-                `${count('deferred')} deferred, ${count('held')} held.`);
-            return lines;
+            if (family.outcome === 'held') {
+              return `::notice::Cratis NuGet family ${family.name} is held: ${family.reason} (${escapeAnnotation(members)})`;
+            }
+            return `Cratis NuGet family ${family.name}: ${family.outcome}${family.target ? ` at ${family.target}` : ''} (${members})`;
           }
 
+          export function describeOutcomes(plan, manifestCount) {
+            const count = (outcome) => plan.families.filter((f) => f.outcome === outcome).length;
+            const summary = plan.families.length === 0
+              ? `No Cratis NuGet families found in ${manifestCount} manifest file(s).`
+              : `Cratis NuGet families: ${plan.families.length} found; ${count('updated')} updated, ${count('unchanged')} unchanged, ` +
+                `${count('deferred')} deferred, ${count('held')} held.`;
+            return [...plan.families.map(describeFamily), summary];
+          }
+
+          // ----------------------------------------------------------- package index
+
+          function readFixtureIndex(id, indexDir) {
+            const file = path.join(indexDir, `${id.toLowerCase()}.json`);
+            if (!fs.existsSync(file)) throw new Error(`No package index fixture for ${id}`);
+            return JSON.parse(fs.readFileSync(file, 'utf8'));
+          }
+
+          async function readNuGetIndex(id) {
+            const response = await fetch(`https://api.nuget.org/v3-flatcontainer/${id.toLowerCase()}/index.json`,
+              { signal: AbortSignal.timeout(NUGET_TIMEOUT_MS), headers: { accept: 'application/json' } });
+            if (!response.ok) throw new Error(`NuGet index for ${id} answered HTTP ${response.status}`);
+            return response.json();
+          }
+
+          const isVersionList = (body) => Array.isArray(body?.versions) && body.versions.length > 0 && body.versions.every((v) => typeof v === 'string');
+
           async function fetchVersions(id, indexDir) {
-            const name = id.toLowerCase();
-            let body;
-            if (indexDir) {
-              const file = path.join(indexDir, `${name}.json`);
-              if (!fs.existsSync(file)) throw new Error(`No package index fixture for ${id}`);
-              body = JSON.parse(fs.readFileSync(file, 'utf8'));
-            } else {
-              const response = await fetch(`https://api.nuget.org/v3-flatcontainer/${name}/index.json`,
-                { signal: AbortSignal.timeout(NUGET_TIMEOUT_MS), headers: { accept: 'application/json' } });
-              if (!response.ok) throw new Error(`NuGet index for ${id} answered HTTP ${response.status}`);
-              body = await response.json();
-            }
-            if (!body || !Array.isArray(body.versions) || body.versions.length === 0 || !body.versions.every((v) => typeof v === 'string')) {
-              throw new Error(`NuGet index for ${id} is missing or malformed`);
-            }
+            const body = indexDir ? readFixtureIndex(id, indexDir) : await readNuGetIndex(id);
+            if (!isVersionList(body)) throw new Error(`NuGet index for ${id} is missing or malformed`);
             return body.versions;
+          }
+
+          // ------------------------------------------------------- files and state
+
+          const isManifest = (name) => MANIFEST_EXTENSIONS.includes(path.extname(name).toLowerCase());
+
+          function readManifest(files, top, full) {
+            if (!fs.realpathSync(full).startsWith(top + path.sep)) throw new Error(`Refusing manifest outside the checkout: ${full}`);
+            files.set(path.relative(top, full).split(path.sep).join('/'), fs.readFileSync(full, 'utf8'));
+          }
+
+          function visitEntry(files, top, directory, entry) {
+            const full = path.join(directory, entry.name);
+            if (entry.isSymbolicLink()) {
+              if (isManifest(entry.name)) throw new Error(`Refusing symbolic link manifest ${path.relative(top, full)}`);
+              return;
+            }
+            if (entry.isDirectory()) {
+              if (!SKIPPED_DIRECTORIES.has(entry.name)) walk(files, top, full);
+              return;
+            }
+            if (entry.isFile() && isManifest(entry.name)) readManifest(files, top, full);
+          }
+
+          function walk(files, top, directory) {
+            const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+            for (const entry of entries) visitEntry(files, top, directory, entry);
           }
 
           function collectFiles(root) {
             const files = new Map();
-            const top = fs.realpathSync(root);
-            const walk = (directory) => {
-              for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-                const full = path.join(directory, entry.name);
-                const isManifest = MANIFEST_EXTENSIONS.includes(path.extname(entry.name).toLowerCase());
-                if (entry.isSymbolicLink()) {
-                  if (isManifest) throw new Error(`Refusing symbolic link manifest ${path.relative(top, full)}`);
-                } else if (entry.isDirectory()) {
-                  if (!SKIPPED_DIRECTORIES.has(entry.name)) walk(full);
-                } else if (entry.isFile() && isManifest) {
-                  if (!fs.realpathSync(full).startsWith(top + path.sep)) throw new Error(`Refusing manifest outside the checkout: ${full}`);
-                  files.set(path.relative(top, full).split(path.sep).join('/'), fs.readFileSync(full, 'utf8'));
-                }
-              }
-            };
-            walk(top);
+            walk(files, fs.realpathSync(root), fs.realpathSync(root));
             return files;
           }
 
@@ -781,6 +875,19 @@ jobs:
             const target = path.join(root, file);
             if (fs.readFileSync(target, 'utf8') !== expected) throw new Error(`${file} changed while preparing the update`);
             fs.writeFileSync(target, next);
+          }
+
+          function writeEdits(root, changed, files, after) {
+            const written = [];
+            try {
+              for (const file of Object.keys(changed)) {
+                writeChecked(root, file, files.get(file), after.get(file));
+                written.push(file);
+              }
+            } catch (error) {
+              for (const file of written) fs.writeFileSync(path.join(root, file), files.get(file));
+              throw error;
+            }
           }
 
           function prepare(root, stateDir, plan, files) {
@@ -793,16 +900,7 @@ jobs:
               changed[file] = `before/${index++}`;
               fs.writeFileSync(path.join(stateDir, changed[file]), files.get(file));
             }
-            const written = [];
-            try {
-              for (const file of Object.keys(changed)) {
-                writeChecked(root, file, files.get(file), after.get(file));
-                written.push(file);
-              }
-            } catch (error) {
-              for (const file of written) fs.writeFileSync(path.join(root, file), files.get(file));
-              throw error;
-            }
+            writeEdits(root, changed, files, after);
             const hashes = Object.fromEntries([...after].map(([file, text]) => [file, sha(text)]));
             const edited = plan.families.filter((f) => f.outcome === 'updated').map((f) => f.key);
             fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify({ root, hashes, changed, edited, snapshot: snapshotPins(after),
@@ -820,11 +918,15 @@ jobs:
             console.log('Cratis NuGet family pins match the prepared outcome.');
           }
 
+          function matchesPrepared(state, current) {
+            const names = Object.keys(state.hashes);
+            const sameFiles = current.size === names.length && names.every((file) => current.has(file));
+            return sameFiles && names.every((file) => sha(current.get(file)) === state.hashes[file]);
+          }
+
           function rollback(stateDir) {
             const state = readState(stateDir);
-            const current = collectFiles(state.root);
-            const names = Object.keys(state.hashes);
-            if (current.size !== names.length || names.some((file) => !current.has(file) || sha(current.get(file)) !== state.hashes[file])) {
+            if (!matchesPrepared(state, collectFiles(state.root))) {
               throw new Error('Manifests changed beyond the prepared Cratis edits; refusing to roll back');
             }
             for (const [file, image] of Object.entries(state.changed)) {
@@ -836,50 +938,78 @@ jobs:
           function checkIds(stateDir, input) {
             const state = readState(stateDir);
             const known = new Set(state.protectedIds.map((id) => id.toLowerCase()));
-            let incomplete = false;
             for (const id of input.split('\n').map((line) => line.trim()).filter(Boolean)) {
               const key = familyKey(id);
               if (!key || known.has(id.toLowerCase())) continue;
               if (state.edited.includes(key)) {
                 console.error(`::error::${escapeAnnotation(id)} belongs to an edited Cratis family but is not pinned in the scanned manifests`);
-                incomplete = true;
+                process.exitCode = 4;
               }
               console.log(id);
             }
-            if (incomplete) process.exitCode = 4;
           }
+
+          // ----------------------------------------------------------------- commands
+
+          function loadInput(values) {
+            if (values.stdin) {
+              const files = new Map([[values['manifest-path'] ?? 'Directory.Packages.props', fs.readFileSync(0, 'utf8')]]);
+              return { files, root: null, fromStdin: true };
+            }
+            if (!values.root) throw new Error('Pass --root or --stdin');
+            const root = fs.realpathSync(values.root);
+            return { files: collectFiles(root), root, fromStdin: false };
+          }
+
+          function versionLookup(values) {
+            const indexDir = values['index-dir'] ?? process.env.CRATIS_NUGET_INDEX_DIR;
+            const cache = new Map();
+            return (id) => {
+              const key = id.toLowerCase();
+              if (!cache.has(key)) cache.set(key, fetchVersions(id, indexDir));
+              return cache.get(key);
+            };
+          }
+
+          async function planFromInput(values) {
+            const input = loadInput(values);
+            const plan = await planUpdates({ files: input.files, exclusions: parseExclusions(values.exclusions),
+              getVersions: versionLookup(values), checkImports: !input.fromStdin });
+            return { ...input, plan };
+          }
+
+          async function runPreview(values) {
+            const { files, plan, fromStdin } = await planFromInput(values);
+            if (values.label) console.log(`Preview for ${values.label}`);
+            const diff = renderDiff(files, plan.edits);
+            if (diff) console.log(diff);
+            if (fromStdin) console.log('Single manifest only: imports and property consumers outside it were not evaluated.');
+            for (const line of describeOutcomes(plan, files.size)) console.log(line);
+          }
+
+          async function runPrepare(values) {
+            if (values.stdin || !values['state-dir']) throw new Error('prepare needs --root and --state-dir');
+            const { files, plan, root } = await planFromInput(values);
+            for (const line of describeOutcomes(plan, files.size)) console.log(line);
+            prepare(root, path.resolve(values['state-dir']), plan, files);
+          }
+
+          const COMMANDS = {
+            preview: runPreview,
+            prepare: runPrepare,
+            verify: (values) => verify(values['state-dir']),
+            rollback: (values) => rollback(values['state-dir']),
+            'check-ids': (values) => checkIds(values['state-dir'], fs.readFileSync(0, 'utf8')),
+          };
 
           async function main(argv) {
             const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
               'dry-run': { type: 'boolean' }, root: { type: 'string' }, stdin: { type: 'boolean' }, 'manifest-path': { type: 'string' },
               label: { type: 'string' }, exclusions: { type: 'string' }, 'state-dir': { type: 'string' }, 'index-dir': { type: 'string' } } });
-            const command = values['dry-run'] ? 'preview' : positionals[0] ?? 'preview';
-            const stateDir = values['state-dir'];
-            if (command === 'verify') return verify(stateDir);
-            if (command === 'rollback') return rollback(stateDir);
-            if (command === 'check-ids') return checkIds(stateDir, fs.readFileSync(0, 'utf8'));
-            if (command !== 'prepare' && command !== 'preview') throw new Error(`Unknown command ${command}`);
-            const fromStdin = Boolean(values.stdin);
-            const root = values.root ? fs.realpathSync(values.root) : null;
-            if (!fromStdin && !root) throw new Error('Pass --root or --stdin');
-            if (command === 'prepare' && (fromStdin || !stateDir)) throw new Error('prepare needs --root and --state-dir');
-            const files = fromStdin ? new Map([[values['manifest-path'] ?? 'Directory.Packages.props', fs.readFileSync(0, 'utf8')]]) : collectFiles(root);
-            const indexDir = values['index-dir'] ?? process.env.CRATIS_NUGET_INDEX_DIR;
-            const cache = new Map();
-            const getVersions = (id) => {
-              const key = id.toLowerCase();
-              if (!cache.has(key)) cache.set(key, fetchVersions(id, indexDir));
-              return cache.get(key);
-            };
-            const plan = await planUpdates({ files, exclusions: parseExclusions(values.exclusions), getVersions, checkImports: !fromStdin });
-            if (command === 'preview') {
-              if (values.label) console.log(`Preview for ${values.label}`);
-              const diff = renderDiff(files, plan.edits);
-              if (diff) console.log(diff);
-              if (fromStdin) console.log('Single manifest only: imports and property consumers outside it were not evaluated.');
-            }
-            for (const line of describeOutcomes(plan, files.size)) console.log(line);
-            if (command === 'prepare') prepare(root, path.resolve(stateDir), plan, files);
+            const name = values['dry-run'] ? 'preview' : positionals[0] ?? 'preview';
+            const command = COMMANDS[name];
+            if (!command) throw new Error(`Unknown command ${name}`);
+            await command(values);
           }
 
           if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
