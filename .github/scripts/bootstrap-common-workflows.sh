@@ -221,57 +221,9 @@ BOOTSTRAPPED_FILES[".github/workflows/verify-no-work-records.yml"]="bmFtZTogVmVy
 #         runs-on: ${{ vars.RUNNER_GATE || 'ubuntu-latest' }}
 BOOTSTRAPPED_FILES[".github/workflows/verify-release-notes.yml"]="bmFtZTogVmVyaWZ5IFJlbGVhc2UgTm90ZXMKCiMgVGhpbiBjYWxsZXIgb2YgdGhlIG9yZ2FuaXphdGlvbi13aWRlIHJlbGVhc2Utbm90ZXMgZ2F0ZS4gVGhpcyBwdWxsIHJlcXVlc3QncwojIGRlc2NyaXB0aW9uIGlzIHB1Ymxpc2hlZCB2ZXJiYXRpbSBhcyB0aGUgcmVsZWFzZSBub3Rlcywgc28gdGhlIGdhdGUgY2hlY2tzIGl0CiMgYmVmb3JlIHRoZSBtZXJnZS4gVGhlIGNvbnRyYWN0IC0gd2hpY2ggc2VjdGlvbnMsIGlzc3VlIHJlZmVyZW5jZXMgYW5kIGNvbnRlbnQKIyBhcmUgYWxsb3dlZCwgYW5kIHdoYXQgdGhlIGVycm9ycyBzYXkgLSBsaXZlcyBpbgojIENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2Utbm90ZXMueW1sOyBkbyBub3QgcmVpbnRyb2R1Y2UKIyBsb2dpYyBoZXJlLiBJbnN0YWxsZWQgYW5kIGtlcHQgY3VycmVudCBieSBDcmF0aXMvV29ya2Zsb3dzJwojIGJvb3RzdHJhcC1jb21tb24td29ya2Zsb3dzLgojCiMgYGVkaXRlZGAgcmUtcnVucyB0aGUgY2hlY2sgd2hlbiB0aGUgZGVzY3JpcHRpb24gY2hhbmdlcyBhbmQgYGxhYmVsZWRgIGFuZAojIGB1bmxhYmVsZWRgIHdoZW4gdGhlIHJlbGVhc2UgbGFiZWwgZG9lcy4gVGhlcmUgaXMgbm8gYnJhbmNoIG9yIGxhYmVsIGZpbHRlcjogdGhlCiMgZ2F0ZSBpdHNlbGYgY2hlY2tzIHB1bGwgcmVxdWVzdHMgaW50byB0aGUgZGVmYXVsdCBicmFuY2gsIGZhaWxzIG9uZSB0aGF0IGNhcnJpZXMKIyBtYWpvciwgbWlub3Igb3IgcGF0Y2gsIHdhcm5zIG9uIG9uZSBsYWJlbGxlZCBuby1yZWxlYXNlIG9yIG5vdCBsYWJlbGxlZCB5ZXQsIGFuZAojIHBhc3NlcyBEZXBlbmRhYm90J3Mgd2l0aCBhIG5vdGljZS4gYHB1bGwtcmVxdWVzdHM6IHJlYWRgIGxldHMgaXQgcmVhZCB0aGUgcHVsbAojIHJlcXVlc3QgYXMgaXQgaXMgbm93LCBzbyBhIHJlLXJ1biBzZWVzIHRoZSBjdXJyZW50IGxhYmVscyBhbmQgZGVzY3JpcHRpb24uCiMKIyBUaGUgam9iIGlzIG5hbWVkIHJlbGVhc2Utbm90ZXMgc28gdGhlIGNoZWNrIHJlYWRzIGByZWxlYXNlLW5vdGVzIC8gdmVyaWZ5YCBhbmQKIyBkb2VzIG5vdCBjb2xsaWRlIHdpdGggb3RoZXIgYHZlcmlmeSAvIHZlcmlmeWAgZ2F0ZXMuCiMKIyBSVU5ORVJfR0FURSBpcyBhbiBvdXRhZ2UgZXNjYXBlIGhhdGNoIGFuZCBpcyBub3JtYWxseSB1bnNldDogc2V0IGl0IHRlbXBvcmFyaWx5IHRvIHJlcm91dGUgdGhlCiMgam9iIHdoZW4gdGhlIGRlZmF1bHQgcnVubmVyIGlzIGRvd24uIEEgcHJpdmF0ZSByZXBvc2l0b3J5IGRvZXMgbm90IHVzZSB0aGlzIGNhbGxlciBhcyBpczsgaXQKIyBrZWVwcyBpdHMgb3duIGNvcHkgd2l0aCBpdHMgb3duIGZhbGxiYWNrLCBmb3IgZXhhbXBsZQojIGBydW5zLW9uOiAke3sgdmFycy5SVU5ORVJfR0FURSB8fCAnY3JhdGlzLWFyYycgfX1gLgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKb246CiAgcHVsbF9yZXF1ZXN0OgogICAgdHlwZXM6IFtvcGVuZWQsIGVkaXRlZCwgcmVvcGVuZWQsIHN5bmNocm9uaXplLCBsYWJlbGVkLCB1bmxhYmVsZWQsIHJlYWR5X2Zvcl9yZXZpZXddCgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZAogIHB1bGwtcmVxdWVzdHM6IHJlYWQKCmpvYnM6CiAgcmVsZWFzZS1ub3RlczoKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2Utbm90ZXMueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHJ1bnMtb246ICR7eyB2YXJzLlJVTk5FUl9HQVRFIHx8ICd1YnVudHUtbGF0ZXN0JyB9fQo="
 
-# verify-semver-label.yml — requires exactly one of major, minor, patch or no-release,
-# and only no-release on a Dependabot pull request (whose labels it corrects first).
-# Installed only where the repository releases (see releases_with_release_action).
-# Decodes to:
-#   name: Verify Semver Label
-#
-#   # Thin caller of the organization-wide release-intent gate. The policy - which
-#   # labels are accepted and what the errors say - lives in
-#   # Cratis/Workflows/.github/workflows/verify-release-intent.yml. Thirty diverging
-#   # per-repository copies of that logic are how the 2026-08-25 unintended releases
-#   # happened; do not reintroduce logic here. Installed and kept current by
-#   # Cratis/Workflows' bootstrap-common-workflows.
-#   #
-#   # A Dependabot pull request first has its labels corrected: Dependabot adds major,
-#   # minor or patch on its own, and a Dependabot pull request only ever carries
-#   # no-release. The gate then reads the labels as they are now, so it sees the
-#   # correction although a label change made with GITHUB_TOKEN starts no new run.
-#   #
-#   # The job is named release-intent so the check reads `release-intent / verify` and
-#   # does not collide with `verify / verify` from verify-no-work-records.
-#   concurrency:
-#     group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-#     cancel-in-progress: true
-#
-#   on:
-#     pull_request:
-#       types: [opened, reopened, synchronize, labeled, unlabeled]
-#       # Scoped to the same branch Publish releases from. A pull request stacked onto another one's branch cannot
-#       # cut a release, so demanding a version label of it would be asking which version a merge that publishes
-#       # nothing should carry.
-#       branches:
-#         - main
-#
-#   permissions:
-#     contents: read
-#
-#   jobs:
-#     dependabot-labels:
-#       if: github.event.pull_request.user.login == 'dependabot[bot]'
-#       uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main
-#       permissions:
-#         pull-requests: write
-#
-#     release-intent:
-#       needs: dependabot-labels
-#       # Also after a failed or skipped correction: the gate then reports the labels as they are.
-#       if: ${{ !cancelled() }}
-#       uses: Cratis/Workflows/.github/workflows/verify-release-intent.yml@main
-#       permissions:
-#         contents: read
-#         pull-requests: read
+# verify-semver-label.yml - the legacy release-intent caller, retained below as a migration fixture only (it is
+# unset again after this list and never installed). It first called the Dependabot label normalizer, which has
+# been deleted; the policy wrapper below replaces it.
 BOOTSTRAPPED_FILES[".github/workflows/verify-semver-label.yml"]="bmFtZTogVmVyaWZ5IFNlbXZlciBMYWJlbAoKIyBUaGluIGNhbGxlciBvZiB0aGUgb3JnYW5pemF0aW9uLXdpZGUgcmVsZWFzZS1pbnRlbnQgZ2F0ZS4gVGhlIHBvbGljeSAtIHdoaWNoCiMgbGFiZWxzIGFyZSBhY2NlcHRlZCBhbmQgd2hhdCB0aGUgZXJyb3JzIHNheSAtIGxpdmVzIGluCiMgQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy92ZXJpZnktcmVsZWFzZS1pbnRlbnQueW1sLiBUaGlydHkgZGl2ZXJnaW5nCiMgcGVyLXJlcG9zaXRvcnkgY29waWVzIG9mIHRoYXQgbG9naWMgYXJlIGhvdyB0aGUgMjAyNi0wOC0yNSB1bmludGVuZGVkIHJlbGVhc2VzCiMgaGFwcGVuZWQ7IGRvIG5vdCByZWludHJvZHVjZSBsb2dpYyBoZXJlLiBJbnN0YWxsZWQgYW5kIGtlcHQgY3VycmVudCBieQojIENyYXRpcy9Xb3JrZmxvd3MnIGJvb3RzdHJhcC1jb21tb24td29ya2Zsb3dzLgojCiMgQSBEZXBlbmRhYm90IHB1bGwgcmVxdWVzdCBmaXJzdCBoYXMgaXRzIGxhYmVscyBjb3JyZWN0ZWQ6IERlcGVuZGFib3QgYWRkcyBtYWpvciwKIyBtaW5vciBvciBwYXRjaCBvbiBpdHMgb3duLCBhbmQgYSBEZXBlbmRhYm90IHB1bGwgcmVxdWVzdCBvbmx5IGV2ZXIgY2FycmllcwojIG5vLXJlbGVhc2UuIFRoZSBnYXRlIHRoZW4gcmVhZHMgdGhlIGxhYmVscyBhcyB0aGV5IGFyZSBub3csIHNvIGl0IHNlZXMgdGhlCiMgY29ycmVjdGlvbiBhbHRob3VnaCBhIGxhYmVsIGNoYW5nZSBtYWRlIHdpdGggR0lUSFVCX1RPS0VOIHN0YXJ0cyBubyBuZXcgcnVuLgojCiMgVGhlIGpvYiBpcyBuYW1lZCByZWxlYXNlLWludGVudCBzbyB0aGUgY2hlY2sgcmVhZHMgYHJlbGVhc2UtaW50ZW50IC8gdmVyaWZ5YCBhbmQKIyBkb2VzIG5vdCBjb2xsaWRlIHdpdGggYHZlcmlmeSAvIHZlcmlmeWAgZnJvbSB2ZXJpZnktbm8td29yay1yZWNvcmRzLgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKb246CiAgcHVsbF9yZXF1ZXN0OgogICAgdHlwZXM6IFtvcGVuZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkXQogICAgIyBTY29wZWQgdG8gdGhlIHNhbWUgYnJhbmNoIFB1Ymxpc2ggcmVsZWFzZXMgZnJvbS4gQSBwdWxsIHJlcXVlc3Qgc3RhY2tlZCBvbnRvIGFub3RoZXIgb25lJ3MgYnJhbmNoIGNhbm5vdAogICAgIyBjdXQgYSByZWxlYXNlLCBzbyBkZW1hbmRpbmcgYSB2ZXJzaW9uIGxhYmVsIG9mIGl0IHdvdWxkIGJlIGFza2luZyB3aGljaCB2ZXJzaW9uIGEgbWVyZ2UgdGhhdCBwdWJsaXNoZXMKICAgICMgbm90aGluZyBzaG91bGQgY2FycnkuCiAgICBicmFuY2hlczoKICAgICAgLSBtYWluCgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZAoKam9iczoKICBkZXBlbmRhYm90LWxhYmVsczoKICAgIGlmOiBnaXRodWIuZXZlbnQucHVsbF9yZXF1ZXN0LnVzZXIubG9naW4gPT0gJ2RlcGVuZGFib3RbYm90XScKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3Mvbm9ybWFsaXplLWRlcGVuZGFib3QtbGFiZWxzLnltbEBtYWluCiAgICBwZXJtaXNzaW9uczoKICAgICAgcHVsbC1yZXF1ZXN0czogd3JpdGUKCiAgcmVsZWFzZS1pbnRlbnQ6CiAgICBuZWVkczogZGVwZW5kYWJvdC1sYWJlbHMKICAgICMgQWxzbyBhZnRlciBhIGZhaWxlZCBvciBza2lwcGVkIGNvcnJlY3Rpb246IHRoZSBnYXRlIHRoZW4gcmVwb3J0cyB0aGUgbGFiZWxzIGFzIHRoZXkgYXJlLgogICAgaWY6ICR7eyAhY2FuY2VsbGVkKCkgfX0KICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXJlbGVhc2UtaW50ZW50LnltbEBtYWluCiAgICBwZXJtaXNzaW9uczoKICAgICAgY29udGVudHM6IHJlYWQKICAgICAgcHVsbC1yZXF1ZXN0czogcmVhZAo="
 
 # Legacy payloads above are retained as migration fixtures, not installed anymore.

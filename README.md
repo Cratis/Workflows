@@ -959,7 +959,7 @@ head-versus-merge drift, fetch failure and blocking aggregation. Offline bootstr
 specs cover atomic migration, customizations, failed replacement/discovery,
 idempotence, release continuity and the bounded non-fast-forward retry.
 
-The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including a corpus of over 900 published Cratis release bodies (`.github/scripts/tests/fixtures/release-notes/corpus.json`) whose recorded rules any rule change must keep or deliberately update, and `.github/scripts/tests/verify-release-intent.spec.mjs` against the release-intent gate and the Dependabot normalizer.
+The check's program is inline in the reusable workflow, so the rules that run are exactly the ones at the ref the caller names. `verify-release-notes-program.yml` runs `.github/scripts/tests/verify-release-notes.spec.mjs` against that exact program, including a corpus of over 900 published Cratis release bodies (`.github/scripts/tests/fixtures/release-notes/corpus.json`) whose recorded rules any rule change must keep or deliberately update, and `.github/scripts/tests/verify-release-intent.spec.mjs` against the release-intent gate.
 
 ---
 
@@ -982,7 +982,6 @@ The path filter is intentional: this workflow is **not a required check**.
 | Smoke call | `verify-discoverability.yml` | Good HTML fixture at `https://example.cratis.io`; existing script pin |
 | Not smokeable | `update-packages.yml`, `cleanup-pr-artifacts.yml` | Secrets and repository writes/deletions |
 | Not smokeable | `trigger-documentation-build.yml` | Cross-repository dispatch and a secret |
-| Not smokeable | `normalize-dependabot-labels.yml` | Writes labels |
 | Not smokeable | `verify-ai-corpus-impact.yml` | Reads live PR state with pull-requests: read; offline spec instead |
 | Not smokeable | `verify-pull-request-policy.yml`, `verify-release-notes.yml`, `verify-release-intent.yml` | Holds Workflows PRs to consumer release policy; decide separately |
 

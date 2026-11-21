@@ -20,7 +20,6 @@ NOT_SMOKEABLE = {
     "update-packages.yml": "requires secrets and writes package updates",
     "cleanup-pr-artifacts.yml": "requires secrets and deletes repository artifacts",
     "trigger-documentation-build.yml": "dispatches to another repository using a secret",
-    "normalize-dependabot-labels.yml": "writes pull request labels",
     "verify-pull-request-policy.yml": "holds Workflows PRs to consumer release policy; decide separately",
     "verify-release-notes.yml": "holds Workflows PRs to consumer release policy; decide separately",
     "verify-release-intent.yml": "holds Workflows PRs to consumer release policy; decide separately",

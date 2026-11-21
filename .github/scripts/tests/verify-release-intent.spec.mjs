@@ -1,7 +1,7 @@
 // Copyright (c) Cratis. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
-// Offline regressions for the inline shell of verify-release-intent.yml and normalize-dependabot-labels.yml, run with
+// Offline regressions for the inline shell of verify-release-intent.yml, run with
 // bash, jq and a stub `gh` that answers from the test instead of GitHub.
 
 import assert from "node:assert/strict";
@@ -12,7 +12,6 @@ import { join } from "node:path";
 import test from "node:test";
 
 const INTENT = readFileSync(".github/workflows/verify-release-intent.yml", "utf8");
-const NORMALIZE = readFileSync(".github/workflows/normalize-dependabot-labels.yml", "utf8");
 
 const script = workflow => workflow.split("        run: |\n")[1].split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
 const directory = mkdtempSync(join(tmpdir(), "verify-release-intent-"));
@@ -135,43 +134,6 @@ test("the gate sets no permissions of its own, so the caller's pull-requests: re
     assert.equal(/^\s*permissions:/m.test(INTENT), false);
     assert(INTENT.includes("GH_TOKEN: ${{ github.token }}"));
     assert.equal(script(INTENT).includes("${{"), false, "no expression is interpolated into the script");
-});
-
-test("the normalizer swaps Dependabot's major, minor and patch for no-release and leaves everyone else alone", () => {
-    const swapped = run(NORMALIZE, { live: pull(["major", "dependencies"], "dependabot[bot]") });
-    assert.equal(swapped.status, 0, swapped.out);
-    assert.deepEqual(swapped.calls, [
-        "api repos/Cratis/Example/pulls/7",
-        "api -X DELETE repos/Cratis/Example/issues/7/labels/major",
-        "api -X POST repos/Cratis/Example/issues/7/labels -f labels[]=no-release",
-        "api repos/Cratis/Example/pulls/7 --jq [.labels[].name] | join(\", \")",
-    ]);
-    const already = run(NORMALIZE, { live: pull(["no-release", "minor"], "dependabot[bot]") });
-    assert.deepEqual(already.calls.slice(1, 2), ["api -X DELETE repos/Cratis/Example/issues/7/labels/minor"]);
-    assert.deepEqual(run(NORMALIZE, { live: pull(["no-release"], "dependabot[bot]") }).calls.slice(1), []);
-    const human = run(NORMALIZE, { live: pull(["major"], "someone") });
-    assert.equal(human.status, 0);
-    assert.deepEqual(human.calls, ["api repos/Cratis/Example/pulls/7"]);
-    assert.match(human.out, /not Dependabot; its labels are left alone/);
-    assert.equal(script(NORMALIZE).includes("${{"), false, "no expression is interpolated into the script");
-});
-
-test("the normalizer never turns a run red: a token that cannot write, a failed read or a failed label call ends in a notice", () => {
-    for (const labels of [["major"], ["major", "no-release"], ["patch", "no-release", "dependencies"], [], ["dependencies"]]) {
-        const result = run(NORMALIZE, { live: pull(labels, "dependabot[bot]"), readOnly: true });
-        assert.equal(result.status, 0, `${JSON.stringify(labels)}: ${result.out}`);
-        assert.match(result.out, /::notice title=Dependabot labels not normalized::Could not (?:remove|add)/);
-        assert.equal(result.out.includes("::error"), false);
-        // The labels are read again at the end, whatever the writes did.
-        assert.equal(result.calls.at(-1).startsWith("api repos/Cratis/Example/pulls/7 --jq"), true, JSON.stringify(result.calls));
-    }
-    // A pull request that cannot be read is left alone.
-    const unreadable = run(NORMALIZE, { eventAuthor: "dependabot[bot]" });
-    assert.equal(unreadable.status, 0, unreadable.out);
-    assert.match(unreadable.out, /::notice title=Dependabot labels not normalized::Could not read pull request #7/);
-    assert.deepEqual(unreadable.calls, ["api repos/Cratis/Example/pulls/7"]);
-    // Not a pull request event: nothing to normalize.
-    assert.equal(run(NORMALIZE, { number: "" }).status, 0);
 });
 
 // The bootstrap installs the release-intent caller only where a repository releases. Its decision function is run
