@@ -278,6 +278,10 @@ BOOTSTRAPPED_FILES[".github/workflows/verify-semver-label.yml"]="bmFtZTogVmVyaWZ
 # per repository.
 BOOTSTRAPPED_FILES[".github/workflows/verify-pull-request-policy.yml"]="bmFtZTogVmVyaWZ5IFB1bGwgUmVxdWVzdCBQb2xpY3kKCm9uOgogIHB1bGxfcmVxdWVzdDoKICAgIHR5cGVzOiBbb3BlbmVkLCBlZGl0ZWQsIHJlb3BlbmVkLCBzeW5jaHJvbml6ZSwgbGFiZWxlZCwgdW5sYWJlbGVkLCByZWFkeV9mb3JfcmV2aWV3XQogIHB1c2g6CiAgICBicmFuY2hlczogW21haW5dCgpjb25jdXJyZW5jeToKICBncm91cDogJHt7IGdpdGh1Yi53b3JrZmxvdyB9fS0ke3sgZ2l0aHViLmV2ZW50LnB1bGxfcmVxdWVzdC5udW1iZXIgfHwgZ2l0aHViLnJlZiB9fQogIGNhbmNlbC1pbi1wcm9ncmVzczogdHJ1ZQoKcGVybWlzc2lvbnM6CiAgY29udGVudHM6IHJlYWQKICBwdWxsLXJlcXVlc3RzOiByZWFkCgpqb2JzOgogIHBvbGljeToKICAgIHVzZXM6IENyYXRpcy9Xb3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdmVyaWZ5LXB1bGwtcmVxdWVzdC1wb2xpY3kueW1sQG1haW4KICAgIHdpdGg6CiAgICAgIHJ1bnMtb246ICR7eyB2YXJzLlJVTk5FUl9HQVRFIHx8ICdfX1BPTElDWV9SVU5ORVJfXycgfX0KICAgICAgcmVsZWFzZS1pbnRlbnQ6IF9fUkVMRUFTRV9JTlRFTlRfXwo="
 
+# The same policy wrapper for a repository whose own workflows call it locally: on: workflow_call instead of
+# pull_request, so the caller's triggers and path filters apply (Cratis/Workflows#253).
+POLICY_REUSABLE_WRAPPER="bmFtZTogVmVyaWZ5IFB1bGwgUmVxdWVzdCBQb2xpY3kKCiMgQ2FsbGVkIGZyb20gcHVsbC1yZXF1ZXN0cy55bWw7IHRoZSBQUiB0cmlnZ2VycyBhbmQgcGF0aCBmaWx0ZXJzIGxpdmUgdGhlcmUuCm9uOgogIHdvcmtmbG93X2NhbGw6CiAgcHVzaDoKICAgIGJyYW5jaGVzOiBbbWFpbl0KCmNvbmN1cnJlbmN5OgogICMgUGVyIGNhbGxlciBydW46IGEgbGFiZWwtb25seSBydW4gbXVzdCBub3QgY2FuY2VsIHRoZSBwb2xpY3kgY2hlY2sgb2YgdGhlIGNvZGUgcnVuIG9uIHRoZSBzYW1lIHB1bGwgcmVxdWVzdC4KICBncm91cDogdmVyaWZ5LXB1bGwtcmVxdWVzdC1wb2xpY3ktJHt7IGdpdGh1Yi5ldmVudC5wdWxsX3JlcXVlc3QubnVtYmVyICYmIGZvcm1hdCgnezB9LXsxfScsIGdpdGh1Yi5ldmVudC5wdWxsX3JlcXVlc3QubnVtYmVyLCBnaXRodWIucnVuX2lkKSB8fCBnaXRodWIucmVmIH19CiAgY2FuY2VsLWluLXByb2dyZXNzOiB0cnVlCgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZAogIHB1bGwtcmVxdWVzdHM6IHJlYWQKCmpvYnM6CiAgcG9saWN5OgogICAgdXNlczogQ3JhdGlzL1dvcmtmbG93cy8uZ2l0aHViL3dvcmtmbG93cy92ZXJpZnktcHVsbC1yZXF1ZXN0LXBvbGljeS55bWxAbWFpbgogICAgd2l0aDoKICAgICAgcnVucy1vbjogJHt7IHZhcnMuUlVOTkVSX0dBVEUgfHwgJ19fUE9MSUNZX1JVTk5FUl9fJyB9fQogICAgICByZWxlYXNlLWludGVudDogX19SRUxFQVNFX0lOVEVOVF9fCg=="
+
 # Blob ids of every historical bootstrap payload for each path (git log -p of
 # this script). Never accept an arbitrary wrapper just because its name matches.
 declare -A LEGACY_WRAPPER_HASHES
@@ -368,6 +372,25 @@ releases_with_release_action() {
       return 0
     fi
   done < <(echo "$tree" | jq -r '.tree[] | select(.type == "blob" and (.path | test("^[.]github/workflows/[^/]+[.]ya?ml$"))) | .sha')
+  return 1
+}
+
+# Whether a workflow of repository $1 calls the policy wrapper locally (uses: ./.github/workflows/verify-pull-request-policy.yml).
+# $2 is the repository's recursive tree (JSON). Returns 0 when one does, 1 when none does, 2 when a workflow could not
+# be read: the caller must then not write the policy file, never assume there is no local caller.
+has_local_policy_caller() {
+  local repo="$1" tree="$2" blob_sha encoded content
+  while read -r blob_sha; do
+    [ -n "$blob_sha" ] || continue
+    if ! encoded=$(gh api "repos/Cratis/$repo/git/blobs/$blob_sha" --jq '.content' 2>/dev/null) \
+      || ! content=$(printf '%s' "$encoded" | base64 -d 2>/dev/null); then
+      echo "  ⚠ Could not read workflow blob $blob_sha in Cratis/$repo to find a local policy caller" >&2
+      return 2
+    fi
+    if grep -Eq 'uses:[[:space:]]*["'"'"']?\./\.github/workflows/verify-pull-request-policy\.ya?ml' <<<"$content"; then
+      return 0
+    fi
+  done < <(echo "$tree" | jq -r '.tree[] | select(.type == "blob" and (.path | test("^[.]github/workflows/[^/]+[.]ya?ml$")) and .path != ".github/workflows/verify-pull-request-policy.yml") | .sha')
   return 1
 }
 
@@ -635,6 +658,15 @@ update_repo() {
     fi
     file_b64="${BOOTSTRAPPED_FILES[$file_path]}"
     if [ "$file_path" = ".github/workflows/verify-pull-request-policy.yml" ]; then
+      local_caller=0
+      has_local_policy_caller "$repo" "$subtree" || local_caller=$?
+      case "$local_caller" in
+        0) file_b64="$POLICY_REUSABLE_WRAPPER"
+           echo "  ℹ A local workflow calls $file_path; writing the reusable variant" ;;
+        1) ;;
+        *) echo "  ⚠ Not writing $file_path in Cratis/$repo: could not tell whether a local workflow calls it"
+           continue ;;
+      esac
       file_content=$(printf '%s' "$file_b64" | base64 -d)
       file_b64=$(render_policy_wrapper "$file_content" "$repo_releases" "$repo_runner" | base64 | tr -d '\n')
     fi

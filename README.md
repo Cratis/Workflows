@@ -938,6 +938,7 @@ caller only when its blob matches a known historical bootstrap payload for that
 path; customized callers are kept and logged. Replacement and deletions share one
 Git tree and commit, and a failed replacement aborts the update. Ref updates remain
 nonforce; a non-fast-forward retries once after re-reading the fresh HEAD and files.
+A repository whose own workflows call it locally (`uses: ./.github/workflows/verify-pull-request-policy.yml`) gets the reusable variant (`on: workflow_call`) instead; if its workflows cannot be read, the policy file is not written.
 
 An old semver caller, an existing policy caller with `release-intent: true`, or a
 workflow using `Cratis/release-action` enables intent. Detection
