@@ -24,6 +24,7 @@ NOT_SMOKEABLE = {
     "verify-pull-request-policy.yml": "holds Workflows PRs to consumer release policy; decide separately",
     "verify-release-notes.yml": "holds Workflows PRs to consumer release policy; decide separately",
     "verify-release-intent.yml": "holds Workflows PRs to consumer release policy; decide separately",
+    "verify-ai-corpus-impact.yml": "reads live pull request labels, files and comments with pull-requests: read; exercised by its offline spec",
 }
 
 
