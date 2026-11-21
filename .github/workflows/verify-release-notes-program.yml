@@ -11,6 +11,8 @@ on:
       - .github/workflows/verify-release-notes.yml
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
+      - .github/scripts/tests/verify-release-notes-agent-trace.spec.mjs
+      - .github/scripts/tests/given/release-notes-program.mjs
       - .github/scripts/tests/fixtures/release-notes/**
       - .github/pull_request_template.md
       - .github/scripts/bootstrap-common-workflows.sh
@@ -27,6 +29,8 @@ on:
       - .github/workflows/verify-release-notes.yml
       - .github/workflows/verify-release-notes-program.yml
       - .github/scripts/tests/verify-release-notes.spec.mjs
+      - .github/scripts/tests/verify-release-notes-agent-trace.spec.mjs
+      - .github/scripts/tests/given/release-notes-program.mjs
       - .github/scripts/tests/fixtures/release-notes/**
       - .github/pull_request_template.md
       - .github/scripts/bootstrap-common-workflows.sh
@@ -56,6 +60,8 @@ jobs:
       - name: Exercise the actual inline program against real release bodies
         # No token, no GitHub API calls, no dependency installation.
         run: node --test .github/scripts/tests/verify-release-notes.spec.mjs
+      - name: Exercise agent-trace attribution and validation
+        run: node --test .github/scripts/tests/verify-release-notes-agent-trace.spec.mjs
       - name: Exercise the release-intent gate and the Dependabot label normalizer
         # bash, jq and a stub gh; no token and no GitHub API calls.
         run: node --test .github/scripts/tests/verify-release-intent.spec.mjs
