@@ -251,10 +251,13 @@ def render_policy_callers(releases, runner):
 
 
 def bootstrapped_workflows():
-    """Every plain workflow the bootstrap installs, decoded, except the policy caller that is rendered."""
+    """Every plain workflow the bootstrap installs, decoded, except the policy caller that is rendered.
+
+    Legacy payloads (listed in LEGACY_WRAPPER_HASHES) are migration fixtures the bootstrap unsets and never installs."""
+    legacy = set(re.findall(r'^LEGACY_WRAPPER_HASHES\["([^"]+)"\]=', BOOTSTRAP, re.M))
     payloads = re.findall(r'^BOOTSTRAPPED_FILES\["(\.github/workflows/[^"]+)"\]="([^"]+)"', BOOTSTRAP, re.M)
     return {Path(path).name: base64.b64decode(payload).decode() for path, payload in payloads
-            if "verify-pull-request-policy" not in path}
+            if "verify-pull-request-policy" not in path and path not in legacy}
 
 
 class BootstrapRenderingTests(unittest.TestCase):
