@@ -886,6 +886,16 @@ The release-notes gate checks every pull request into the default branch except 
 
 Fenced code and inline code are exempt. Closed HTML comments are not shown on the release page, so the heading, keyword, link and placeholder rules ignore them, and release-action removes them before publishing, so a `(#n)` inside a comment closes nothing. Such a `(#n)` still fails: write it at the end of the delivering bullet, outside the comment, and never put issue references in comments. Each violation is reported as its own error, naming the rule, the offending line and the fix. Whether a summary states a cohesive theme, whether a bullet is user-facing and whether an issue number exists cannot be decided from text; reviewers keep those.
 
+The `verify-release-notes.yml` reusable accepts one hidden attribution marker as the last non-blank content of the description:
+
+```text
+<!-- agent-trace:v1 session=<value> orchestrator=<value> work=<value> issue=Owner/Repo#123 model=<value> -->
+```
+
+Only `session` is required; the other keys are optional. Use space-separated `key=value` tokens, each key once, with non-empty values containing no whitespace or `-->`. The `issue` value must be `Owner/Repo#n`. Multiple, malformed or non-trailing markers, closing/linking keyword tokens or clauses and `(#n)` inside a marker are rejected regardless of the release label. Hyphenated values such as `work=fix-mail-guard` are allowed. Markers inside fenced or inline code are examples, not attribution. Trace errors and ordinary release-note errors are reported together, with diagnostics retaining their original line numbers; other HTML comments keep the rules above.
+
+Both `verify-release-notes.yml` and the combined `verify-pull-request-policy.yml` expose the same two optional inputs to control missing attribution. `agent-authors` defaults to an empty string and accepts comma/newline-separated GitHub logins (case-insensitive); only explicitly listed PR authors receive a warning when no valid marker is present. Author names are never used to guess agent origin. `require-agent-trace` defaults to `false`; set it to `true` to fail instead of warning for a listed author without a valid marker, even on a `no-release` or unlabelled PR. Authors outside the list never receive a missing-marker warning.
+
 In the legacy release-notes reusable, a second job, `drift`, compares the notes with the diff and only ever warns: a bullet whose code spans (paths and identifiers) the diff no longer touches, because the change landed on main another way or was dropped in conflict resolution; a version the diff only removes; a registry (PyPI, npm, NuGet, Maven Central, Docker Hub, GHCR) that no workflow publishes to; and a merge from the base branch that changed which files the pull request touches. It checks out the pull request head with full history (blobs on demand), skips Dependabot, and runs on label changes too, because the caller's concurrency group cancels the whole run when a label changes and the check would otherwise stay cancelled.
 
 A repository calls the gate with a job named `release-notes`, so the checks read `release-notes / verify` and `release-notes / drift` and do not collide with other `verify / verify` gates. The caller runs on `opened`, `edited`, `reopened`, `synchronize`, `labeled`, `unlabeled` and `ready_for_review`:

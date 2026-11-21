@@ -98,6 +98,21 @@ on:
         type: string
         required: false
         default: ubuntu-latest
+      agent-authors:
+        description: >-
+          Comma/newline-separated GitHub logins explicitly identifying agent PR
+          authors (case-insensitive). Listed authors without a trailing
+          agent-trace:v1 marker receive a warning; empty means no agent authors.
+        type: string
+        required: false
+        default: ""
+      require-agent-trace:
+        description: >-
+          Fail instead of warning when an author listed in agent-authors omits
+          the agent-trace:v1 marker, regardless of the release label.
+        type: boolean
+        required: false
+        default: false
 
 # No `permissions` key on purpose: a called workflow can only narrow what its caller grants, so a cap here would
 # take away the `pull-requests: read` the live read below needs, and asking for more than a caller grants fails
@@ -153,6 +168,8 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AGENT_AUTHORS: ${{ inputs.agent-authors }}
+          REQUIRE_AGENT_TRACE: ${{ inputs.require-agent-trace }}
         run: |
           node - <<'JS'
           "use strict";
@@ -488,6 +505,69 @@ jobs:
               return found;
           }
 
+          function agentTrace(body) {
+              const normalized = body.replace(/\r\n?/g, match => match.length === 2 ? " \n" : "\n");
+              const scanned = blank(blank(normalized, FENCED_CODE, " "), INLINE_CODE, " ");
+              const starts = [...scanned.matchAll(/<!--\s*agent-trace\b/g)];
+              if (starts.length === 0) {
+                  return { body, present: false, valid: false };
+              }
+              let cleaned = body;
+              for (const { index } of starts) {
+                  const close = body.indexOf("-->", index);
+                  const end = close < 0 ? body.length : close + 3;
+                  cleaned = cleaned.slice(0, index) + body.slice(index, end).replace(/[^\r\n]/g, " ") + cleaned.slice(end);
+              }
+              const start = starts[0].index;
+              const line = body.slice(0, start).split(/\r\n?|\n/).length;
+              const invalid = (rule, fix) => ({ body: cleaned, present: true, valid: false, violations: [{ rule, line,
+                  text: quote(body.split(/\r\n?|\n/)[line - 1]), fix }] });
+              if (starts.length > 1) {
+                  return invalid("Multiple agent traces", "Keep exactly one agent-trace marker at the end of the description.");
+              }
+              const close = body.indexOf("-->", start);
+              if (close < 0) {
+                  return invalid("Malformed agent trace", "Close the agent-trace marker with `-->`.");
+              }
+              const marker = body.slice(start, close + 3);
+              if (/\(#\d+\)/.test(marker)) {
+                  return invalid("Agent trace issue reference", "Never put `(#n)` inside an agent-trace marker; use `issue=Owner/Repo#n` for attribution.");
+              }
+              if (marker.split(/[=\s]+/).some(token => KEYWORD_TEXT.test(token))
+                  || [...marker.matchAll(KEYWORD)].length > 0 || [...marker.matchAll(KEYWORD_URL)].length > 0) {
+                  return invalid("Agent trace keyword", "Remove closing or linking keywords from the agent-trace marker.");
+              }
+              const fields = /^<!-- agent-trace:v1 (.+) -->$/.exec(marker);
+              if (!fields) {
+                  return invalid("Malformed agent trace", "Use `<!-- agent-trace:v1 session=<value> -->` with space-separated key=value tokens.");
+              }
+              const keys = new Set();
+              for (const token of fields[1].split(/ +/)) {
+                  const field = /^([^=\s]+)=([^\s]+)$/.exec(token);
+                  if (!field) {
+                      return invalid("Malformed agent trace", "Every agent-trace token must be key=value with a non-empty value and no whitespace.");
+                  }
+                  const [, key, value] = field;
+                  if (!["session", "orchestrator", "work", "issue", "model"].includes(key)) {
+                      return invalid("Malformed agent trace", `Unknown agent-trace key: ${key}. Allowed keys are session, orchestrator, work, issue and model.`);
+                  }
+                  if (keys.has(key)) {
+                      return invalid("Malformed agent trace", `Duplicate agent-trace key: ${key}. Each key may appear only once.`);
+                  }
+                  keys.add(key);
+                  if (key === "issue" && !/^[\w.-]+\/[\w.-]+#\d+$/.test(value)) {
+                      return invalid("Malformed agent trace", "The agent-trace issue value must be Owner/Repo#n.");
+                  }
+              }
+              if (!keys.has("session")) {
+                  return invalid("Malformed agent trace", "The agent-trace marker requires a session key.");
+              }
+              if (body.slice(close + 3).trim()) {
+                  return invalid("Agent trace not trailing", "Move the agent-trace marker after all other non-blank content.");
+              }
+              return { body: cleaned, present: true, valid: true };
+          }
+
           function check({ body, repository, defaultBranch }) {
               const lines = body.replace(/\r\n?/g, "\n").split("\n");
               // Code keeps its extent (so a section holding only an example is not empty) but loses its text;
@@ -786,15 +866,25 @@ jobs:
           // A pull request carrying any of major, minor or patch is release-bound, also next to a second intent label
           // (verify-release-intent rejects that combination on its own). Every other pull request may still become
           // release-bound, so its violations are reported as warnings.
+          const trace = agentTrace(body);
+          const agentAuthors = (process.env.AGENT_AUTHORS || "").split(/[,\r\n]+/).map(login => login.trim().toLowerCase()).filter(Boolean);
+          const missingTrace = !trace.valid && agentAuthors.includes(author.toLowerCase());
+          const requiredTrace = missingTrace && process.env.REQUIRE_AGENT_TRACE === "true";
+          const traceMessage = "This author is listed in agent-authors, but the description has no valid agent-trace marker. Add `<!-- agent-trace:v1 session=<value> -->` as the last non-blank content.";
+          if (missingTrace && !requiredTrace) {
+              console.log(`::warning title=${escapeProperty("Release notes: Missing agent trace")}::${escapeData(traceMessage)}`);
+              summary(`### Agent trace\n\n${traceMessage}`);
+          }
           const releaseLabels = [...new Set(labels.filter(label => ["major", "minor", "patch"].includes(label)))];
           const noRelease = labels.includes("no-release");
           const releaseBound = releaseLabels.length > 0;
-          const violations = check({
-              body,
-              repository: process.env.GITHUB_REPOSITORY || "Cratis/<Repository>",
-              defaultBranch,
+          const failing = releaseBound || (trace.present && !trace.valid) || requiredTrace;
+          const violations = [
+              ...(trace.violations || []),
+              ...(requiredTrace ? [{ rule: "Missing agent trace", line: null, text: "", fix: traceMessage }] : []),
+              ...check({ body: trace.body, repository: process.env.GITHUB_REPOSITORY || "Cratis/<Repository>", defaultBranch }),
           // A no-release pull request publishes nothing, so having no change list is not a mistake there.
-          }).filter(violation => releaseBound || !noRelease || violation.rule !== "No release notes");
+          ].filter(violation => releaseBound || !noRelease || violation.rule !== "No release notes");
 
           const status = releaseBound ? ""
               : noRelease ? "The pull request is labelled no-release, so this description is not published now. "
@@ -805,8 +895,9 @@ jobs:
               process.exit(0);
           }
 
-          const level = releaseBound ? "error" : "warning";
+          const level = failing ? "error" : "warning";
           const consequence = releaseBound ? VERBATIM
+              : failing ? "Agent attribution must be valid regardless of the release label."
               : `${noRelease ? "Labelled no-release, so this is a warning" : "Not labelled yet, so this is a warning"}: it fails once the pull request is labelled major, minor or patch. ${VERBATIM}`;
           for (const violation of violations) {
               const where = violation.line === null ? "The description" : `Line ${violation.line} \`${violation.text}\``;
@@ -817,13 +908,13 @@ jobs:
           summary([
               "### Release notes",
               "",
-              `${violations.length} release-note ${releaseBound ? "violation(s)" : "warning(s)"}. ${consequence}`,
+              `${violations.length} release-note ${failing ? "violation(s)" : "warning(s)"}. ${consequence}`,
               "",
               "| Line | Rule | Text |",
               "| --- | --- | --- |",
               ...rows,
           ].join("\n"));
-          process.exit(releaseBound ? 1 : 0);
+          process.exit(failing ? 1 : 0);
           JS
 
   # Warnings only: whether a bullet still describes this pull request cannot be decided from text alone, so this

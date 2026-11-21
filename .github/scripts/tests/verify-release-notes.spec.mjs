@@ -10,8 +10,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { WORKFLOW, PROGRAMS, PROGRAM_FILE, DRIFT_FILE, run, passes, fails, GOOD } from "./given/release-notes-program.mjs";
 
-const WORKFLOW = readFileSync(".github/workflows/verify-release-notes.yml", "utf8");
 const PROGRAM_WORKFLOW = readFileSync(".github/workflows/verify-release-notes-program.yml", "utf8");
 const SPEC_SOURCE = readFileSync(".github/scripts/tests/verify-release-notes.spec.mjs", "utf8");
 const TEMPLATE = readFileSync(".github/pull_request_template.md", "utf8");
@@ -19,70 +19,6 @@ const BOOTSTRAP_SCRIPT = readFileSync(".github/scripts/bootstrap-common-workflow
 const BOOTSTRAP_WORKFLOW = readFileSync(".github/workflows/bootstrap-common-workflows.yml", "utf8");
 const RELEASES = JSON.parse(readFileSync(".github/scripts/tests/fixtures/release-notes/releases.json", "utf8"));
 const VERBATIM = "This pull request description is published verbatim as the release notes; editing the description re-runs this check.";
-
-// Every inline program, by the `// cratis:program <name>` marker on its second line.
-const PROGRAMS = Object.fromEntries(WORKFLOW.split("node - <<'JS'\n").slice(1).map(block => {
-    const program = block.split("\n          JS\n")[0].split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
-    return [/^\/\/ cratis:program ([\w-]+)$/m.exec(program)[1], program];
-}));
-const PROGRAM = PROGRAMS["release-notes"];
-const directory = mkdtempSync(join(tmpdir(), "verify-release-notes-"));
-const PROGRAM_FILE = join(directory, "program.cjs");
-writeFileSync(PROGRAM_FILE, PROGRAM);
-const DRIFT_FILE = join(directory, "drift.cjs");
-writeFileSync(DRIFT_FILE, PROGRAMS["release-notes-drift"]);
-
-function run(body, { labels = ["minor"], author = "someone", base = "main", defaultBranch = "main", live } = {}) {
-    const summaryFile = join(directory, `summary-${Math.random().toString(16).slice(2)}.md`);
-    writeFileSync(summaryFile, "");
-    // `live` is what the "Read the pull request as it is now" step wrote: a pull request object, or raw file text.
-    let liveFile;
-    if (live !== undefined) {
-        liveFile = join(directory, `pull-request-${Math.random().toString(16).slice(2)}.json`);
-        writeFileSync(liveFile, typeof live === "string" ? live : JSON.stringify(live));
-    }
-    const result = spawnSync(process.execPath, [PROGRAM_FILE], {
-        encoding: "utf8",
-        env: {
-            PATH: process.env.PATH,
-            PR_BODY: body,
-            PR_LABELS: JSON.stringify(labels),
-            PR_AUTHOR: author,
-            PR_BASE: base,
-            DEFAULT_BRANCH: defaultBranch,
-            GITHUB_REPOSITORY: "Cratis/Example",
-            GITHUB_STEP_SUMMARY: summaryFile,
-            ...(liveFile ? { PR_JSON: liveFile } : {}),
-        },
-    });
-    const lines = result.stdout.split("\n");
-    const decode = value => value.replace(/%0A/g, "\n").replace(/%0D/g, "\r").replace(/%3A/g, ":").replace(/%2C/g, ",").replace(/%25/g, "%");
-    const errors = lines.filter(line => line.startsWith("::error ")).map(line => {
-        const [, title, message] = /^::error title=([^:]*)::(.*)$/.exec(line);
-        return { rule: decode(title).replace(/^Release notes: /, ""), message: decode(message) };
-    });
-    const notices = lines.filter(line => line.startsWith("::notice ")).map(decode);
-    const warnings = lines.filter(line => line.startsWith("::warning ")).map(line => {
-        const [, title, message] = /^::warning title=([^:]*)::(.*)$/.exec(line);
-        return { rule: decode(title).replace(/^Release notes: /, ""), message: decode(message) };
-    });
-    return { status: result.status, stderr: result.stderr, errors, rules: errors.map(error => error.rule), notices,
-        warnings, warned: warnings.map(warning => warning.rule), summary: readFileSync(summaryFile, "utf8") };
-}
-
-const passes = (body, options) => {
-    const result = run(body, options);
-    assert.equal(result.status, 0, `expected to pass, got: ${JSON.stringify(result.errors, null, 1)}${result.stderr}`);
-    return result;
-};
-const fails = (body, rules, options) => {
-    const result = run(body, options);
-    assert.equal(result.status, 1, `expected to fail with ${rules}${result.stderr}`);
-    assert.deepEqual([...new Set(result.rules)].sort(), [...rules].sort());
-    return result;
-};
-
-const GOOD = "Theme across the bullets.\n\n## Added\n\n- A new thing (#12)\n\n## Fixed\n\n- A fixed thing (#13)\n";
 
 test("the programs reach the runner only through the environment", () => {
     const runs = WORKFLOW.split(/\n {8}run: \|\n/).slice(1).map(block => block.split(/\n {6}- |\n {2}[\w-]+:\n/)[0]);
@@ -737,11 +673,16 @@ test("the program workflow runs whenever a file the spec reads changes", () => {
     };
     const covers = (patterns, file) => patterns.some(pattern => pattern === file
         || (pattern.endsWith("/**") && file.startsWith(pattern.slice(0, -2))));
-    const read = [...SPEC_SOURCE.matchAll(/readFileSync\(\s*"(\.github\/[^"]+)"/g)].map(match => match[1]);
+    const sources = [SPEC_SOURCE,
+        readFileSync(".github/scripts/tests/verify-release-notes-agent-trace.spec.mjs", "utf8"),
+        readFileSync(".github/scripts/tests/given/release-notes-program.mjs", "utf8")];
+    const read = [...sources.join("\n").matchAll(/readFileSync\(\s*"(\.github\/[^"]+)"/g)].map(match => match[1]);
     assert(read.length >= 3, read.join());
     for (const section of ["pull_request", "push"])
         for (const file of [...read, ".github/workflows/verify-release-notes-program.yml", ".github/scripts/tests/verify-release-notes.spec.mjs"])
             assert(covers(paths(section), file), `${section} paths must cover ${file}`);
+    for (const spec of ["verify-release-notes.spec.mjs", "verify-release-notes-agent-trace.spec.mjs"])
+        assert(PROGRAM_WORKFLOW.includes(`run: node --test .github/scripts/tests/${spec}`), `the workflow runs ${spec}`);
 });
 
 test("real release bodies: flagged ones fail with the expected rules, clean ones pass", () => {
