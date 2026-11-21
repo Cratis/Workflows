@@ -995,6 +995,21 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
         self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
 
+    def test_nuget_cratis_pins_with_per_framework_overrides_still_skip_and_leave_no_edits(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.nuget_fixture("multi-tfm")
+        self.assert_step_ok("Update NuGet packages")
+        self.assertIn("skipping NuGet update", self.last_result.stdout)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(self.sdk_updates(), [])
+
+    def test_nuget_failure_after_family_edits_leaves_no_edits_behind(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
+        self.nuget_fixture("multi-tfm")
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+
     def test_nuget_embedded_cratis_resolver_matches_script(self):
         embedded = shell("Update NuGet packages").split("<<'MJS'\n", 1)[1].split("\nMJS\n", 1)[0] + "\n"
         self.assertEqual(embedded, (ROOT / ".github/scripts/update-cratis-nuget.mjs").read_text())

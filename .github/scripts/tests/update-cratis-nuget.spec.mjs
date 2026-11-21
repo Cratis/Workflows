@@ -164,6 +164,37 @@ describe('MSBuild properties', () => {
   });
 });
 
+describe('conditional manifests', () => {
+  const root = (extra) => `<Project>\n  <Import Project="net8.props" Condition="'$(TargetFramework)' == 'net8.0'" />\n${extra}</Project>\n`;
+  const table = { 'cratis.arc': ['1.0.0', '2.0.0', '3.0.0'] };
+  const deferred = async (files) => (await run(files, table)).family('cratis.arc');
+
+  it('defers a family pinned in a conditionally imported file', async () => {
+    const files = { 'Directory.Packages.props': root(''), 'net8.props': props(pin('Cratis.Arc', '1.0.0')) };
+    const { family, out } = await run(files, table);
+    assert.equal(family('cratis.arc').outcome, 'deferred');
+    assert.equal(out['net8.props'], files['net8.props']);
+  });
+
+  it('defers pins reached through a conditional import transitively', async () => {
+    const nested = '<Project><Import Project="deep.props" /></Project>';
+    assert.equal((await deferred({ 'Directory.Packages.props': root(''), 'net8.props': nested, 'deep.props': props(pin('Cratis.Arc', '1.0.0')) })).outcome, 'deferred');
+  });
+
+  it('defers a pin in a conditional item group and an Update override', async () => {
+    const group = '<Project><ItemGroup Condition="\'$(X)\' == \'1\'"><PackageVersion Include="Cratis.Arc" Version="1.0.0" /></ItemGroup></Project>';
+    assert.equal((await deferred({ 'a.props': group })).outcome, 'deferred');
+    const update = props(pin('Cratis.Arc', '1.0.0'), '<PackageVersion Update="Cratis.Arc" Version="2.0.0" />');
+    assert.equal((await deferred({ 'a.props': update })).outcome, 'deferred');
+  });
+
+  it('still updates a family pinned only in an unconditionally imported file', async () => {
+    const files = { 'Directory.Packages.props': '<Project><Import Project="all.props" /></Project>', 'all.props': props(pin('Cratis.Arc', '1.0.0')) };
+    const plan = await planUpdates({ files: new Map(Object.entries(files)), getVersions: index(table) });
+    assert.equal(plan.families[0].outcome, 'updated');
+  });
+});
+
 describe('failures', () => {
   it('fails on an unavailable inventory instead of treating it as no release', async () => {
     const files = new Map([['a.props', props(pin('Cratis.Arc', '1.0.0'))]]);

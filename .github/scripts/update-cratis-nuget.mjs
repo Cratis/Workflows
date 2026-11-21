@@ -154,30 +154,29 @@ function skipNonElement(text, lt, top) {
   return skipPast(text, kind.close, lt + kind.open.length, kind.label);
 }
 
-function readTag(text, lt, top, stack, elements) {
+function readTag(text, lt, open) {
+  const top = open.stack[open.stack.length - 1];
   if (text[lt + 1] === '/') {
     const next = readCloseTag(text, lt, top);
-    stack.pop();
+    open.stack.pop();
     return next;
   }
   const element = readOpenTag(text, lt, top ?? null);
   top?.children.push(element);
-  elements.push(element);
-  if (!element.selfClosing) stack.push(element);
+  open.elements.push(element);
+  if (!element.selfClosing) open.stack.push(element);
   return element.openEnd;
 }
 
 // A bounded tokenizer: it records element and value spans so edits never reserialize the document.
 export function parseXml(text) {
-  const elements = [];
-  const stack = [];
+  const open = { elements: [], stack: [] };
   let at = 0;
   for (let lt = text.indexOf('<', at); lt >= 0; lt = text.indexOf('<', at)) {
-    const top = stack[stack.length - 1];
-    at = skipNonElement(text, lt, top) ?? readTag(text, lt, top, stack, elements);
+    at = skipNonElement(text, lt, open.stack[open.stack.length - 1]) ?? readTag(text, lt, open);
   }
-  if (stack.length > 0) throw new Error(`Malformed XML: <${stack[stack.length - 1].name}> is not closed`);
-  return elements;
+  if (open.stack.length > 0) throw new Error(`Malformed XML: <${open.stack[open.stack.length - 1].name}> is not closed`);
+  return open.elements;
 }
 
 // ------------------------------------------------------------ manifest model
@@ -222,7 +221,9 @@ const isCratisPackageId = (id) => Boolean(id) && PACKAGE_ID.test(id) && familyKe
 function packageDeclarations(file, text, element) {
   const id = (element.attrs.get('include') ?? element.attrs.get('update'))?.value;
   if (!isCratisPackageId(id)) return [];
-  return versionSources(text, element).map((source) => ({ file, id, ...source }));
+  // An Update item overrides another declaration, so it is never a plain pin.
+  const override = element.attrs.has('update') && !element.attrs.has('include');
+  return versionSources(text, element).map((source) => ({ file, id, ...source, conditional: source.conditional || override }));
 }
 
 function analyzeFile(file, text) {
@@ -231,7 +232,8 @@ function analyzeFile(file, text) {
     if (element.parent?.lname === 'propertygroup') {
       result.properties.push({ name: element.lname, file, value: textValue(text, element), conditional: isConditional(element) });
     } else if (element.lname === 'import') {
-      result.imports.push({ project: element.attrs.get('project')?.value ?? null, sdk: element.attrs.has('sdk') });
+      result.imports.push({ project: element.attrs.get('project')?.value ?? null, sdk: element.attrs.has('sdk'),
+        conditional: isConditional(element) });
     } else if (element.lname === 'packageversion' || element.lname === 'packagereference') {
       result.declarations.push(...packageDeclarations(file, text, element));
     }
@@ -241,16 +243,38 @@ function analyzeFile(file, text) {
 
 const DIRECTORY_PROPERTY = /\$\((?:MSBuildThisFileDirectory|MSBuildProjectDirectory)\)[\\/]?/gi;
 
-function importIsUnresolved(analysis, entry, files) {
-  if (entry.sdk) return false;
+// The scanned file an import points at, or null when it is an SDK import or cannot be resolved.
+function importTarget(analysis, entry, files) {
+  if (entry.sdk) return null;
   const project = (entry.project ?? '$(').replace(DIRECTORY_PROPERTY, '');
-  if (project.includes('$(')) return true;
+  if (project.includes('$(')) return null;
   const target = path.posix.normalize(path.posix.join(path.posix.dirname(analysis.file), project.replaceAll('\\', '/')));
-  return !files.has(target);
+  return files.has(target) ? target : null;
 }
 
-const hasUnresolvedImport = (analyses, files) =>
-  analyses.some((analysis) => analysis.imports.some((entry) => importIsUnresolved(analysis, entry, files)));
+const hasUnresolvedImport = (analyses, files) => analyses.some((analysis) =>
+  analysis.imports.some((entry) => !entry.sdk && importTarget(analysis, entry, files) === null));
+
+const importedFiles = (analysis, files, onlyConditional) => analysis.imports
+  .filter((entry) => entry.conditional || !onlyConditional)
+  .map((entry) => importTarget(analysis, entry, files))
+  .filter(Boolean);
+
+// Everything a conditional import brings in is conditional, transitively.
+function markConditionalImports(analyses, files) {
+  const byFile = new Map(analyses.map((analysis) => [analysis.file, analysis]));
+  const pending = analyses.flatMap((analysis) => importedFiles(analysis, files, true));
+  const seen = new Set();
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const analysis = byFile.get(file);
+    analysis.declarations.forEach((d) => { d.conditional = true; });
+    analysis.properties.forEach((p) => { p.conditional = true; });
+    pending.push(...importedFiles(analysis, files, false));
+  }
+}
 
 function countUses(analyses, name) {
   const pattern = new RegExp(`\\$\\(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'gi');
@@ -383,6 +407,7 @@ function groupFamilies(analyses) {
 
 export async function planUpdates({ files, exclusions = [], getVersions, checkImports = true }) {
   const analyses = analyzeAll(files);
+  markConditionalImports(analyses, files);
   const context = { analyses, properties: collectProperties(analyses), getVersions,
     unresolvedImports: checkImports && hasUnresolvedImport(analyses, files) };
   const held = new Set(exclusions.map(familyKey).filter(Boolean));
@@ -495,15 +520,10 @@ function readManifest(files, top, full) {
 
 function visitEntry(files, top, directory, entry) {
   const full = path.join(directory, entry.name);
-  if (entry.isSymbolicLink()) {
-    if (isManifest(entry.name)) throw new Error(`Refusing symbolic link manifest ${path.relative(top, full)}`);
-    return;
-  }
-  if (entry.isDirectory()) {
-    if (!SKIPPED_DIRECTORIES.has(entry.name)) walk(files, top, full);
-    return;
-  }
-  if (entry.isFile() && isManifest(entry.name)) readManifest(files, top, full);
+  const manifest = isManifest(entry.name);
+  if (entry.isSymbolicLink() && manifest) throw new Error(`Refusing symbolic link manifest ${path.relative(top, full)}`);
+  if (entry.isDirectory() && !SKIPPED_DIRECTORIES.has(entry.name)) walk(files, top, full);
+  if (entry.isFile() && manifest) readManifest(files, top, full);
 }
 
 function walk(files, top, directory) {
