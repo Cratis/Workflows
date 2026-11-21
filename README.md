@@ -1403,6 +1403,12 @@ cleanup rollout. Its PAT requires the repository/workflow write permissions and
 branch-rule bypass described in the workflow. Exact deployment effects need
 separate approval before merging a watched file.
 
+When branch protection or rulesets reject a direct push with HTTP 422, the bootstrap
+creates or updates `bootstrap/common-workflows` and an open pull request into the
+default branch, labeled `no-release`; this is not counted as a push or canary and
+triggers no stagger. This fallback requires **Pull requests: write** on the token
+(in addition to repository/workflow write permissions; a classic PAT uses `repo`).
+
 A run does not start every push-triggered workflow in every repository at once
 ([#163](https://github.com/Cratis/Workflows/issues/163)):
 
