@@ -82,7 +82,7 @@ elif method == 'GET' and '/git/trees/' in endpoint:
     result = {'tree':s['trees'][sha], 'truncated':s.get('truncated',False)}
 elif method == 'GET' and '/git/blobs/' in endpoint:
     sha = endpoint.split('/')[-1]
-    if s.get('fail_discovery'): error = 'HTTP 503 discovery failed'
+    if s.get('fail_discovery') or sha in s.get('fail_blobs', []): error = 'HTTP 503 discovery failed'
     else: result = {'content':s['blobs'][sha]}
 elif method == 'POST' and endpoint.endswith('/git/blobs'):
     data = base64.b64decode(fields['content'])
@@ -388,6 +388,41 @@ jobs:
         self.assertEqual(len(calls), 1)
         self.assertIn('--paginate', calls[0])
         self.assertIn('repos/Cratis/Example/labels?per_page=100', calls[0])
+
+    def test_local_caller_gets_the_reusable_variant(self):
+        files = {p: base64.b64decode(PAYLOADS[p]).decode() for p in LEGACY}
+        files['.github/workflows/pull-requests.yml'] = (
+            'jobs:\n  policy:\n    uses: ./.github/workflows/verify-pull-request-policy.yml\n')
+        self.initialize(files, private=True)
+        self.run_bootstrap()
+        wrapper = self.files()[POLICY]
+        self.assertIn('  workflow_call:\n', wrapper)
+        self.assertNotIn('pull_request:', wrapper.replace('pull_request.number', '').replace('pull-requests', ''))
+        self.assertIn('  push:\n    branches: [main]', wrapper)
+        self.assertIn("format('{0}-{1}', github.event.pull_request.number, github.run_id)", wrapper)
+        self.assertIn("vars.RUNNER_GATE || 'cratis-arc-small'", wrapper)
+        self.assertIn('release-intent: true', wrapper)
+        self.assertNotIn('__', wrapper)
+
+    def test_repository_without_local_caller_keeps_the_standalone_wrapper(self):
+        self.initialize()
+        self.run_bootstrap()
+        wrapper = self.files()[POLICY]
+        self.assertIn('  pull_request:\n', wrapper)
+        self.assertNotIn('workflow_call', wrapper)
+
+    def test_unreadable_workflow_leaves_the_repository_untouched(self):
+        files = {p: base64.b64decode(PAYLOADS[p]).decode() for p in LEGACY}
+        other = '.github/workflows/pull-requests.yml'
+        files[other] = 'jobs: {}\n'
+        self.initialize(files, fail_blobs=[blob(files[other])])
+        out = self.run_bootstrap(expected=1)
+        self.assertIn('could not tell whether a local workflow calls ' + POLICY, out)
+        self.assertEqual(self.state['tree_writes'], [])
+        self.assertEqual(self.state['patches'], 0)
+        self.assertEqual(self.state['head'], 'a'*40)
+        for path in LEGACY:
+            self.assertIn(path, self.files())
 
     def test_known_hash_table_covers_every_historical_payload_per_path(self):
         history = subprocess.check_output(['git', 'log', '-p', 'HEAD', '--', '.github/scripts/bootstrap-common-workflows.sh'], cwd=ROOT, text=True)

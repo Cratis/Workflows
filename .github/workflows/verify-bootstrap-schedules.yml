@@ -34,6 +34,6 @@ jobs:
           persist-credentials: false
       - name: Verify deterministic weekly package-update schedules
         run: python3 .github/scripts/tests/bootstrap-schedules.test.py
-      - name: Verify the canary-first, staggered [skip ci] rollout
+      - name: Verify the canary-first, staggered rollout without CI skip tokens
         # bash, jq, a stub gh and a recording SLEEP_CMD; no token and no GitHub API calls.
         run: python3 .github/scripts/tests/bootstrap-rollout.test.py

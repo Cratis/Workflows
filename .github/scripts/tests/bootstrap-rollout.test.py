@@ -1,6 +1,6 @@
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
-"""Offline bootstrap rollouts over several repositories: canary first, then staggered [skip ci] commits
+"""Offline bootstrap rollouts over several repositories: canary first, then staggered commits without CI skip tokens
 (Cratis/Workflows#163). The only gh executable is a local stateful fake; SLEEP_CMD records waits instead."""
 import json
 import os
@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / '.github/scripts/bootstrap-common-workflows.sh'
-SKIP_CI = ' [skip ci]'
+SKIP_TOKENS = ('[skip ci]', '[ci skip]', '[no ci]', '[skip actions]', '[actions skip]')
 POLL, STAGGER, SETTLE, TIMEOUT = 3, 7, 9, 30
 
 # Per-repository blob/tree/commit/ref state, plus a scripted sequence of workflow-run listings per repository.
@@ -162,13 +162,12 @@ class BootstrapRolloutTests(unittest.TestCase):
                 if call[0] == name and call[-2:] != ['--jq', '.permissions.push // false']]
 
     def assert_canary(self, canary, others):
-        self.assertNotIn('[skip ci]', self.message(canary))
-        self.assertTrue(self.message(canary).startswith('Bootstrap common workflows: '))
-        for name in others:
-            self.assertTrue(self.message(name).endswith(SKIP_CI), self.message(name))
-            self.assertEqual(self.message(name).count('[skip ci]'), 1)
+        for name in [canary, *others]:
+            self.assertTrue(self.message(name).startswith('Bootstrap common workflows: '), self.message(name))
+            for token in SKIP_TOKENS:
+                self.assertNotIn(token, self.message(name).lower())
 
-    def test_canary_is_pushed_without_skip_ci_and_every_later_commit_with_it(self):
+    def test_canary_is_pushed_first_and_no_commit_carries_a_ci_skip_token(self):
         self.initialize(['Alpha', 'Fundamentals', 'Beta'], runs={'Fundamentals': [
             [run('queued')],
             [run('completed', 'success'), run('completed', 'skipped', 'Docs'), run('completed', 'neutral', 'Lint')]]})
@@ -194,7 +193,7 @@ class BootstrapRolloutTests(unittest.TestCase):
         self.run_bootstrap(['Alpha', 'Fundamentals', 'Beta'])
         self.assertEqual([e for e in self.state['events'] if e.startswith('push')], ['push Alpha', 'push Beta'])
         self.assert_canary('Alpha', ['Beta'])
-        self.assertEqual(self.message('Fundamentals').count('[skip ci]'), 0)
+        self.assertNotIn('[skip ci]', self.message('Fundamentals'))
         self.assertEqual(list(self.state['run_reads']), ['Alpha'])
 
     def test_a_failed_canary_run_stops_the_rollout_before_any_other_repository(self):
