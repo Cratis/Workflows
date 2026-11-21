@@ -1422,10 +1422,9 @@ A run does not start every push-triggered workflow in every repository at once
   times in a row. A canary that starts no run within `CANARY_SETTLE_SECONDS`
   (default 300) is logged and the rollout continues. Reading the runs needs the PAT's
   **Actions: Read** permission.
-- **`[skip ci]` on the rest.** Every later bootstrap commit touches only the
-  bootstrapped wrapper files and ends with ` [skip ci]`, an approved exception to
-  the rule against `[skip ci]` on bot commits: the canary's CI run is the check that
-  sees a merged result. Package-update and other bot commits are unchanged.
+- **CI runs everywhere.** No bootstrap commit carries a CI skip token, so every
+  repository's main CI runs on its bootstrap commit and catches a wrapper that
+  breaks there ([#253](https://github.com/Cratis/Workflows/issues/253)).
 - **Stagger.** After each push, the next repository waits `STAGGER_SECONDS`
   (default 20) before its HEAD is read. A run with nothing to change waits for no
   canary.

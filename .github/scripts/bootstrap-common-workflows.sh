@@ -19,7 +19,7 @@
 # Rollout (Cratis/Workflows#163): a run does not start every push-triggered
 # workflow in every repository at once.
 #   - Canary: the first repository that needs a change, trying the repositories
-#     in CANARY_PREFERENCE first, is pushed without [skip ci], once the token is
+#     in CANARY_PREFERENCE first, is pushed first, once the token is
 #     shown to read its Actions runs. The rollout then waits for the workflow
 #     runs GitHub starts for that commit and stops (exit 1, no other repository
 #     touched) if any of them does not succeed or they are not complete within
@@ -27,8 +27,9 @@
 #     elapsed and two consecutive reads show the same completed runs, since
 #     GitHub creates a commit's runs over several seconds. A canary that starts
 #     no run within CANARY_SETTLE_SECONDS is logged and the rollout proceeds.
-#   - Every later commit ends with " [skip ci]". After each push, the next
-#     repository waits STAGGER_SECONDS before its HEAD is read.
+#   - No commit carries a CI skip token: every repository's main CI runs on
+#     its bootstrap commit. After each push, the next repository waits
+#     STAGGER_SECONDS before its HEAD is read.
 #
 # Expects:
 #   GH_TOKEN      - PAT with repo + Workflows permissions; the PAT owner must
@@ -433,7 +434,7 @@ LABELS
 }
 
 # ================================================================
-# Rollout: canary first, then staggered [skip ci] commits (Cratis/Workflows#163)
+# Rollout: canary first, then staggered commits (Cratis/Workflows#163)
 # ================================================================
 
 # The repositories in processing order: those named in CANARY_PREFERENCE (in that order) first, then the rest in
@@ -794,13 +795,8 @@ update_repo() {
   # Join commit parts: "Add/Update cleanup-pr-artifacts, add update-packages"
   commit_message=$(IFS=', '; echo "Bootstrap common workflows: ${commit_parts[*]}")
   commit_message="${commit_message^}"  # Capitalize first letter
-  # Exception to .cratis/ai/rules/github-actions.md ("Do not add [skip ci] to bot commits as a load
-  # optimization"), approved for Cratis/Workflows#163: these commits touch only bootstrapped wrapper files, and
-  # the canary - the first commit of the run - keeps its CI run, which must succeed before any other repository
-  # is changed. Without it one run starts every push-triggered workflow in every repository at once.
-  if [ "$pushes_done" -gt 0 ]; then
-    commit_message="$commit_message [skip ci]"
-  fi
+  # Never add a CI skip token: each repository's main CI is the check that sees the bootstrapped wrappers in
+  # place (Cratis/Workflows#253). The stagger, not skipped CI, spreads the load.
 
   commit_error=$(mktemp)
   _commit_resp=$(jq -n \
