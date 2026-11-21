@@ -1167,7 +1167,13 @@ Globs are repository-relative: `**` crosses directories, `**/` also matches zero
 
 Exit codes: `0` pass or skip, `1` policy failure, `2` could not run (empty `paths`, invalid `corpus-repository`, no pull request number, API failure, incomplete file list, or a download or checksum failure).
 
-Call it from `pull_request` jobs only (a push has no pull request and exits `2`) and grant `pull-requests: read`. Include `labeled`, `unlabeled`, `edited` and `synchronize` in the caller's `pull_request` types, or re-run the check after fixing the evidence; decisions are read live, so a re-run sees the new state.
+Call it from `pull_request` jobs only (a push has no pull request and exits `2`) and grant `pull-requests: read`. The caller's `pull_request` types must include `opened`, `reopened`, `synchronize`, `edited`, `labeled`, `unlabeled` and `ready_for_review`: a draft is skipped, so without `ready_for_review` a pull request marked ready keeps the skipped result until another event runs the check. After fixing the evidence, re-run the check if no listed event fires; decisions are read live, so a re-run sees the new state.
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
+```
 
 ```yaml
 ai-corpus:
