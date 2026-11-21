@@ -5,6 +5,11 @@ name: Verify Workflow Programs
 on:
   pull_request:
     paths:
+      - .github/dependabot.yml
+      - .github/scripts/tests/action-pins.spec.mjs
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - .github/scripts/bootstrap-common-workflows.sh
       - .github/scripts/verify-no-work-records.mjs
       - .github/workflows/verify-no-work-records.yml
       - .github/scripts/tests/verify-no-work-records.test.py
@@ -23,6 +28,11 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/dependabot.yml
+      - .github/scripts/tests/action-pins.spec.mjs
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - .github/scripts/bootstrap-common-workflows.sh
       - .github/scripts/verify-no-work-records.mjs
       - .github/workflows/verify-no-work-records.yml
       - .github/scripts/tests/verify-no-work-records.test.py
@@ -59,6 +69,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - name: Verify immutable action pins and local Dependabot maintenance
+        run: node --test .github/scripts/tests/action-pins.spec.mjs
       - name: Check guard syntax
         run: node --check .github/scripts/verify-no-work-records.mjs
       - name: Exercise the extracted guard and pinned caller
