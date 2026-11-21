@@ -990,27 +990,6 @@ test("the drift job only warns, reads the pull request head with history, skips 
     assert.equal(/process\.exit\([^0]/.test(PROGRAMS["release-notes-drift"]), false, "the drift program never exits non-zero");
 });
 
-test("the bootstrap installs the release-intent caller, which corrects Dependabot's labels before the gate", () => {
-    const encoded = /BOOTSTRAPPED_FILES\["\.github\/workflows\/verify-semver-label\.yml"\]="([^"]+)"/.exec(BOOTSTRAP_SCRIPT);
-    assert(encoded, "caller registered in bootstrap-common-workflows.sh");
-    const caller = Buffer.from(encoded[1], "base64").toString("utf8");
-    for (const required of [
-        "name: Verify Semver Label",
-        "types: [opened, reopened, synchronize, labeled, unlabeled]",
-        "    branches:\n      - main\n",
-        "permissions:\n  contents: read\n\njobs:",
-        "  dependabot-labels:\n    if: github.event.pull_request.user.login == 'dependabot[bot]'\n    uses: Cratis/Workflows/.github/workflows/normalize-dependabot-labels.yml@main\n    permissions:\n      pull-requests: write\n",
-        // Named release-intent, so the check reads `release-intent / verify`, not `verify / verify` like verify-no-work-records.
-        "  release-intent:\n    needs: dependabot-labels\n    # Also after a failed or skipped correction: the gate then reports the labels as they are.\n    if: ${{ !cancelled() }}\n    uses: Cratis/Workflows/.github/workflows/verify-release-intent.yml@main\n    permissions:\n      contents: read\n      pull-requests: read\n",
-    ])
-        assert(caller.includes(required), required);
-    assert.equal(/^\s*(?:run|steps):/m.test(caller), false, "the caller carries no logic");
-    assert.equal(/^  verify:/m.test(caller), false, "no job named verify");
-    const documented = caller.trimEnd().split("\n").map(line => `#   ${line}`.trimEnd()).join("\n");
-    assert(BOOTSTRAP_SCRIPT.includes(documented), "the decoded comment matches the encoded caller");
-    assert(readFileSync(".github/workflows/normalize-dependabot-labels.yml", "utf8").includes("workflow_call:"));
-});
-
 test("the bootstrap skips a file only for the repositories that keep their own copy of it", () => {
     assert(/^SKIP_FILE_REPOS\["\.github\/workflows\/verify-semver-label\.yml"\]="Arc\.Kotlin"$/m.test(BOOTSTRAP_SCRIPT));
     assert(/^#\s+Arc\.Kotlin - /m.test(BOOTSTRAP_SCRIPT), "the reason is documented");

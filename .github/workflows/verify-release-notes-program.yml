@@ -18,7 +18,6 @@ on:
       - .github/scripts/bootstrap-common-workflows.sh
       - .github/workflows/bootstrap-common-workflows.yml
       - .github/workflows/verify-release-intent.yml
-      - .github/workflows/normalize-dependabot-labels.yml
       - .github/scripts/tests/verify-release-intent.spec.mjs
   push:
     branches: [main]
@@ -36,7 +35,6 @@ on:
       - .github/scripts/bootstrap-common-workflows.sh
       - .github/workflows/bootstrap-common-workflows.yml
       - .github/workflows/verify-release-intent.yml
-      - .github/workflows/normalize-dependabot-labels.yml
       - .github/scripts/tests/verify-release-intent.spec.mjs
 
 permissions:
@@ -62,7 +60,7 @@ jobs:
         run: node --test .github/scripts/tests/verify-release-notes.spec.mjs
       - name: Exercise agent-trace attribution and validation
         run: node --test .github/scripts/tests/verify-release-notes-agent-trace.spec.mjs
-      - name: Exercise the release-intent gate and the Dependabot label normalizer
+      - name: Exercise the release-intent gate
         # bash, jq and a stub gh; no token and no GitHub API calls.
         run: node --test .github/scripts/tests/verify-release-intent.spec.mjs
       - name: Exercise the combined policy programs and two-tree comparison
