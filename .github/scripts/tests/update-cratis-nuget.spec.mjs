@@ -338,6 +338,29 @@ error: Sample -> ${id} (>= 2.0.0)`;
     assert.deepEqual([...pruneConflicts(conflict('Swagger'), ['Swagger', 'Microsoft.OpenApi'], delta).keys()], ['Swagger']);
   });
 
+  for (const code of ['NU1902', 'NU1603', 'NU1608']) {
+    it(`ignores warning ${code} while pruning and retrying an attributable NU1109`, (t) => {
+      const w = fixture(t);
+      const calls = [];
+      updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], log: () => {}, run: (_root, ids) => {
+        assert.equal(w.read(), w.before);
+        calls.push([...ids]);
+        fs.writeFileSync(w.file, w.before.replace('Kept" Version="1.0.0', 'Kept" Version="2.0.0'));
+        return calls.length === 1 ? { status: 3, output: `Project.csproj : warning ${code}: Advisory\n${conflict('Swagger')}` } :
+          { status: 0, output: '' };
+      } });
+      assert.deepEqual(calls, [['Swagger', 'Kept'], ['Kept']]);
+      assert.match(w.read(), /Kept" Version="2.0.0/);
+      assert.throws(() => pruneConflicts(conflict('Swagger') + `error ${code}: Advisory treated as an error`, ['Swagger']), /Cannot attribute SDK restore error/);
+    });
+  }
+
+  it('does not use warning-level conflict headers or chains as attribution evidence', () => {
+    const warning = conflict('Unselected', 'Other', 'NU1107').replaceAll('error', 'warning');
+    assert.deepEqual([...pruneConflicts(warning + conflict('Swagger'), ['Swagger']).keys()], ['Swagger']);
+    assert.throws(() => pruneConflicts(warning, ['Unselected']), /No attributable/);
+  });
+
   it('fails closed on unrelated restore errors even alongside an attributable conflict', () => {
     assert.throws(() => pruneConflicts(conflict('Swagger') + 'error NU1301: Feed unavailable', ['Swagger']), /Cannot attribute SDK restore error/);
     assert.throws(() => pruneConflicts('SDK command is not supported', ['Swagger']), /No attributable/);
@@ -428,6 +451,31 @@ error: Sample -> ${id} (>= 2.0.0)`;
       fs.writeFileSync(w.file, 'partial');
       throw new Error('Cannot launch SDK');
     } }), /Cannot launch SDK/);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('accepts an up-to-date unfiltered retry after pruning the only outdated inventory ID', (t) => {
+    const w = fixture(t);
+    const calls = [];
+    updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], unfiltered: true, log: () => {}, run: (_root, ids) => {
+      assert.equal(w.read(), w.before);
+      calls.push([...ids]);
+      fs.writeFileSync(w.file, w.before.replace('Kept" Version="1.0.0', 'Kept" Version="2.0.0'));
+      return calls.length === 1 ? { status: 3, output: conflict('Swagger') } :
+        { status: 2, output: 'All packages are up to date' };
+    } });
+    assert.deepEqual(calls, [[], ['Kept']]);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('rejects an unfiltered retry exit 2 without the up-to-date message', (t) => {
+    const w = fixture(t);
+    const calls = [];
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], unfiltered: true, log: () => {}, run: (_root, ids) => {
+      calls.push([...ids]);
+      return calls.length === 1 ? { status: 3, output: conflict('Swagger') } : { status: 2, output: 'Other SDK failure' };
+    } }), /dotnet package update failed \(exit 2\)/);
+    assert.deepEqual(calls, [[], ['Kept']]);
     assert.equal(w.read(), w.before);
   });
 

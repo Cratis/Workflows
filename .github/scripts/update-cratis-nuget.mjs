@@ -791,13 +791,14 @@ function selectedAncestors(block, conflict, selected) {
 }
 
 function conflictBlocks(output) {
-  if ([...output.matchAll(/\b(NU\d{4}):/g)].some((match) => !['NU1107', 'NU1109'].includes(match[1]))) {
+  const errors = output.split('\n').filter((line) => !/\bwarning\s+NU\d{4}:/i.test(line)).join('\n');
+  if ([...errors.matchAll(/\berror\s+(NU\d{4}):/gi)].some((match) => !['NU1107', 'NU1109'].includes(match[1].toUpperCase()))) {
     throw new Error('Cannot attribute SDK restore error; refusing to prune');
   }
-  const headers = [...output.matchAll(/\b(NU1107): Version conflict detected for |\b(NU1109): Detected package downgrade: /g)];
+  const headers = [...errors.matchAll(/\berror\s+(NU1107): Version conflict detected for |\berror\s+(NU1109): Detected package downgrade: /g)];
   if (headers.length === 0) throw new Error('No attributable NU1107/NU1109 errors in SDK output');
   return headers.map((header, index) => ({ code: header[1] ?? header[2],
-    text: output.slice(header.index, headers[index + 1]?.index) }));
+    text: errors.slice(header.index, headers[index + 1]?.index) }));
 }
 
 function literalPackagePin(text, element) {
@@ -913,7 +914,7 @@ export function updateWithPruning({ root, packages, unfiltered = false, run = sd
     log(`NuGet SDK update attempt ${attempt}/${MAX_UPDATE_ATTEMPTS}`);
     const result = sdkAttempt(options, before, attemptIds);
     if (result.status === 0) return;
-    if (unfilteredNoop(result, unfiltered && attempt === 1)) return;
+    if (unfilteredNoop(result, unfiltered)) return;
     requireRetryable(result, attempt);
     selected = pruneSelection(result, selected, log);
     attemptIds = selected;

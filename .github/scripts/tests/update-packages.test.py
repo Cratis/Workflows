@@ -997,6 +997,20 @@ class UpdatePackagesTests(unittest.TestCase):
         self.env.update(UPDATE_EXIT="2", UPDATE_OUTPUT="All packages are up to date")
         self.assert_step_ok("Update NuGet packages")
 
+    def test_nuget_unfiltered_retry_accepts_up_to_date_after_pruning_only_outdated_package(self):
+        before = '<Project><PackageVersion Include="Swagger" Version="1.0.0" /><PackageVersion Include="Kept" Version="1.0.0" /></Project>'
+        (self.repo / "Directory.Packages.props").write_text(before)
+        self.env["DOTNET_INVENTORY"] = json.dumps({"version": 1, "projects": [{"path": "A.csproj", "frameworks": [{"framework": "net10.0",
+            "topLevelPackages": [{"id": "Swagger", "requestedVersion": "1.0.0"}, {"id": "Kept", "requestedVersion": "1.0.0"}]}]}]})
+        conflict = "error NU1109: Detected package downgrade: Microsoft.OpenApi from 3.0.0 to centrally defined 2.0.0.\nerror: Project -> Swagger 11.0.0 -> Microsoft.OpenApi (>= 3.0.0)"
+        self.env["UPDATE_RESULTS"] = json.dumps([
+            {"status": 3, "output": conflict, "rewrite": 'Directory.Packages.props|Swagger" Version="1.0.0|Swagger" Version="11.0.0'},
+            {"status": 2, "output": "All packages are up to date"}])
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update"], ["dotnet", "package", "update", "Kept"]])
+        self.assertEqual((self.repo / "Directory.Packages.props").read_text(), before)
+        self.assertEqual(self.last_result.stdout.count("::notice::Pruned NuGet package 'Swagger': NU1109"), 1)
+
     def test_nuget_unattributable_exit_3_with_exclusions_fails(self):
         self.nuget_fixture()
         self.env.update(NUGET_PACKAGE_EXCLUSIONS="Serilog", UPDATE_EXIT="3")
@@ -1232,7 +1246,7 @@ class UpdatePackagesTests(unittest.TestCase):
             listing = json.loads(self.env[key])
             listing["projects"][0]["frameworks"][0]["topLevelPackages"].append({"id": "Swagger", "requestedVersion": "1.0.0"})
             self.env[key] = json.dumps(listing)
-        conflict = "A.csproj : error NU1109: Detected package downgrade: Microsoft.OpenApi from 3.0.0 to centrally defined 2.0.0.\nA.csproj : error NU1109: A -> Swagger 11.0.0 -> Microsoft.OpenApi (>= 3.0.0)"
+        conflict = "A.csproj : warning NU1902: Package has a known vulnerability\nA.csproj : error NU1109: Detected package downgrade: Microsoft.OpenApi from 3.0.0 to centrally defined 2.0.0.\nA.csproj : error NU1109: A -> Swagger 11.0.0 -> Microsoft.OpenApi (>= 3.0.0)"
         self.env["UPDATE_RESULTS"] = json.dumps([
             {"status": 3, "output": conflict, "rewrite": f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="9.0.0'},
             {"status": 0, "rewrite": f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="2.0.0'}])
