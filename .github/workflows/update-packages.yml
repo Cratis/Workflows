@@ -1236,14 +1236,14 @@ jobs:
             return 1
           }
           inventory=$(list_packages)
-          # Explicit-ID updates can silently skip divergent references within a project.
-          # Treat these as intentional per-TFM pins and exclude the ID everywhere,
-          # including projects where it has only one version: never update part of a package.
+          # Divergent references can span projects that each target only one framework.
+          # Treat these as intentional per-TFM pins and exclude the ID everywhere:
+          # never update part of a package, even across separate projects.
           per_tfm_ids=$(jq -r '
-            [.projects[] | .path as $path | (.frameworks // [])[]
+            [.projects[] | (.frameworks // [])[]
               | (.topLevelPackages // [])[]
-              | {path: $path, id: .id, version: .requestedVersion}]
-            | group_by([.path, (.id | ascii_downcase)])
+              | {id: .id, version: .requestedVersion}]
+            | group_by(.id | ascii_downcase)
             | map(select(([.[].version] | unique | length) > 1) | .[0].id)
             | unique_by(ascii_downcase) | .[]
           ' <<< "$inventory")
@@ -1370,7 +1370,7 @@ jobs:
             # it (e.g. CentralPackageTransitivePinningEnabled). Neither is actionable here, and
             # since no changes are written to disk in either case, skipping is safe
             # with or without exclusions. Divergent per-TFM versions of eligible
-            # references are rejected above before invoking the filtered updater. The resolver's
+            # references are excluded above before invoking the filtered updater. The resolver's
             # own family edits are the exception: undo exactly those, or fail if anything else moved.
             node "$cratis_helper" rollback --state-dir "$cratis_state" || exit 1
             echo "dotnet package update could not produce a consistent result (exit 3); skipping NuGet update for this run."

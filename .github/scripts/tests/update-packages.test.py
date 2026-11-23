@@ -946,7 +946,7 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotIn("per-TFM-pinned", self.last_result.stdout)
         self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Newtonsoft.Json"]])
 
-    def test_nuget_different_versions_in_separate_projects_are_not_per_framework_pins(self):
+    def test_nuget_different_versions_in_separate_projects_are_per_framework_pins(self):
         self.nuget_fixture("multi-tfm")
         listing = json.loads(self.env["DOTNET_INVENTORY"])
         frameworks = listing["projects"][0]["frameworks"]
@@ -955,8 +955,26 @@ class UpdatePackagesTests(unittest.TestCase):
         self.env["DOTNET_INVENTORY"] = json.dumps(listing)
         self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
         self.assert_step_ok("Update NuGet packages")
-        self.assertNotIn("per-TFM-pinned", self.last_result.stdout)
-        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Newtonsoft.Json"]])
+        self.assertIn("::notice::NuGet package 'Newtonsoft.Json'", self.last_result.stdout)
+        self.assertEqual(self.sdk_updates(), [])
+
+    def test_nuget_single_framework_projects_with_overridden_pins_allow_other_updates(self):
+        for exclusions in ("", "Held.Package"):
+            with self.subTest(exclusions=exclusions):
+                self.log.unlink(missing_ok=True)
+                self.per_tfm_with_eligible()
+                for kind in ("DOTNET_INVENTORY", "DOTNET_OUTDATED"):
+                    listing = json.loads(self.env[kind])
+                    frameworks = listing["projects"].pop(0)["frameworks"]
+                    for index, framework in enumerate(frameworks):
+                        framework["framework"] = f"net{10 + index}.0"
+                        listing["projects"].append({"path": f"Project{index}.csproj", "frameworks": [framework]})
+                    self.env[kind] = json.dumps(listing)
+                self.env["NUGET_PACKAGE_EXCLUSIONS"] = exclusions
+                self.assert_step_ok("Update NuGet packages")
+                self.assertEqual(self.last_result.stdout.lower().count("::notice::nuget package 'newtonsoft.json'"), 1)
+                expected = ["Serilog"] if exclusions else ["Held.Package", "Serilog"]
+                self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", *expected]])
 
     def test_nuget_exit_2_with_eligible_candidates_is_not_a_successful_noop(self):
         self.nuget_fixture()
