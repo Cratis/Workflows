@@ -607,6 +607,7 @@ class UpdatePackagesTests(unittest.TestCase):
             "CALLER_REPOSITORY": "Cratis/Fixture", "PUBLICATION_MODE": "pull-request", "PR_LABEL": "",
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "NPM_PACKAGE_EXCLUSIONS": "typescript",
             "NUGET_PACKAGE_EXCLUSIONS": "", "RUNNER_TEMP": str(self.root),
+            "DOTNET_INVENTORY": '{"version":1,"projects":[]}',
             "OPEN_PRS": str(self.root / "open-prs.json"), "CLOSED_PRS": str(self.root / "closed-prs.jsonl"),
         }
         for name in ["git", "gh", "dotnet", "yarn", "npx", "gradle", "mix"]:
@@ -794,14 +795,16 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotIn("SERILOG' is not referenced", self.last_result.stdout)
         self.assertNotIn("not referenced", self.last_result.stderr)
 
-    def test_nuget_default_retains_unfiltered_update_without_listing(self):
+    def test_nuget_default_retains_unfiltered_update_after_checking_inventory(self):
         self.assert_step_ok("Update NuGet packages")
-        self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "update"]])
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "list", "--format", "json"],
+                                               ["dotnet", "package", "update"]])
 
     def test_nuget_whitespace_only_exclusions_keep_the_default_update(self):
         self.env["NUGET_PACKAGE_EXCLUSIONS"] = "   "
         self.assert_step_ok("Update NuGet packages")
-        self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "update"]])
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "package", "list", "--format", "json"],
+                                               ["dotnet", "package", "update"]])
 
     def test_nuget_all_outdated_packages_excluded_is_a_noop(self):
         self.nuget_fixture()
@@ -880,11 +883,80 @@ class UpdatePackagesTests(unittest.TestCase):
                 self.assertFalse(self.sdk_updates())
                 self.assert_not_published()
 
-    def test_nuget_unsupported_per_framework_version_fails_before_partial_update(self):
+    def per_tfm_with_eligible(self):
         self.nuget_fixture("multi-tfm")
-        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        for kind in ("DOTNET_INVENTORY", "DOTNET_OUTDATED"):
+            listing = json.loads(self.env[kind])
+            # The same ID in another project must be excluded too, case-insensitively.
+            listing["projects"].append({"path": "Single.csproj", "frameworks": [{"framework": "net10.0",
+                "topLevelPackages": [{"id": "nEwTonSoft.Json", "requestedVersion": "12.0.1"},
+                                     {"id": "Serilog", "requestedVersion": "1.0.0"},
+                                     {"id": "Held.Package", "requestedVersion": "1.0.0"}]}]})
+            self.env[kind] = json.dumps(listing)
+
+    def test_nuget_per_framework_pins_are_excluded_with_notice_while_other_packages_update(self):
+        for exclusions in ("", "Held.Package"):
+            with self.subTest(exclusions=exclusions):
+                self.log.unlink(missing_ok=True)
+                self.per_tfm_with_eligible()
+                self.env["NUGET_PACKAGE_EXCLUSIONS"] = exclusions
+                (self.repo / "pins.props").write_text('<PackageVersion Include="Newtonsoft.Json" Version="12.0.1" />')
+                (self.repo / "eligible.props").write_text('<PackageVersion Include="Serilog" Version="1.0.0" />')
+                self.env["UPDATE_REWRITE"] = "eligible.props|1.0.0|2.0.0"
+                self.assert_step_ok("Update NuGet packages")
+                expected = ["Serilog"] if exclusions else ["Held.Package", "Serilog"]
+                self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", *expected]])
+                self.assertEqual(self.last_result.stdout.count("::notice::NuGet package 'Newtonsoft.Json' is per-TFM-pinned"), 1)
+                self.assertEqual((self.repo / "pins.props").read_text(), '<PackageVersion Include="Newtonsoft.Json" Version="12.0.1" />')
+                self.assertIn('Version="2.0.0"', (self.repo / "eligible.props").read_text())
+
+    def test_nuget_only_per_framework_pins_is_a_successful_noop_with_notice(self):
+        for exclusions in ("", "Serilog"):
+            with self.subTest(exclusions=exclusions):
+                self.nuget_fixture("multi-tfm")
+                self.env["NUGET_PACKAGE_EXCLUSIONS"] = exclusions
+                self.assert_step_ok("Update NuGet packages")
+                self.assertIn("::notice::NuGet package 'Newtonsoft.Json' is per-TFM-pinned", self.last_result.stdout)
+                self.assertIn("No eligible NuGet updates", self.last_result.stdout)
+                self.assertEqual(self.sdk_updates(), [])
+
+    def test_nuget_multiple_per_framework_pins_are_each_reported_once(self):
+        self.per_tfm_with_eligible()
+        inventory = json.loads(self.env["DOTNET_INVENTORY"])
+        for index, framework in enumerate(inventory["projects"][0]["frameworks"]):
+            framework["topLevelPackages"].append({"id": "Microsoft.Extensions.Logging",
+                                                   "requestedVersion": f"{10 + index}.0.0"})
+        inventory["projects"].append(inventory["projects"][0])
+        self.env["DOTNET_INVENTORY"] = json.dumps(inventory)
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.last_result.stdout.count("::notice::NuGet package 'Newtonsoft.Json'"), 1)
+        self.assertEqual(self.last_result.stdout.count("::notice::NuGet package 'Microsoft.Extensions.Logging'"), 1)
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Held.Package", "Serilog"]])
+
+    def test_nuget_inventory_failure_without_caller_exclusions_fails_before_update(self):
+        self.env["DOTNET_INVENTORY"] = '{"version":1,"projects":"invalid"}'
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
-        self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+        self.assertEqual(self.sdk_updates(), [])
+
+    def test_nuget_equal_versions_across_frameworks_are_not_pinned(self):
+        self.nuget_fixture("multi-tfm")
+        self.env["DOTNET_INVENTORY"] = self.env["DOTNET_INVENTORY"].replace("11.0.2", "12.0.1")
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertNotIn("per-TFM-pinned", self.last_result.stdout)
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Newtonsoft.Json"]])
+
+    def test_nuget_different_versions_in_separate_projects_are_not_per_framework_pins(self):
+        self.nuget_fixture("multi-tfm")
+        listing = json.loads(self.env["DOTNET_INVENTORY"])
+        frameworks = listing["projects"][0]["frameworks"]
+        listing["projects"] = [{"path": f"Project{index}.csproj", "frameworks": [framework]}
+                               for index, framework in enumerate(frameworks)]
+        self.env["DOTNET_INVENTORY"] = json.dumps(listing)
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertNotIn("per-TFM-pinned", self.last_result.stdout)
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Newtonsoft.Json"]])
 
     def test_nuget_exit_2_with_eligible_candidates_is_not_a_successful_noop(self):
         self.nuget_fixture()
@@ -1099,18 +1171,27 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
         self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
 
-    def test_nuget_cratis_pins_with_per_framework_overrides_still_skip_and_leave_no_edits(self):
+    def test_nuget_cratis_updates_and_central_repairs_survive_per_framework_exclusions(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade(), None])
+        self.per_tfm_with_eligible()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Held.Package"
+        self.assert_step_ok("Update NuGet packages")
+        self.assertIn("per-TFM-pinned", self.last_result.stdout)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text.replace("7.34.3", "7.34.4").replace("10.0.14", "10.0.15"))
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Serilog"]])
+
+    def test_nuget_only_per_framework_pins_preserves_verified_cratis_updates(self):
         self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
         self.nuget_fixture("multi-tfm")
         self.assert_step_ok("Update NuGet packages")
-        self.assertIn("skipping NuGet update", self.last_result.stdout)
-        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text.replace("1.0.0", "1.1.0", 1))
         self.assertEqual(self.sdk_updates(), [])
 
     def test_nuget_failure_after_family_edits_leaves_no_edits_behind(self):
         self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
-        self.nuget_fixture("multi-tfm")
-        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Serilog"
+        self.per_tfm_with_eligible()
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Held.Package"
+        self.env["FAIL_NATIVE"] = "dotnet package update Serilog"
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
         self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
 
