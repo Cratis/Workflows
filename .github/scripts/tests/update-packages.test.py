@@ -242,6 +242,17 @@ else:
             sys.exit(19)
         print(os.environ.get(key, os.environ.get("DOTNET_OUTDATED", "")))
         sys.exit(int(os.environ.get("LIST_EXIT", "0")))
+    if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_RESULTS"):
+        counter = Path(os.environ["COMMAND_LOG"] + ".updates")
+        attempt = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(attempt + 1))
+        results = json.loads(os.environ["UPDATE_RESULTS"])
+        result = results[attempt]
+        if result.get("rewrite"):
+            target, old, new = result["rewrite"].split("|")
+            Path(target).write_text(Path(target).read_text().replace(old, new))
+        print(result.get("output", ""))
+        sys.exit(result["status"])
     if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_REWRITE"):
         # Simulates the SDK writing a manifest: FILE|OLD|NEW.
         target, old, new = os.environ["UPDATE_REWRITE"].split("|")
@@ -986,11 +997,25 @@ class UpdatePackagesTests(unittest.TestCase):
         self.env.update(UPDATE_EXIT="2", UPDATE_OUTPUT="All packages are up to date")
         self.assert_step_ok("Update NuGet packages")
 
-    def test_nuget_exit_3_with_exclusions_is_a_skip(self):
+    def test_nuget_unfiltered_retry_accepts_up_to_date_after_pruning_only_outdated_package(self):
+        before = '<Project><PackageVersion Include="Swagger" Version="1.0.0" /><PackageVersion Include="Kept" Version="1.0.0" /></Project>'
+        (self.repo / "Directory.Packages.props").write_text(before)
+        self.env["DOTNET_INVENTORY"] = json.dumps({"version": 1, "projects": [{"path": "A.csproj", "frameworks": [{"framework": "net10.0",
+            "topLevelPackages": [{"id": "Swagger", "requestedVersion": "1.0.0"}, {"id": "Kept", "requestedVersion": "1.0.0"}]}]}]})
+        conflict = "error NU1109: Detected package downgrade: Microsoft.OpenApi from 3.0.0 to centrally defined 2.0.0.\nerror: Project -> Swagger 11.0.0 -> Microsoft.OpenApi (>= 3.0.0)"
+        self.env["UPDATE_RESULTS"] = json.dumps([
+            {"status": 3, "output": conflict, "rewrite": 'Directory.Packages.props|Swagger" Version="1.0.0|Swagger" Version="11.0.0'},
+            {"status": 2, "output": "All packages are up to date"}])
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update"], ["dotnet", "package", "update", "Kept"]])
+        self.assertEqual((self.repo / "Directory.Packages.props").read_text(), before)
+        self.assertEqual(self.last_result.stdout.count("::notice::Pruned NuGet package 'Swagger': NU1109"), 1)
+
+    def test_nuget_unattributable_exit_3_with_exclusions_fails(self):
         self.nuget_fixture()
         self.env.update(NUGET_PACKAGE_EXCLUSIONS="Serilog", UPDATE_EXIT="3")
-        self.assert_step_ok("Update NuGet packages")
-        self.assertIn("skipping NuGet update", self.last_result.stdout)
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("No attributable NU1107/NU1109", self.last_result.stderr)
 
     def test_nuget_broken_inventory_fails_before_updates(self):
         self.nuget_fixture()
@@ -1153,17 +1178,83 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertEqual((self.repo / "A.csproj").read_text(), project.replace("1.0.0", "1.1.0"))
         self.assertEqual(self.sdk_updates(), [])
 
-    def test_nuget_exit_3_rolls_back_only_the_family_edits(self):
+    def test_nuget_unattributable_exit_3_fails_and_rolls_back_family_edits(self):
         self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
         self.env["UPDATE_EXIT"] = "3"
-        self.assert_step_ok("Update NuGet packages")
-        self.assertIn("skipping NuGet update", self.last_result.stdout)
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("No attributable NU1107/NU1109", self.last_result.stderr)
         self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assert_not_published()
 
-    def test_nuget_exit_3_with_unexpected_manifest_changes_fails(self):
+    def test_nuget_exit_3_with_partial_sdk_writes_rolls_back_all_manifests(self):
         self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})
         self.env.update(UPDATE_EXIT="3", UPDATE_REWRITE=f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="2.0.0')
         self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assert_not_published()
+
+    def test_nuget_conflict_pruning_exhaustion_fails_without_partial_updates_or_publication(self):
+        self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]}, eligible=("A", "B", "C", "D", "Serilog"))
+        listing = json.loads(self.env["DOTNET_INVENTORY"])
+        listing["projects"][0]["frameworks"][0]["topLevelPackages"].extend({"id": i, "requestedVersion": "1.0.0"} for i in ["A", "B", "C", "D"])
+        self.env["DOTNET_INVENTORY"] = json.dumps(listing)
+        self.env["UPDATE_RESULTS"] = json.dumps([
+            {"status": 3, "output": f"error NU1107: Version conflict detected for Locked.\nerror: Project -> {i} 2.0.0 -> Locked (= 2.0.0)",
+             "rewrite": f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="9.0.0'} for i in ["A", "B", "C", "D"]])
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("exhausted 4 attempts", self.last_result.stderr)
+        self.assertEqual(len(self.sdk_updates()), 4)
+        self.assertEqual(self.last_result.stdout.count("::notice::Pruned NuGet package"), 3)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assert_not_published()
+
+    def leaf_delta_fixture(self):
+        self.cratis_family([("Cratis.Fundamentals", "1.0.0")], {"Cratis.Fundamentals": ["1.0.0", "1.1.0"]}, eligible=("MongoDB.Driver", "Serilog"))
+        project = '<Project><PackageReference Include="MongoDB.Driver" Version="2.0.0" /></Project>'
+        (self.repo / "MongoDB.csproj").write_text(project)
+        listing = json.loads(self.env["DOTNET_INVENTORY"])
+        listing["projects"][0]["frameworks"][0]["topLevelPackages"].append({"id": "MongoDB.Driver", "requestedVersion": "2.0.0"})
+        self.env["DOTNET_INVENTORY"] = json.dumps(listing)
+        conflict = "error NU1109: Detected package downgrade: MongoDB.Driver from 3.0.0 to centrally defined 2.0.0.\nerror: Sample -> Local.MongoDB -> MongoDB.Driver (>= 3.0.0)\nerror: Sample -> MongoDB.Driver (>= 2.0.0)"
+        return project, conflict
+
+    def test_nuget_selected_leaf_manifest_delta_is_pruned_and_rolled_back_before_retry(self):
+        project, conflict = self.leaf_delta_fixture()
+        self.env["UPDATE_RESULTS"] = json.dumps([
+            {"status": 3, "output": conflict, "rewrite": 'MongoDB.csproj|Version="2.0.0"|Version="3.0.0"'},
+            {"status": 0, "rewrite": f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="2.0.0'}])
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "MongoDB.Driver", "Serilog"],
+                                             ["dotnet", "package", "update", "Serilog"]])
+        self.assertEqual((self.repo / "MongoDB.csproj").read_text(), project)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text.replace('Fundamentals" Version="1.0.0', 'Fundamentals" Version="1.1.0').replace('Serilog" Version="1.0.0', 'Serilog" Version="2.0.0'))
+        self.assertEqual(self.last_result.stdout.count("::notice::Pruned NuGet package 'MongoDB.Driver': NU1109"), 1)
+
+    def test_nuget_selected_leaf_without_manifest_delta_fails_closed(self):
+        project, conflict = self.leaf_delta_fixture()
+        self.env.update(UPDATE_EXIT="3", UPDATE_OUTPUT=conflict)
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("Cannot attribute NU1109 for MongoDB.Driver", self.last_result.stderr)
+        self.assertEqual(len(self.sdk_updates()), 1)
+        self.assertEqual((self.repo / "MongoDB.csproj").read_text(), project)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assert_not_published()
+
+    def test_nuget_prunes_conflict_and_retries_unrelated_update_without_losing_family_repair(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade(), None])
+        for key in ["DOTNET_OUTDATED", "DOTNET_INVENTORY"]:
+            listing = json.loads(self.env[key])
+            listing["projects"][0]["frameworks"][0]["topLevelPackages"].append({"id": "Swagger", "requestedVersion": "1.0.0"})
+            self.env[key] = json.dumps(listing)
+        conflict = "A.csproj : warning NU1902: Package has a known vulnerability\nA.csproj : error NU1109: Detected package downgrade: Microsoft.OpenApi from 3.0.0 to centrally defined 2.0.0.\nA.csproj : error NU1109: A -> Swagger 11.0.0 -> Microsoft.OpenApi (>= 3.0.0)"
+        self.env["UPDATE_RESULTS"] = json.dumps([
+            {"status": 3, "output": conflict, "rewrite": f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="9.0.0'},
+            {"status": 0, "rewrite": f'{self.PROPS}|Serilog" Version="1.0.0|Serilog" Version="2.0.0'}])
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Serilog", "Swagger"],
+                                             ["dotnet", "package", "update", "Serilog"]])
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text.replace("7.34.3", "7.34.4").replace("10.0.14", "10.0.15").replace('Serilog" Version="1.0.0', 'Serilog" Version="2.0.0'))
+        self.assertIn("::notice::Pruned NuGet package 'Swagger': NU1109", self.last_result.stdout)
 
     def test_nuget_sdk_edit_to_a_family_pin_fails_and_nothing_publishes(self):
         self.cratis_family([("Cratis.Arc", "1.0.0")], {"Cratis.Arc": ["1.0.0", "1.1.0"]})

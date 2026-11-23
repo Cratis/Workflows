@@ -8,7 +8,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { applyEdits, compareVersions, familyKey, parseExclusions, parseVersion, planUpdates, renderDiff } from '../update-cratis-nuget.mjs';
+import { applyEdits, compareVersions, familyKey, parseExclusions, parseVersion, planUpdates, pruneConflicts, renderDiff, updateWithPruning } from '../update-cratis-nuget.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../update-cratis-nuget.mjs', import.meta.url));
 
@@ -210,6 +210,283 @@ describe('failures', () => {
     const files = new Map([['a.props', props(pin('Cratis.Arc', '1.0.0'))]]);
     const plan = await planUpdates({ files, getVersions: index({ 'cratis.arc': ['1.0.0', '1.1.0'] }), checkImports: false });
     assert.match(renderDiff(files, plan.edits), /^--- a\/a\.props\n\+\+\+ b\/a\.props\n@@ line 3 @@\n-.*1\.0\.0.*\n\+.*1\.1\.0/);
+  });
+});
+
+describe('SDK conflict pruning', () => {
+  const conflict = (id, dependency = 'Microsoft.OpenApi', code = 'NU1109') => {
+    const header = code === 'NU1107' ? `Version conflict detected for ${dependency}.` :
+      `Detected package downgrade: ${dependency} from 3.0.0 to centrally defined 2.0.0.`;
+    return `Project.csproj : error ${code}: ${header}\nProject.csproj : error ${code}: Project -> ${id} 11.0.0 -> ${dependency} (>= 3.0.0)\n`;
+  };
+
+  function fixture(t) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-pruning-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const file = path.join(root, 'Directory.Packages.props');
+    const before = props(pin('Cratis.Fundamentals', '7.34.4'), pin('Kept', '1.0.0'));
+    fs.writeFileSync(file, before);
+    return { root, file, before, read: () => fs.readFileSync(file, 'utf8') };
+  }
+
+  it('attributes NU1107 and NU1109 to selected concrete ancestors case-insensitively', () => {
+    for (const code of ['NU1107', 'NU1109']) {
+      assert.deepEqual([...pruneConflicts(conflict('sWaGgEr', undefined, code), ['Swagger', 'Kept']).keys()], ['Swagger']);
+    }
+  });
+
+  it('deduplicates repeated errors while preserving reasons for multiple conflicting packages', () => {
+    const output = conflict('Swagger') + conflict('Swagger') + conflict('Runner', 'xunit.v3.common', 'NU1107');
+    assert.deepEqual([...pruneConflicts(output, ['Swagger', 'Runner', 'Kept']).keys()], ['Swagger', 'Runner']);
+  });
+
+  it('never prunes an excluded, protected or otherwise unselected ancestor', () => {
+    assert.throws(() => pruneConflicts(conflict('Cratis.Arc'), ['Kept']), /Cannot attribute NU1109/);
+  });
+
+  it('does not mistake the centrally pinned dependency for a selected updated ancestor', () => {
+    assert.throws(() => pruneConflicts(conflict('Unselected'), ['Microsoft.OpenApi']), /Cannot attribute/);
+  });
+
+  const leafConflict = (id = 'MongoDB.Driver') => `error NU1109: Detected package downgrade: ${id} from 3.0.0 to centrally defined 2.0.0.
+error: Sample -> Local.Project -> ${id} (>= 3.0.0)
+error: Sample -> ${id} (>= 2.0.0)`;
+
+  it('prunes a selected leaf only from a matching failed-attempt literal manifest upgrade', (t) => {
+    const w = fixture(t);
+    const project = path.join(w.root, 'MongoDB.csproj');
+    const before = '<Project><PackageReference Include="MongoDB.Driver"><Version>2.0.0</Version></PackageReference></Project>';
+    fs.writeFileSync(project, before);
+    const calls = [];
+    const notices = [];
+    updateWithPruning({ root: w.root, packages: ['MongoDB.Driver', 'Kept'], log: (line) => notices.push(line), run: (_root, ids) => {
+      calls.push([...ids]);
+      assert.equal(fs.readFileSync(project, 'utf8'), before);
+      if (calls.length === 1) {
+        fs.writeFileSync(project, before.replace('2.0.0', '3.0.0'));
+        return { status: 3, output: leafConflict('mongodb.driver') };
+      }
+      fs.writeFileSync(w.file, w.before.replace('Kept" Version="1.0.0', 'Kept" Version="2.0.0'));
+      return { status: 0, output: '' };
+    } });
+    assert.deepEqual(calls, [['MongoDB.Driver', 'Kept'], ['Kept']]);
+    assert.equal(fs.readFileSync(project, 'utf8'), before);
+    assert.match(w.read(), /Kept" Version="2.0.0/);
+    assert.deepEqual(notices.filter((line) => line.startsWith('::notice::')), ["::notice::Pruned NuGet package 'MongoDB.Driver': NU1109 conflicts with mongodb.driver"]);
+  });
+
+  const unchanged = '<Project><PackageReference Include="MongoDB.Driver" Version="2.0.0" /></Project>';
+  const insufficientDeltas = [
+    ['no manifest delta', unchanged, unchanged, ['MongoDB.Driver', 'Kept']],
+    ['unselected leaf', unchanged, unchanged.replace('2.0.0', '3.0.0'), ['Kept']],
+    ['wrong new version', unchanged, unchanged.replace('2.0.0', '2.5.0'), ['MongoDB.Driver', 'Kept']],
+    ['only the lower requirement changed', unchanged.replace('2.0.0', '1.0.0'), unchanged, ['MongoDB.Driver', 'Kept']],
+    ['new declaration', '<Project />', unchanged.replace('2.0.0', '3.0.0'), ['MongoDB.Driver', 'Kept']],
+    ['conditional declaration', unchanged.replace('Version=', 'Condition="true" Version='), unchanged.replace('Version=', 'Condition="true" Version=').replace('2.0.0', '3.0.0'), ['MongoDB.Driver', 'Kept']],
+    ['property declaration', unchanged.replace('2.0.0', '$(Pin)'), unchanged.replace('2.0.0', '3.0.0'), ['MongoDB.Driver', 'Kept']],
+    ['duplicate declaration', unchanged.replace('</Project>', '<PackageReference Update="MongoDB.Driver" Version="2.0.0" /></Project>'), unchanged.replace('</Project>', '<PackageReference Update="MongoDB.Driver" Version="2.0.0" /></Project>').replace('Version="2.0.0"', 'Version="3.0.0"'), ['MongoDB.Driver', 'Kept']],
+  ];
+  for (const [label, before, after, packages] of insufficientDeltas) {
+    it(`fails closed on leaf attribution with ${label}`, (t) => {
+      const w = fixture(t);
+      const project = path.join(w.root, 'MongoDB.csproj');
+      fs.writeFileSync(project, before);
+      let attempts = 0;
+      assert.throws(() => updateWithPruning({ root: w.root, packages, log: () => {}, run: () => {
+        attempts++;
+        fs.writeFileSync(project, after);
+        return { status: 3, output: leafConflict() };
+      } }), /Cannot attribute NU1109 for MongoDB.Driver/);
+      assert.equal(attempts, 1);
+      assert.equal(fs.readFileSync(project, 'utf8'), before);
+    });
+  }
+
+  it('uses only the current attempt delta, never a rolled-back earlier update as evidence', (t) => {
+    const w = fixture(t);
+    const project = path.join(w.root, 'Library.csproj');
+    const before = '<Project><PackageReference Include="MongoDB.Driver" Version="2.0.0" /><PackageReference Include="Kept" Version="2.0.0" /></Project>';
+    fs.writeFileSync(project, before);
+    let attempts = 0;
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['MongoDB.Driver', 'Kept'], log: () => {}, run: () => {
+      attempts++;
+      assert.equal(fs.readFileSync(project, 'utf8'), before);
+      if (attempts === 1) fs.writeFileSync(project, before.replaceAll('2.0.0', '3.0.0'));
+      return { status: 3, output: leafConflict(attempts === 1 ? 'MongoDB.Driver' : 'Kept') };
+    } }), /Cannot attribute NU1109 for Kept/);
+    assert.equal(attempts, 2);
+    assert.equal(fs.readFileSync(project, 'utf8'), before);
+  });
+
+  it('prunes a proven NU1107 leaf upgrade without raising its pin or retaining failed writes', (t) => {
+    const w = fixture(t);
+    const before = props(pin('xunit.v3.common', '2.0.0'));
+    fs.writeFileSync(w.file, before);
+    const calls = [];
+    updateWithPruning({ root: w.root, packages: ['xunit.v3.common', 'Kept'], log: () => {}, run: (_root, ids) => {
+      calls.push([...ids]);
+      if (calls.length > 1) return { status: 0, output: '' };
+      fs.writeFileSync(w.file, before.replace('2.0.0', '3.0.0'));
+      return { status: 3, output: 'error NU1107: Version conflict detected for xunit.v3.common.\nerror: Project -> Unselected 1.0.0 -> xunit.v3.common (= 3.0.0)' };
+    } });
+    assert.deepEqual(calls, [['xunit.v3.common', 'Kept'], ['Kept']]);
+    assert.equal(w.read(), before);
+  });
+
+  it('prefers selected concrete ancestors over leaf delta attribution', () => {
+    const delta = [{ id: 'microsoft.openapi', version: parseVersion('3.0.0') }];
+    assert.deepEqual([...pruneConflicts(conflict('Swagger'), ['Swagger', 'Microsoft.OpenApi'], delta).keys()], ['Swagger']);
+  });
+
+  for (const code of ['NU1902', 'NU1603', 'NU1608']) {
+    it(`ignores warning ${code} while pruning and retrying an attributable NU1109`, (t) => {
+      const w = fixture(t);
+      const calls = [];
+      updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], log: () => {}, run: (_root, ids) => {
+        assert.equal(w.read(), w.before);
+        calls.push([...ids]);
+        fs.writeFileSync(w.file, w.before.replace('Kept" Version="1.0.0', 'Kept" Version="2.0.0'));
+        return calls.length === 1 ? { status: 3, output: `Project.csproj : warning ${code}: Advisory\n${conflict('Swagger')}` } :
+          { status: 0, output: '' };
+      } });
+      assert.deepEqual(calls, [['Swagger', 'Kept'], ['Kept']]);
+      assert.match(w.read(), /Kept" Version="2.0.0/);
+      assert.throws(() => pruneConflicts(conflict('Swagger') + `error ${code}: Advisory treated as an error`, ['Swagger']), /Cannot attribute SDK restore error/);
+    });
+  }
+
+  it('does not use warning-level conflict headers or chains as attribution evidence', () => {
+    const warning = conflict('Unselected', 'Other', 'NU1107').replaceAll('error', 'warning');
+    assert.deepEqual([...pruneConflicts(warning + conflict('Swagger'), ['Swagger']).keys()], ['Swagger']);
+    assert.throws(() => pruneConflicts(warning, ['Unselected']), /No attributable/);
+  });
+
+  it('fails closed on unrelated restore errors even alongside an attributable conflict', () => {
+    assert.throws(() => pruneConflicts(conflict('Swagger') + 'error NU1301: Feed unavailable', ['Swagger']), /Cannot attribute SDK restore error/);
+    assert.throws(() => pruneConflicts('SDK command is not supported', ['Swagger']), /No attributable/);
+  });
+
+  it('undoes every failed attempt, prunes incrementally and retains an unrelated successful update', (t) => {
+    const w = fixture(t);
+    const calls = [];
+    const logs = [];
+    updateWithPruning({ root: w.root, packages: ['Swagger', 'Runner', 'Kept'], log: (line) => logs.push(line),
+      run: (_root, ids) => {
+        assert.equal(w.read(), w.before, 'each attempt starts from the prepared family pins');
+        calls.push([...ids]);
+        fs.writeFileSync(w.file, w.before.replace('Kept" Version="1.0.0', 'Kept" Version="2.0.0'));
+        if (calls.length === 1) return { status: 3, output: conflict('Swagger') };
+        if (calls.length === 2) return { status: 3, output: conflict('Runner', 'xunit.v3.common', 'NU1107') };
+        return { status: 0, output: 'Updated Kept' };
+      } });
+    assert.deepEqual(calls, [['Swagger', 'Runner', 'Kept'], ['Runner', 'Kept'], ['Kept']]);
+    assert.match(w.read(), /Kept" Version="2.0.0/);
+    assert.match(w.read(), /Cratis.Fundamentals" Version="7.34.4/);
+    assert.equal(logs.filter((line) => line.includes('::notice::Pruned')).length, 2);
+  });
+
+  it('bounds retries to four SDK attempts and leaves no partial manifest changes', (t) => {
+    const w = fixture(t);
+    let attempts = 0;
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['A', 'B', 'C', 'D', 'Kept'], log: () => {},
+      run: (_root, ids) => {
+        attempts++;
+        fs.writeFileSync(w.file, 'partial');
+        return { status: 3, output: conflict(ids[0]) };
+      } }), /exhausted 4 attempts/);
+    assert.equal(attempts, 4);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('fails when pruning empties the selection rather than reporting an all-packages skip', (t) => {
+    const w = fixture(t);
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['Swagger'], log: () => {},
+      run: () => ({ status: 3, output: conflict('Swagger') }) }), /No eligible NuGet packages remain/);
+    assert.equal(w.read(), w.before);
+  });
+
+  for (const status of [1, 2, 23, null]) {
+    it(`does not retry a non-conflict failure (exit ${status}) and restores all manifests`, (t) => {
+      const w = fixture(t);
+      let calls = 0;
+      assert.throws(() => updateWithPruning({ root: w.root, packages: ['Kept'], log: () => {}, run: () => {
+        calls++;
+        fs.writeFileSync(w.file, 'partial');
+        return { status, output: 'Failed' };
+      } }), /dotnet package update failed/);
+      assert.equal(calls, 1);
+      assert.equal(w.read(), w.before);
+    });
+  }
+
+  it('rolls back an unattributable failure including existing lock files and newly created manifests', (t) => {
+    const w = fixture(t);
+    const lock = path.join(w.root, 'packages.lock.json');
+    const added = path.join(w.root, 'Added.csproj');
+    fs.writeFileSync(lock, '{}\n');
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['Kept'], log: () => {}, run: () => {
+      fs.writeFileSync(w.file, 'partial');
+      fs.writeFileSync(lock, '{"partial":true}');
+      fs.writeFileSync(added, '<Project />');
+      return { status: 3, output: conflict('Unselected') };
+    } }), /Cannot attribute/);
+    assert.equal(w.read(), w.before);
+    assert.equal(fs.readFileSync(lock, 'utf8'), '{}\n');
+    assert.equal(fs.existsSync(added), false);
+  });
+
+  it('undoes SDK writes if successful output fails the protected-pin verification', (t) => {
+    const w = fixture(t);
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['Kept'], log: () => {},
+      validate: () => { throw new Error('Protected pin changed'); }, run: () => {
+        fs.writeFileSync(w.file, 'partial');
+        return { status: 0, output: '' };
+      } }), /Protected pin changed/);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('undoes SDK writes when launching the command throws', (t) => {
+    const w = fixture(t);
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['Kept'], log: () => {}, run: () => {
+      fs.writeFileSync(w.file, 'partial');
+      throw new Error('Cannot launch SDK');
+    } }), /Cannot launch SDK/);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('accepts an up-to-date unfiltered retry after pruning the only outdated inventory ID', (t) => {
+    const w = fixture(t);
+    const calls = [];
+    updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], unfiltered: true, log: () => {}, run: (_root, ids) => {
+      assert.equal(w.read(), w.before);
+      calls.push([...ids]);
+      fs.writeFileSync(w.file, w.before.replace('Kept" Version="1.0.0', 'Kept" Version="2.0.0'));
+      return calls.length === 1 ? { status: 3, output: conflict('Swagger') } :
+        { status: 2, output: 'All packages are up to date' };
+    } });
+    assert.deepEqual(calls, [[], ['Kept']]);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('rejects an unfiltered retry exit 2 without the up-to-date message', (t) => {
+    const w = fixture(t);
+    const calls = [];
+    assert.throws(() => updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], unfiltered: true, log: () => {}, run: (_root, ids) => {
+      calls.push([...ids]);
+      return calls.length === 1 ? { status: 3, output: conflict('Swagger') } : { status: 2, output: 'Other SDK failure' };
+    } }), /dotnet package update failed \(exit 2\)/);
+    assert.deepEqual(calls, [[], ['Kept']]);
+    assert.equal(w.read(), w.before);
+  });
+
+  it('preserves the unfiltered first call but retries with only surviving IDs', (t) => {
+    const w = fixture(t);
+    const calls = [];
+    updateWithPruning({ root: w.root, packages: ['Swagger', 'Kept'], unfiltered: true, log: () => {}, run: (_root, ids) => {
+      calls.push(ids);
+      return calls.length === 1 ? { status: 3, output: conflict('Swagger') } : { status: 0, output: '' };
+    } });
+    assert.deepEqual(calls, [[], ['Kept']]);
   });
 });
 

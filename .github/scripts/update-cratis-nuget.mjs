@@ -527,22 +527,24 @@ function readManifest(files, top, full) {
   files.set(path.relative(top, full).split(path.sep).join('/'), fs.readFileSync(full, 'utf8'));
 }
 
-function visitEntry(files, top, directory, entry) {
+function visitEntry(scan, directory, entry) {
+  const { files, top, include } = scan;
   const full = path.join(directory, entry.name);
-  const manifest = isManifest(entry.name);
+  const manifest = include(entry.name);
   if (entry.isSymbolicLink() && manifest) throw new Error(`Refusing symbolic link manifest ${path.relative(top, full)}`);
-  if (entry.isDirectory() && !SKIPPED_DIRECTORIES.has(entry.name)) walk(files, top, full);
+  if (entry.isDirectory() && !SKIPPED_DIRECTORIES.has(entry.name)) walk(scan, full);
   if (entry.isFile() && manifest) readManifest(files, top, full);
 }
 
-function walk(files, top, directory) {
+function walk(scan, directory) {
   const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
-  for (const entry of entries) visitEntry(files, top, directory, entry);
+  for (const entry of entries) visitEntry(scan, directory, entry);
 }
 
-function collectFiles(root) {
+function collectFiles(root, include = isManifest) {
   const files = new Map();
-  walk(files, fs.realpathSync(root), fs.realpathSync(root));
+  const top = fs.realpathSync(root);
+  walk({ files, top, include }, top);
   return files;
 }
 
@@ -761,6 +763,172 @@ function restoreWithRepairs(stateDir, exclusions) {
   }
 }
 
+// ------------------------------------------------------ SDK prune and retry
+
+const MAX_UPDATE_ATTEMPTS = 4;
+
+function conflictPackage(block) {
+  const match = /\bNU1107: Version conflict detected for ([A-Za-z0-9_.-]+)\./.exec(block) ??
+    /\bNU1109: Detected package downgrade: ([A-Za-z0-9_.-]+) from /.exec(block);
+  if (!match) throw new Error('Cannot attribute SDK restore error; refusing to prune');
+  return match[1];
+}
+
+function selectedNode(node, selected) {
+  // Only concrete package/version nodes, never the project name or a central pin.
+  const match = /^([A-Za-z0-9_.-]+)\s+(\S+)$/.exec(node.trim());
+  if (!match || !parseVersion(match[2])) return null;
+  return selected.get(match[1].toLowerCase());
+}
+
+function selectedAncestors(block, conflict, selected) {
+  const chains = block.split('\n').map((line) => line.split(' -> '));
+  const matches = chains.filter((chain) => {
+    const leaf = /^([A-Za-z0-9_.-]+)\s+\(/.exec(chain.at(-1).trim());
+    return leaf?.[1].toLowerCase() === conflict.toLowerCase();
+  });
+  return matches.flatMap((chain) => chain.slice(1, -1).map((node) => selectedNode(node, selected))).filter(Boolean);
+}
+
+function conflictBlocks(output) {
+  const errors = output.split('\n').filter((line) => !/\bwarning\s+NU\d{4}:/i.test(line)).join('\n');
+  if ([...errors.matchAll(/\berror\s+(NU\d{4}):/gi)].some((match) => !['NU1107', 'NU1109'].includes(match[1].toUpperCase()))) {
+    throw new Error('Cannot attribute SDK restore error; refusing to prune');
+  }
+  const headers = [...errors.matchAll(/\berror\s+(NU1107): Version conflict detected for |\berror\s+(NU1109): Detected package downgrade: /g)];
+  if (headers.length === 0) throw new Error('No attributable NU1107/NU1109 errors in SDK output');
+  return headers.map((header, index) => ({ code: header[1] ?? header[2],
+    text: errors.slice(header.index, headers[index + 1]?.index) }));
+}
+
+function literalPackagePin(text, element) {
+  if (!['packagereference', 'packageversion'].includes(element.lname)) return null;
+  const id = (element.attrs.get('include') ?? element.attrs.get('update'))?.value;
+  if (!id || !PACKAGE_ID.test(id)) return null;
+  const sources = versionSources(text, element);
+  const literal = sources.length === 1 && !sources[0].conditional && !element.attrs.has('update');
+  return { id: id.toLowerCase(), kind: element.lname, version: literal ? parseVersion(sources[0].raw) : null };
+}
+
+function literalPins(text) {
+  const pins = parseXml(text).map((element) => literalPackagePin(text, element)).filter(Boolean);
+  const unique = new Map();
+  for (const pin of pins) unique.set(pin.id, unique.has(pin.id) ? null : pin);
+  return unique;
+}
+
+function filePackageDelta(before, after) {
+  const previous = literalPins(before);
+  const changed = [...literalPins(after).values()].filter(Boolean);
+  return changed.filter((pin) => {
+    const old = previous.get(pin.id);
+    return old?.version && pin.version && old.kind === pin.kind && compareVersions(old.version, pin.version) < 0;
+  });
+}
+
+function attemptPackageDelta(before, after) {
+  return [...before].filter(([file, text]) => isManifest(file) && after.has(file) && after.get(file) !== text)
+    .flatMap(([file, text]) => filePackageDelta(text, after.get(file)));
+}
+
+function deltaLeaf(block, conflict, context) {
+  const id = context.selected.get(conflict.toLowerCase());
+  if (!id) return [];
+  const escaped = conflict.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const requirements = [...block.text.matchAll(new RegExp(` -> ${escaped} \\(\\s*(?:>=|=)\\s+(\\S+?)\\s*\\)`, 'gi'))]
+    .map((match) => parseVersion(match[1])).filter(Boolean).map(versionKey);
+  const downgrade = /\bNU1109: .* from (\S+) to /.exec(block.text);
+  const required = downgrade ? requirements.filter((version) => version === versionKey(parseVersion(downgrade[1]))) : requirements;
+  const proven = context.delta.some((pin) => pin.id === id.toLowerCase() && required.includes(versionKey(pin.version)));
+  return proven ? [id] : [];
+}
+
+function conflictReasons(block, context) {
+  const conflict = conflictPackage(block.text);
+  const ancestors = selectedAncestors(block.text, conflict, context.selected);
+  const ids = ancestors.length > 0 ? ancestors : deltaLeaf(block, conflict, context);
+  if (ids.length === 0) throw new Error(`Cannot attribute ${block.code} for ${conflict} to a selected package`);
+  return ids.map((id) => [id, `${block.code} conflicts with ${conflict}`]);
+}
+
+export function pruneConflicts(output, packages, delta = []) {
+  const selected = new Map(packages.map((id) => [id.toLowerCase(), id]));
+  return new Map(conflictBlocks(output).flatMap((block) => conflictReasons(block, { selected, delta })));
+}
+
+const isSdkFile = (name) => isManifest(name) || name.toLowerCase() === 'packages.lock.json';
+
+function undoSdkAttempt(root, before) {
+  const current = collectFiles(root, isSdkFile);
+  for (const file of current.keys()) {
+    if (!before.has(file)) fs.unlinkSync(path.join(root, file));
+  }
+  for (const [file, text] of before) fs.writeFileSync(path.join(root, file), text);
+}
+
+function sdkUpdate(root, packages) {
+  const result = spawnSync('dotnet', ['package', 'update', ...packages], { cwd: root, encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024, env: { ...process.env, DOTNET_CLI_UI_LANGUAGE: 'en-US' } });
+  if (result.error) throw result.error;
+  return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+function sdkAttempt(options, before, packages) {
+  try {
+    const result = options.run(options.root, packages);
+    options.log(result.output);
+    const delta = result.status === 3 ? attemptPackageDelta(before, collectFiles(options.root)) : [];
+    if (result.status === 0) options.validate();
+    else undoSdkAttempt(options.root, before);
+    return { ...result, delta };
+  } catch (error) {
+    undoSdkAttempt(options.root, before);
+    throw error;
+  }
+}
+
+function unfilteredNoop(result, unfiltered) {
+  if (!unfiltered || result.status !== 2) return false;
+  return result.output.includes('All packages are up to date');
+}
+
+function requireRetryable(result, attempt) {
+  if (result.status !== 3) throw new Error(`dotnet package update failed (exit ${result.status})`);
+  if (attempt === MAX_UPDATE_ATTEMPTS) throw new Error(`NuGet SDK update exhausted ${MAX_UPDATE_ATTEMPTS} attempts`);
+}
+
+function pruneSelection(result, selected, log) {
+  const reasons = pruneConflicts(result.output, selected, result.delta);
+  for (const [id, reason] of reasons) log(`::notice::Pruned NuGet package '${escapeAnnotation(id)}': ${escapeAnnotation(reason)}`);
+  const remaining = selected.filter((id) => !reasons.has(id));
+  if (remaining.length === 0) throw new Error('No eligible NuGet packages remain after conflict pruning');
+  return remaining;
+}
+
+export function updateWithPruning({ root, packages, unfiltered = false, run = sdkUpdate, validate = () => {}, log = console.log }) {
+  const before = collectFiles(root, isSdkFile);
+  const options = { root, run, validate, log };
+  let selected = [...packages];
+  let attemptIds = unfiltered ? [] : selected;
+  for (let attempt = 1; attempt <= MAX_UPDATE_ATTEMPTS; attempt++) {
+    log(`NuGet SDK update attempt ${attempt}/${MAX_UPDATE_ATTEMPTS}`);
+    const result = sdkAttempt(options, before, attemptIds);
+    if (result.status === 0) return;
+    if (unfilteredNoop(result, unfiltered)) return;
+    requireRetryable(result, attempt);
+    selected = pruneSelection(result, selected, log);
+    attemptIds = selected;
+  }
+}
+
+function runSdkUpdate(values, packages) {
+  if (packages.some((id) => !PACKAGE_ID.test(id))) throw new Error('Invalid selected NuGet package ID');
+  const stateDir = values['state-dir'];
+  const state = readState(stateDir);
+  if (!matchesPrepared(state, collectFiles(state.root))) throw new Error('Manifests changed before SDK update');
+  updateWithPruning({ root: state.root, packages, unfiltered: values.unfiltered, validate: () => verify(stateDir) });
+}
+
 // ----------------------------------------------------------------- commands
 
 function loadInput(values) {
@@ -818,8 +986,10 @@ const COMMANDS = {
 async function main(argv) {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     'dry-run': { type: 'boolean' }, root: { type: 'string' }, stdin: { type: 'boolean' }, 'manifest-path': { type: 'string' },
-    label: { type: 'string' }, exclusions: { type: 'string' }, 'state-dir': { type: 'string' }, 'index-dir': { type: 'string' } } });
+    label: { type: 'string' }, exclusions: { type: 'string' }, 'state-dir': { type: 'string' }, 'index-dir': { type: 'string' },
+    unfiltered: { type: 'boolean' } } });
   const name = values['dry-run'] ? 'preview' : positionals[0] ?? 'preview';
+  if (name === 'update') return runSdkUpdate(values, positionals.slice(1));
   const command = COMMANDS[name];
   if (!command) throw new Error(`Unknown command ${name}`);
   await command(values);
