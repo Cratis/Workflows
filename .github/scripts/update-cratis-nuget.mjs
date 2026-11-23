@@ -1,6 +1,7 @@
 // Copyright (c) Cratis. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 // Keep every locally pinned member of a Cratis NuGet family on one stable version.
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -260,20 +261,28 @@ const importedFiles = (analysis, files, onlyConditional) => analysis.imports
   .map((entry) => importTarget(analysis, entry, files))
   .filter(Boolean);
 
-// Everything a conditional import brings in is conditional, transitively.
-function markConditionalImports(analyses, files) {
+function importClosure(analyses, files, roots) {
   const byFile = new Map(analyses.map((analysis) => [analysis.file, analysis]));
-  const pending = analyses.flatMap((analysis) => importedFiles(analysis, files, true));
+  const pending = [...roots];
   const seen = new Set();
   while (pending.length > 0) {
     const file = pending.pop();
     if (seen.has(file)) continue;
     seen.add(file);
-    const analysis = byFile.get(file);
+    pending.push(...importedFiles(byFile.get(file), files, false));
+  }
+  return seen;
+}
+
+// Everything a conditional import brings in is conditional, transitively.
+function markConditionalImports(analyses, files) {
+  const roots = analyses.flatMap((analysis) => importedFiles(analysis, files, true));
+  const seen = importClosure(analyses, files, roots);
+  for (const analysis of analyses.filter((entry) => seen.has(entry.file))) {
     analysis.declarations.forEach((d) => { d.conditional = true; });
     analysis.properties.forEach((p) => { p.conditional = true; });
-    pending.push(...importedFiles(analysis, files, false));
   }
+  return seen;
 }
 
 function countUses(analyses, name) {
@@ -617,6 +626,136 @@ function checkIds(stateDir, input) {
   }
 }
 
+// ---------------------------------------------------------- restore repair
+
+function requiredDowngradeVersion(id, required, current) {
+  const version = parseVersion(required);
+  const pinned = parseVersion(current);
+  const message = `Unsupported NU1109 versions for ${id}: ${required} / ${current}`;
+  if (!version || !pinned) throw new Error(message);
+  if (compareVersions(version, pinned) <= 0) throw new Error(message);
+  return version;
+}
+
+function downgradeRequirements(output) {
+  const requirements = new Map();
+  const pattern = /\bNU1109: Detected package downgrade: ([A-Za-z0-9_.-]+) from (\S+) to centrally defined (\S+)\./g;
+  for (const [, id, required, current] of output.matchAll(pattern)) {
+    const version = requiredDowngradeVersion(id, required, current);
+    const previous = requirements.get(id.toLowerCase());
+    if (!previous || compareVersions(version, previous.version) > 0) requirements.set(id.toLowerCase(), { id, version });
+  }
+  return [...requirements.values()];
+}
+
+function literalPinSource(element, text, message) {
+  const sources = versionSources(text, element);
+  if (element.attrs.has('update')) throw new Error(message);
+  if (sources.length !== 1) throw new Error(message);
+  const [source] = sources;
+  if (source.conditional) throw new Error(message);
+  if (!parseVersion(source.raw)) throw new Error(message);
+  return source;
+}
+
+function centralPinEdit(candidate, requirement, message) {
+  const { element, text } = candidate;
+  const source = literalPinSource(element, text, message);
+  if (compareVersions(parseVersion(source.raw), requirement.version) >= 0) return null;
+  const id = element.attrs.get('include').value;
+  return { ...source, id, before: source.raw, text: requirement.version.text };
+}
+
+function centralPinCandidates(file, text, id) {
+  return parseXml(text)
+    .filter((element) => element.lname === 'packageversion')
+    .filter((element) => (element.attrs.get('include') ?? element.attrs.get('update'))?.value.toLowerCase() === id.toLowerCase())
+    .map((element) => ({ file, text, element }));
+}
+
+function centralRepairCandidate(files, id) {
+  const analyses = analyzeAll(files);
+  const conditional = markConditionalImports(analyses, files);
+  const roots = analyses.filter((entry) => path.posix.basename(entry.file).toLowerCase() === 'directory.packages.props');
+  const scope = importClosure(analyses, files, roots.map((entry) => entry.file));
+  const candidates = analyses.filter((entry) => scope.has(entry.file))
+    .flatMap((entry) => centralPinCandidates(entry.file, entry.text, id));
+  const names = [...new Set(candidates.map((entry) => entry.file))].sort().join(', ') || '(none)';
+  const message = `Cannot safely raise central pin ${id}: expected exactly one unconditional literal PackageVersion pin outside conditional imports; candidate files: ${names}`;
+  if (candidates.length !== 1) throw new Error(message);
+  const [candidate] = candidates;
+  if (conditional.has(candidate.file)) throw new Error(message);
+  if (hasUnresolvedImport(analyses, files)) throw new Error(`${message}; imports could not be resolved`);
+  return { candidate, message };
+}
+
+function centralRepairsFor(files, requirement) {
+  const { candidate, message } = centralRepairCandidate(files, requirement.id);
+  const edit = centralPinEdit(candidate, requirement, message);
+  return edit ? [[candidate.file, [edit]]] : [];
+}
+
+function planCentralRepairs(files, requirements, exclusions) {
+  const edits = new Map();
+  const excluded = new Set(exclusions.map((id) => id.toLowerCase()));
+  for (const requirement of requirements) {
+    const { id, version } = requirement;
+    if (excluded.has(id.toLowerCase())) throw new Error(`NU1109 requires ${id} ${version.text}, but the package is excluded`);
+    if (familyKey(id)) throw new Error(`NU1109 requires ${id} ${version.text}; cannot raise a Cratis family member independently`);
+    const changes = centralRepairsFor(files, requirement);
+    if (changes.length === 0) throw new Error(`NU1109 requires ${id} ${version.text}, but no repairable central pin was found`);
+    for (const [file, next] of changes) edits.set(file, [...(edits.get(file) ?? []), ...next]);
+  }
+  return edits;
+}
+
+function rememberBeforeImage(stateDir, state, file, text) {
+  if (state.changed[file]) return;
+  state.changed[file] = `before/${Object.keys(state.changed).length}`;
+  fs.writeFileSync(path.join(stateDir, state.changed[file]), text);
+}
+
+function saveCentralRepairs(stateDir, state, files, edits) {
+  const after = new Map(files);
+  for (const [file, changes] of edits) {
+    after.set(file, applyEdits(files.get(file), changes));
+    rememberBeforeImage(stateDir, state, file, files.get(file));
+  }
+  writeEdits(state.root, Object.fromEntries([...edits.keys()].map((file) => [file, true])), files, after);
+  state.hashes = Object.fromEntries([...after].map(([file, text]) => [file, sha(text)]));
+  fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify(state, null, 2));
+  for (const [file, changes] of edits) {
+    for (const change of changes) console.log(`Raised central NuGet pin ${change.id} in ${file}: ${change.before} -> ${change.text}`);
+  }
+}
+
+function restoreOutput(root) {
+  const result = spawnSync('dotnet', ['restore'], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
+    env: { ...process.env, DOTNET_CLI_UI_LANGUAGE: 'en-US' } });
+  if (result.status === 0) return null;
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  console.error(output);
+  if (result.error) throw result.error;
+  return output;
+}
+
+function restoreWithRepairs(stateDir, exclusions) {
+  const state = readState(stateDir);
+  if (state.edited.length === 0) return;
+  const maxRepairs = 3;
+  for (let attempt = 0; attempt <= maxRepairs; attempt++) {
+    const files = collectFiles(state.root);
+    if (!matchesPrepared(state, files)) throw new Error('Manifests changed before central pin repair; refusing to continue');
+    const output = restoreOutput(state.root);
+    if (output === null) return;
+    if (attempt === maxRepairs) throw new Error(`dotnet restore failed after ${maxRepairs} central pin repair attempts`);
+    const requirements = downgradeRequirements(output);
+    if (requirements.length === 0) throw new Error('dotnet restore failed after Cratis family prepare; see NuGet diagnostics above');
+    const edits = planCentralRepairs(files, requirements, exclusions);
+    saveCentralRepairs(stateDir, state, files, edits);
+  }
+}
+
 // ----------------------------------------------------------------- commands
 
 function loadInput(values) {
@@ -665,6 +804,7 @@ async function runPrepare(values) {
 const COMMANDS = {
   preview: runPreview,
   prepare: runPrepare,
+  restore: (values) => restoreWithRepairs(values['state-dir'], parseExclusions(values.exclusions)),
   verify: (values) => verify(values['state-dir']),
   rollback: (values) => rollback(values['state-dir']),
   'check-ids': (values) => checkIds(values['state-dir'], fs.readFileSync(0, 'utf8')),

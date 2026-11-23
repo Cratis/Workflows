@@ -224,11 +224,178 @@ describe('command line', () => {
     fs.mkdirSync(path.join(root, 'index'));
     for (const [id, versions] of Object.entries(table)) fs.writeFileSync(path.join(root, 'index', `${id}.json`), JSON.stringify({ versions }));
     const cli = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', input: '',
-      env: { ...process.env, CRATIS_NUGET_INDEX_DIR: path.join(root, 'index') } });
+      env: { ...process.env, CRATIS_NUGET_INDEX_DIR: path.join(root, 'index'),
+        PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}` } });
     return { root, checkout, state: path.join(root, 'state'), cli, read: (f) => fs.readFileSync(path.join(checkout, f), 'utf8') };
   };
   const files = { 'Directory.Packages.props': props(pin('Cratis.Arc', '1.0.0'), pin('Cratis.Arc.Core', '1.0.0')) };
   const table = { 'cratis.arc': ['1.0.0', '1.1.0'], 'cratis.arc.core': ['1.0.0', '1.1.0'] };
+
+  function downgrade(id = 'Microsoft.Extensions.DependencyModel', required = '10.0.15', current = '10.0.14') {
+    return `Project.csproj : error NU1109: Detected package downgrade: ${id} from ${required} to centrally defined ${current}. Update the centrally managed package version to a higher version.`;
+  }
+
+  function repairWork(outputs, centralPin = pin('Microsoft.Extensions.DependencyModel', '10.0.14'), extra = {}) {
+    const w = work({ ...files, 'Nested/Directory.Packages.props': props(centralPin), ...extra }, table);
+    fs.mkdirSync(path.join(w.root, 'bin'));
+    fs.writeFileSync(path.join(w.root, 'outputs.json'), JSON.stringify(outputs));
+    fs.writeFileSync(path.join(w.root, 'bin/dotnet'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(__dirname, '..', 'outputs.json');
+const outputs = JSON.parse(fs.readFileSync(file, 'utf8'));
+fs.appendFileSync(file + '.calls', process.argv.slice(2).join(' ') + '\\n');
+const output = outputs.shift();
+fs.writeFileSync(file, JSON.stringify(outputs));
+if (output) { console.error(output); process.exit(1); }
+`, { mode: 0o755 });
+    w.calls = () => fs.readFileSync(path.join(w.root, 'outputs.json.calls'), 'utf8').trim().split('\n');
+    const result = w.cli('prepare', '--root', w.checkout, '--state-dir', w.state);
+    assert.equal(result.status, 0, result.stderr);
+    return w;
+  }
+
+  it('repairs to the highest reported minimum, retries restore and rolls back both original files', () => {
+    const w = repairWork([downgrade() + '\n' + downgrade(undefined, '10.0.16'), null]);
+    const before = w.read('Nested/Directory.Packages.props');
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Microsoft.Extensions.DependencyModel.*10.0.14 -> 10.0.16/);
+    assert.equal(w.read('Nested/Directory.Packages.props'), before.replace('10.0.14', '10.0.16'));
+    assert.deepEqual(w.calls(), ['restore', 'restore']);
+    assert.equal(w.cli('verify', '--state-dir', w.state).status, 0);
+    assert.equal(w.cli('rollback', '--state-dir', w.state).status, 0);
+    assert.equal(w.read('Nested/Directory.Packages.props'), before);
+    assert.equal(w.read('Directory.Packages.props'), files['Directory.Packages.props']);
+  });
+
+  it('leaves restore duration to the workflow job rather than imposing a per-call timeout', () => {
+    const w = repairWork([null]);
+    const preload = path.join(w.root, 'assert-restore-options.cjs');
+    fs.writeFileSync(preload, `const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
+const original = childProcess.spawnSync;
+childProcess.spawnSync = (command, args, options) => {
+  assert.equal(command, 'dotnet');
+  assert.equal(options.timeout, undefined);
+  return original(command, args, options);
+};
+require('node:module').syncBuiltinESMExports();
+`);
+    const result = spawnSync(process.execPath, ['--require', preload, SCRIPT, 'restore', '--state-dir', w.state], {
+      encoding: 'utf8', env: { ...process.env, PATH: `${path.join(w.root, 'bin')}${path.delimiter}${process.env.PATH}` },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(w.calls(), ['restore']);
+  });
+
+  const dependencyPin = pin('Microsoft.Extensions.DependencyModel', '10.0.14');
+  const frameworkImports = files['Directory.Packages.props'].replace('</Project>', `<Import Project="Frameworks/net8.props" Condition="'$(TargetFramework)' == 'net8.0'" />
+<Import Project="Frameworks/net10.props" Condition="'$(TargetFramework)' == 'net10.0'" /></Project>`);
+  for (const layout of [
+    { name: 'multiple central files', candidates: ['Nested/Directory.Packages.props', 'Net8/Directory.Packages.props'],
+      extra: { 'Net8/Directory.Packages.props': props(pin('Microsoft.Extensions.DependencyModel', '8.0.0')) } },
+    { name: 'framework-specific imported pins', candidates: ['Frameworks/net8.props', 'Frameworks/net10.props'],
+      extra: { 'Directory.Packages.props': frameworkImports, 'Nested/Directory.Packages.props': '<Project />',
+        'Frameworks/net8.props': props(pin('Microsoft.Extensions.DependencyModel', '8.0.0')),
+        'Frameworks/net10.props': props(dependencyPin) } },
+    { name: 'a single conditional import', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Directory.Build.props': '<Project><Import Project="Nested/Directory.Packages.props" Condition="true" /></Project>' } },
+    { name: 'a transitive conditional import', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Directory.Build.props': '<Project><Import Project="Bridge.props" Condition="true" /></Project>',
+        'Bridge.props': '<Project><Import Project="Nested/Directory.Packages.props" /></Project>' } },
+    { name: 'a conditional ItemGroup', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Nested/Directory.Packages.props': props(dependencyPin).replace('<ItemGroup>', '<ItemGroup Condition="true">') } },
+    { name: 'duplicate declarations in one file', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Nested/Directory.Packages.props': props(dependencyPin, pin('Microsoft.Extensions.DependencyModel', '8.0.0')) } },
+    { name: 'an unresolved import', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Directory.Build.props': '<Project><Import Project="$(UnknownPath)/Versions.props" /></Project>' } },
+  ]) {
+    it(`fails closed without editing any manifest for ${layout.name}`, () => {
+      const w = repairWork([downgrade()], dependencyPin, layout.extra);
+      const before = Object.fromEntries(Object.keys({ ...files, 'Nested/Directory.Packages.props': '', ...layout.extra })
+        .map((file) => [file, w.read(file)]));
+      const result = w.cli('restore', '--state-dir', w.state);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /::error::Cannot safely raise central pin Microsoft.Extensions.DependencyModel/);
+      assert.match(result.stderr, /expected exactly one unconditional literal PackageVersion pin/);
+      for (const file of layout.candidates) assert.ok(result.stderr.includes(file), result.stderr);
+      for (const [file, text] of Object.entries(before)) assert.equal(w.read(file), text);
+      assert.deepEqual(w.calls(), ['restore']);
+    });
+  }
+
+  it('repairs a unique literal pin in an unconditionally imported central file', () => {
+    const w = repairWork([downgrade(), null], '', {
+      'Directory.Packages.props': files['Directory.Packages.props'].replace('</Project>', '<Import Project="Frameworks/shared.props" /></Project>'),
+      'Frameworks/shared.props': props(dependencyPin),
+    });
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(w.read('Frameworks/shared.props'), props(dependencyPin).replace('10.0.14', '10.0.15'));
+    assert.equal(w.cli('verify', '--state-dir', w.state).status, 0);
+    assert.equal(w.cli('rollback', '--state-dir', w.state).status, 0);
+    assert.equal(w.read('Frameworks/shared.props'), props(dependencyPin));
+  });
+
+  it('honors case-insensitive exclusions without writing any central pins', () => {
+    const w = repairWork([downgrade()]);
+    const before = w.read('Nested/Directory.Packages.props');
+    const result = w.cli('restore', '--state-dir', w.state, '--exclusions', 'microsoft.extensions.dependencymodel');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /NU1109[\s\S]*package is excluded/);
+    assert.equal(w.read('Nested/Directory.Packages.props'), before);
+    assert.deepEqual(w.calls(), ['restore']);
+  });
+
+  it('surfaces unrelated failures after a repair and retains the original before-image', () => {
+    const w = repairWork([downgrade(), 'error NU1301: Unable to load the service index']);
+    const before = w.read('Nested/Directory.Packages.props');
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /NU1301/);
+    assert.equal(w.cli('rollback', '--state-dir', w.state).status, 0);
+    assert.equal(w.read('Nested/Directory.Packages.props'), before);
+  });
+
+  it('bounds repairs to three attempts and keeps the original pins for rollback', () => {
+    const w = repairWork(['10.0.15', '10.0.16', '10.0.17', '10.0.18'].map((v) => downgrade(undefined, v)));
+    const before = w.read('Nested/Directory.Packages.props');
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /failed after 3 central pin repair attempts/);
+    assert.deepEqual(w.calls(), ['restore', 'restore', 'restore', 'restore']);
+    assert.equal(w.cli('rollback', '--state-dir', w.state).status, 0);
+    assert.equal(w.read('Nested/Directory.Packages.props'), before);
+  });
+
+  it('refuses property, range, conditional and Update central pins without editing them', () => {
+    for (const centralPin of [pin('Microsoft.Extensions.DependencyModel', '$(SharedVersion)'),
+      pin('Microsoft.Extensions.DependencyModel', '[10.0.14,11.0.0)'),
+      '<PackageVersion Include="Microsoft.Extensions.DependencyModel" Version="10.0.14" Condition="true" />',
+      '<PackageVersion Include="Microsoft.Extensions.DependencyModel"><Version Condition="true">10.0.14</Version></PackageVersion>',
+      '<PackageVersion Update="Microsoft.Extensions.DependencyModel" Version="10.0.14" />']) {
+      const w = repairWork([downgrade()], centralPin);
+      const before = w.read('Nested/Directory.Packages.props');
+      const result = w.cli('restore', '--state-dir', w.state);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /expected exactly one unconditional literal PackageVersion pin/);
+      assert.equal(w.read('Nested/Directory.Packages.props'), before);
+    }
+  });
+
+  it('refuses an independent Cratis member repair', () => {
+    const w = repairWork([downgrade('Cratis.Arc', '1.2.0', '1.1.0')]);
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /cannot raise a Cratis family member independently/);
+  });
+
+  it('skips restore when no Cratis family changed', () => {
+    const w = work({ 'Directory.Packages.props': props(pin('Serilog', '1.0.0')) }, {});
+    assert.equal(w.cli('prepare', '--root', w.checkout, '--state-dir', w.state).status, 0);
+    assert.equal(w.cli('restore', '--state-dir', w.state).status, 0);
+  });
 
   it('does not write anything in dry-run mode', () => {
     const w = work(files, table);
