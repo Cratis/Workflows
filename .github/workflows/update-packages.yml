@@ -1196,51 +1196,62 @@ jobs:
           }
           trap cratis_undo EXIT
           node "$cratis_helper" restore --state-dir "$cratis_state" --exclusions "$NUGET_PACKAGE_EXCLUSIONS"
+          # Use the SDK's resolved top-level references, not XML text: this includes
+          # project references whose versions live in Directory.Packages.props.
+          extract_ids() {
+            # Slurp requires exactly one document: jq -r alone accepts empty output.
+            jq -s -r --arg mode "$1" '
+              def valid:
+                .version == 1 and (.projects | type == "array") and
+                (.problems == null or ((.problems | type == "array") and
+                  all(.problems[]; .level != "error"))) and
+                all(.projects[]; ((.frameworks // []) | type == "array") and
+                  all((.frameworks // [])[]; ((.topLevelPackages // []) | type == "array") and
+                    all((.topLevelPackages // [])[];
+                      (.id | type == "string") and
+                      (.id | test("^[A-Za-z0-9][A-Za-z0-9_.-]*$")) and
+                      (.requestedVersion | type == "string"))));
+              if length == 1 and (.[0] | valid) then
+                [.[0].projects[] | (.frameworks // [])[] | (.topLevelPackages // [])[]
+                  | select($mode == "all" or (.requestedVersion | contains("-"))) | .id]
+                | unique_by(ascii_downcase) | .[]
+              else error("Unexpected dotnet package list JSON or package listing error") end
+            '
+          }
+          list_packages() {
+            local output status
+            if output=$(dotnet package list "$@" --format json); then
+              if extract_ids all <<< "$output" >/dev/null; then
+                printf '%s\n' "$output"
+                return 0
+              fi
+            else
+              status=$?
+              printf 'dotnet package list exited %s\n' "$status" >&2
+            fi
+            printf '%s\n' "$output" >&2
+            # JSON reports only "Restore failed"; expose the actual NuGet codes too.
+            dotnet restore >&2 || true
+            printf '::error::dotnet package list %s failed; see listing and restore diagnostics above\n' "$*" >&2
+            return 1
+          }
+          inventory=$(list_packages)
+          # Divergent references can span projects that each target only one framework.
+          # Treat these as intentional per-TFM pins and exclude the ID everywhere:
+          # never update part of a package, even across separate projects.
+          per_tfm_ids=$(jq -r '
+            [.projects[] | (.frameworks // [])[]
+              | (.topLevelPackages // [])[]
+              | {id: .id, version: .requestedVersion}]
+            | group_by(.id | ascii_downcase)
+            | map(select(([.[].version] | unique | length) > 1) | .[0].id)
+            | unique_by(ascii_downcase) | .[]
+          ' <<< "$inventory")
           filtered=false
-          if [[ -n "$NUGET_PACKAGE_EXCLUSIONS" || -n "$cratis_ids" ]]; then
+          if [[ -n "$NUGET_PACKAGE_EXCLUSIONS" || -n "$cratis_ids" || -n "$per_tfm_ids" ]]; then
             filtered=true
           fi
           if [[ "$filtered" == true ]]; then
-            # Use the SDK's resolved top-level references, not XML text: this includes
-            # project references whose versions live in Directory.Packages.props.
-            extract_ids() {
-              # Slurp requires exactly one document: jq -r alone accepts empty output.
-              jq -s -r --arg mode "$1" '
-                def valid:
-                  .version == 1 and (.projects | type == "array") and
-                  (.problems == null or ((.problems | type == "array") and
-                    all(.problems[]; .level != "error"))) and
-                  all(.projects[]; ((.frameworks // []) | type == "array") and
-                    all((.frameworks // [])[]; ((.topLevelPackages // []) | type == "array") and
-                      all((.topLevelPackages // [])[];
-                        (.id | type == "string") and
-                        (.id | test("^[A-Za-z0-9][A-Za-z0-9_.-]*$")) and
-                        (.requestedVersion | type == "string"))));
-                if length == 1 and (.[0] | valid) then
-                  [.[0].projects[] | (.frameworks // [])[] | (.topLevelPackages // [])[]
-                    | select($mode == "all" or (.requestedVersion | contains("-"))) | .id]
-                  | unique_by(ascii_downcase) | .[]
-                else error("Unexpected dotnet package list JSON or package listing error") end
-              '
-            }
-            list_packages() {
-              local output status
-              if output=$(dotnet package list "$@" --format json); then
-                if extract_ids all <<< "$output" >/dev/null; then
-                  printf '%s\n' "$output"
-                  return 0
-                fi
-              else
-                status=$?
-                printf 'dotnet package list exited %s\n' "$status" >&2
-              fi
-              printf '%s\n' "$output" >&2
-              # JSON reports only "Restore failed"; expose the actual NuGet codes too.
-              dotnet restore >&2 || true
-              printf '::error::dotnet package list %s failed; see listing and restore diagnostics above\n' "$*" >&2
-              return 1
-            }
-            inventory=$(list_packages)
             outdated=$(list_packages --outdated)
             referenced_ids=$(extract_ids all <<< "$inventory")
             # A Cratis package the manifests do not pin is protected too; if it belongs to a
@@ -1296,6 +1307,13 @@ jobs:
                 excluded_keys="${excluded_keys}${key}"$'\n'
               fi
             done <<< "$cratis_ids"
+            while IFS= read -r id; do
+              if [[ -n "$id" ]]; then
+                key=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
+                excluded_keys="${excluded_keys}${key}"$'\n'
+                printf "::notice::NuGet package '%s' is per-TFM-pinned (different requested versions across target frameworks); excluding it from this run's automated update.\n" "$id"
+              fi
+            done <<< "$per_tfm_ids"
             selected_keys=''
             while IFS= read -r id; do
               if [[ -z "$id" ]]; then continue; fi
@@ -1314,28 +1332,6 @@ jobs:
               node "$cratis_helper" verify --state-dir "$cratis_state" || exit 1
               cratis_keep=true
               exit 0
-            fi
-            # Explicit-ID updates silently skip a package when its requested
-            # versions differ between TFMs in one project, even if other IDs
-            # update successfully. Reject that case before writing any changes.
-            eligible_ids=$(printf '%s\n' "${packages[@]}")
-            if ! jq -e --arg ids "$eligible_ids" '
-              ($ids | split("\n") | map(ascii_downcase)) as $eligible
-              | [.projects[] | .path as $path | (.frameworks // [])[]
-                  | (.topLevelPackages // [])[]
-                  | select((.id | ascii_downcase) as $id | $eligible | index($id))
-                  | {path: $path, id: (.id | ascii_downcase), version: .requestedVersion}]
-              | group_by([.path, .id])
-              | all(.[]; ([.[].version] | unique | length) == 1)
-            ' <<< "$inventory" >/dev/null; then
-              if [[ -z "$NUGET_PACKAGE_EXCLUSIONS" ]]; then
-                # Without exclusions the unfiltered SDK would have exited 3 here and the step skipped;
-                # Cratis pins only made the run filtered, so keep that outcome and undo the family edits.
-                echo "dotnet package update could not produce a consistent result (target-framework overrides); skipping NuGet update for this run."
-                exit 0
-              fi
-              echo 'Eligible NuGet package has different requested versions across target frameworks; refusing partial update.' >&2
-              exit 1
             fi
           fi
 
@@ -1374,7 +1370,7 @@ jobs:
             # it (e.g. CentralPackageTransitivePinningEnabled). Neither is actionable here, and
             # since no changes are written to disk in either case, skipping is safe
             # with or without exclusions. Divergent per-TFM versions of eligible
-            # references are rejected above before invoking the filtered updater. The resolver's
+            # references are excluded above before invoking the filtered updater. The resolver's
             # own family edits are the exception: undo exactly those, or fail if anything else moved.
             node "$cratis_helper" rollback --state-dir "$cratis_state" || exit 1
             echo "dotnet package update could not produce a consistent result (exit 3); skipping NuGet update for this run."
