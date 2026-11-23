@@ -613,20 +613,28 @@ jobs:
             .map((entry) => importTarget(analysis, entry, files))
             .filter(Boolean);
 
-          // Everything a conditional import brings in is conditional, transitively.
-          function markConditionalImports(analyses, files) {
+          function importClosure(analyses, files, roots) {
             const byFile = new Map(analyses.map((analysis) => [analysis.file, analysis]));
-            const pending = analyses.flatMap((analysis) => importedFiles(analysis, files, true));
+            const pending = [...roots];
             const seen = new Set();
             while (pending.length > 0) {
               const file = pending.pop();
               if (seen.has(file)) continue;
               seen.add(file);
-              const analysis = byFile.get(file);
+              pending.push(...importedFiles(byFile.get(file), files, false));
+            }
+            return seen;
+          }
+
+          // Everything a conditional import brings in is conditional, transitively.
+          function markConditionalImports(analyses, files) {
+            const roots = analyses.flatMap((analysis) => importedFiles(analysis, files, true));
+            const seen = importClosure(analyses, files, roots);
+            for (const analysis of analyses.filter((entry) => seen.has(entry.file))) {
               analysis.declarations.forEach((d) => { d.conditional = true; });
               analysis.properties.forEach((p) => { p.conditional = true; });
-              pending.push(...importedFiles(analysis, files, false));
             }
+            return seen;
           }
 
           function countUses(analyses, name) {
@@ -992,33 +1000,51 @@ jobs:
             return [...requirements.values()];
           }
 
-          function centralPinEdit(file, element, text, requirement) {
-            const id = (element.attrs.get('include') ?? element.attrs.get('update')).value;
+          function literalPinSource(element, text, message) {
             const sources = versionSources(text, element);
-            const message = `Cannot safely raise central pin ${id} in ${file}: expected one unconditional literal version`;
             if (element.attrs.has('update')) throw new Error(message);
             if (sources.length !== 1) throw new Error(message);
             const [source] = sources;
             if (source.conditional) throw new Error(message);
-            const current = parseVersion(source.raw);
-            if (!current) throw new Error(message);
-            if (compareVersions(current, requirement.version) >= 0) return null;
+            if (!parseVersion(source.raw)) throw new Error(message);
+            return source;
+          }
+
+          function centralPinEdit(candidate, requirement, message) {
+            const { element, text } = candidate;
+            const source = literalPinSource(element, text, message);
+            if (compareVersions(parseVersion(source.raw), requirement.version) >= 0) return null;
+            const id = element.attrs.get('include').value;
             return { ...source, id, before: source.raw, text: requirement.version.text };
           }
 
-          function centralPinEdits(file, text, requirement) {
+          function centralPinCandidates(file, text, id) {
             return parseXml(text)
               .filter((element) => element.lname === 'packageversion')
-              .filter((element) => (element.attrs.get('include') ?? element.attrs.get('update'))?.value.toLowerCase() === requirement.id.toLowerCase())
-              .map((element) => centralPinEdit(file, element, text, requirement))
-              .filter(Boolean);
+              .filter((element) => (element.attrs.get('include') ?? element.attrs.get('update'))?.value.toLowerCase() === id.toLowerCase())
+              .map((element) => ({ file, text, element }));
+          }
+
+          function centralRepairCandidate(files, id) {
+            const analyses = analyzeAll(files);
+            const conditional = markConditionalImports(analyses, files);
+            const roots = analyses.filter((entry) => path.posix.basename(entry.file).toLowerCase() === 'directory.packages.props');
+            const scope = importClosure(analyses, files, roots.map((entry) => entry.file));
+            const candidates = analyses.filter((entry) => scope.has(entry.file))
+              .flatMap((entry) => centralPinCandidates(entry.file, entry.text, id));
+            const names = [...new Set(candidates.map((entry) => entry.file))].sort().join(', ') || '(none)';
+            const message = `Cannot safely raise central pin ${id}: expected exactly one unconditional literal PackageVersion pin outside conditional imports; candidate files: ${names}`;
+            if (candidates.length !== 1) throw new Error(message);
+            const [candidate] = candidates;
+            if (conditional.has(candidate.file)) throw new Error(message);
+            if (hasUnresolvedImport(analyses, files)) throw new Error(`${message}; imports could not be resolved`);
+            return { candidate, message };
           }
 
           function centralRepairsFor(files, requirement) {
-            return [...files]
-              .filter(([file]) => path.posix.basename(file).toLowerCase() === 'directory.packages.props')
-              .map(([file, text]) => [file, centralPinEdits(file, text, requirement)])
-              .filter(([, changes]) => changes.length > 0);
+            const { candidate, message } = centralRepairCandidate(files, requirement.id);
+            const edit = centralPinEdit(candidate, requirement, message);
+            return edit ? [[candidate.file, [edit]]] : [];
           }
 
           function planCentralRepairs(files, requirements, exclusions) {
@@ -1056,7 +1082,7 @@ jobs:
           }
 
           function restoreOutput(root) {
-            const result = spawnSync('dotnet', ['restore'], { cwd: root, encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024,
+            const result = spawnSync('dotnet', ['restore'], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
               env: { ...process.env, DOTNET_CLI_UI_LANGUAGE: 'en-US' } });
             if (result.status === 0) return null;
             const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;

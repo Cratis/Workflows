@@ -995,6 +995,43 @@ class UpdatePackagesTests(unittest.TestCase):
         self.assertEqual(self.sdk_updates(), [])
         self.assert_not_published()
 
+    def test_nuget_ambiguous_framework_pins_fail_without_modifying_any_central_files(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade()])
+        candidate = "Frameworks/Net8/Directory.Packages.props"
+        self.props_text = self.props_text.replace("</Project>", f'<Import Project="{candidate}" Condition="\'$(TargetFramework)\' == \'net8.0\'" /></Project>')
+        (self.repo / self.PROPS).write_text(self.props_text)
+        other = self.repo / candidate
+        other.parent.mkdir(parents=True)
+        before = '<Project><ItemGroup><PackageVersion Include="Microsoft.Extensions.DependencyModel" Version="8.0.0" /></ItemGroup></Project>'
+        other.write_text(before)
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("::error::Cannot safely raise central pin Microsoft.Extensions.DependencyModel", self.last_result.stderr)
+        self.assertIn("candidate files:", self.last_result.stderr)
+        self.assertIn(self.PROPS, self.last_result.stderr)
+        self.assertIn(candidate, self.last_result.stderr)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(other.read_text(), before)
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "restore"]])
+        self.assert_not_published()
+
+    def test_nuget_conditionally_imported_single_pin_fails_closed_and_rolls_back(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade()])
+        candidate = "Frameworks/Versions.props"
+        declaration = '<PackageVersion Include="Microsoft.Extensions.DependencyModel" Version="10.0.14" />'
+        self.props_text = self.props_text.replace(declaration, "").replace("</Project>", f'<Import Project="{candidate}" Condition="true" /></Project>')
+        (self.repo / self.PROPS).write_text(self.props_text)
+        other = self.repo / candidate
+        other.parent.mkdir(parents=True)
+        before = f"<Project><ItemGroup>{declaration}</ItemGroup></Project>"
+        other.write_text(before)
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("::error::Cannot safely raise central pin Microsoft.Extensions.DependencyModel", self.last_result.stderr)
+        self.assertIn(f"candidate files: {candidate}", self.last_result.stderr)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(other.read_text(), before)
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "restore"]])
+        self.assert_not_published()
+
     def test_nuget_complete_cratis_family_updates_together_and_never_reaches_the_sdk(self):
         self.cratis_family([("Cratis.Chronicle", "1.0.0"), ("Cratis.Chronicle.Api", "1.0.0")],
                            {"Cratis.Chronicle": ["1.0.0", "1.0.9", "1.0.10"], "Cratis.Chronicle.Api": ["1.0.0", "1.0.9", "1.0.10"]})
