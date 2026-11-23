@@ -304,8 +304,13 @@ require('node:module').syncBuiltinESMExports();
     { name: 'a transitive conditional import', candidates: ['Nested/Directory.Packages.props'],
       extra: { 'Directory.Build.props': '<Project><Import Project="Bridge.props" Condition="true" /></Project>',
         'Bridge.props': '<Project><Import Project="Nested/Directory.Packages.props" /></Project>' } },
-    { name: 'a conditional ItemGroup', candidates: ['(none)'],
+    { name: 'a conditional ItemGroup', candidates: ['Nested/Directory.Packages.props'],
       extra: { 'Nested/Directory.Packages.props': props(dependencyPin).replace('<ItemGroup>', '<ItemGroup Condition="true">') } },
+    { name: 'a conditional Project', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Nested/Directory.Packages.props': props(dependencyPin).replace('<Project>', '<Project Condition="true">') } },
+    { name: 'a Choose/When wrapper', candidates: ['Nested/Directory.Packages.props'],
+      extra: { 'Nested/Directory.Packages.props': props(dependencyPin).replace('<Project>', '<Project><Choose><When Condition="true">')
+        .replace('</Project>', '</When></Choose></Project>') } },
     { name: 'duplicate declarations in one file', candidates: ['Nested/Directory.Packages.props'],
       extra: { 'Nested/Directory.Packages.props': props(dependencyPin, pin('Microsoft.Extensions.DependencyModel', '8.0.0')) } },
     { name: 'two unconditional Includes across a central file and its import', candidates: ['Directory.Packages.props', 'Directory.Packages.NET11.props'],
@@ -373,6 +378,35 @@ require('node:module').syncBuiltinESMExports();
     });
   }
 
+  it('fails closed when NuGet reports the stale NET11 Update rather than the unconditional Include', () => {
+    const central = files['Directory.Packages.props'].replace('</ItemGroup>', `${dependencyPin}</ItemGroup>`)
+      .replace('</Project>', '<Import Project="Directory.Packages.NET11.props" /></Project>');
+    const net11 = props('<PackageVersion Update="Microsoft.Extensions.DependencyModel" Version="11.0.0" />')
+      .replace('<ItemGroup>', '<ItemGroup Condition="\'$(TargetFramework)\' == \'net11.0\'">');
+    const w = repairWork([downgrade(undefined, '11.0.1', '11.0.0')], '', {
+      'Directory.Packages.props': central, 'Directory.Packages.NET11.props': net11,
+    });
+    const before = w.read('Directory.Packages.props');
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /::error::Cannot safely raise central pin Microsoft.Extensions.DependencyModel:.*centrally defined version 11\.0\.0.*candidate Directory\.Packages\.props.*literal Version 10\.0\.14/);
+    assert.equal(w.read('Directory.Packages.props'), before);
+    assert.equal(w.read('Directory.Packages.NET11.props'), net11);
+    assert.deepEqual(w.calls(), ['restore']);
+    assert.equal(w.cli('verify', '--state-dir', w.state).status, 0);
+  });
+
+  it('rejects conflicting centrally defined versions across NU1109 reports without writing any pins', () => {
+    const w = repairWork([downgrade() + '\n' + downgrade(undefined, '11.0.1', '11.0.0')]);
+    const before = w.read('Nested/Directory.Packages.props');
+    const result = w.cli('restore', '--state-dir', w.state);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Conflicting NU1109 centrally defined versions for Microsoft.Extensions.DependencyModel: 10\.0\.14 \/ 11\.0\.0/);
+    assert.equal(w.read('Nested/Directory.Packages.props'), before);
+    assert.deepEqual(w.calls(), ['restore']);
+    assert.equal(w.cli('verify', '--state-dir', w.state).status, 0);
+  });
+
   it('honors case-insensitive exclusions without writing any central pins', () => {
     const w = repairWork([downgrade()]);
     const before = w.read('Nested/Directory.Packages.props');
@@ -394,7 +428,8 @@ require('node:module').syncBuiltinESMExports();
   });
 
   it('bounds repairs to three attempts and keeps the original pins for rollback', () => {
-    const w = repairWork(['10.0.15', '10.0.16', '10.0.17', '10.0.18'].map((v) => downgrade(undefined, v)));
+    const w = repairWork(['10.0.15', '10.0.16', '10.0.17', '10.0.18']
+      .map((v, i, versions) => downgrade(undefined, v, i === 0 ? '10.0.14' : versions[i - 1])));
     const before = w.read('Nested/Directory.Packages.props');
     const result = w.cli('restore', '--state-dir', w.state);
     assert.notEqual(result.status, 0);
@@ -415,6 +450,7 @@ require('node:module').syncBuiltinESMExports();
       const result = w.cli('restore', '--state-dir', w.state);
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /expected exactly one unconditional literal PackageVersion pin/);
+      assert.match(result.stderr, /candidate files: Nested\/Directory\.Packages\.props/);
       assert.equal(w.read('Nested/Directory.Packages.props'), before);
     }
   });
