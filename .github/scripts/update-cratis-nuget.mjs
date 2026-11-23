@@ -643,7 +643,8 @@ function downgradeRequirements(output) {
   for (const [, id, required, current] of output.matchAll(pattern)) {
     const version = requiredDowngradeVersion(id, required, current);
     const previous = requirements.get(id.toLowerCase());
-    if (!previous || compareVersions(version, previous.version) > 0) requirements.set(id.toLowerCase(), { id, version });
+    if (previous && previous.current !== current) throw new Error(`Conflicting NU1109 centrally defined versions for ${id}: ${previous.current} / ${current}`);
+    if (!previous || compareVersions(version, previous.version) > 0) requirements.set(id.toLowerCase(), { id, version, current });
   }
   return [...requirements.values()];
 }
@@ -661,8 +662,11 @@ function literalPinSource(element, text, message) {
 function centralPinEdit(candidate, requirement, message) {
   const { element, text } = candidate;
   const source = literalPinSource(element, text, message);
-  if (compareVersions(parseVersion(source.raw), requirement.version) >= 0) return null;
   const id = element.attrs.get('include').value;
+  if (source.raw !== requirement.current) {
+    throw new Error(`Cannot safely raise central pin ${id}: NuGet reported centrally defined version ${requirement.current}, but candidate ${candidate.file} has literal Version ${source.raw}`);
+  }
+  if (compareVersions(parseVersion(source.raw), requirement.version) >= 0) return null;
   return { ...source, id, before: source.raw, text: requirement.version.text };
 }
 
@@ -678,9 +682,10 @@ function centralRepairCandidate(files, id) {
   const conditional = markConditionalImports(analyses, files);
   const roots = analyses.filter((entry) => path.posix.basename(entry.file).toLowerCase() === 'directory.packages.props');
   const scope = importClosure(analyses, files, roots.map((entry) => entry.file));
-  const candidates = analyses.filter((entry) => scope.has(entry.file))
+  const matches = analyses.filter((entry) => scope.has(entry.file))
     .flatMap((entry) => centralPinCandidates(entry.file, entry.text, id));
-  const names = [...new Set(candidates.map((entry) => entry.file))].sort().join(', ') || '(none)';
+  const candidates = matches.filter(({ element }) => !element.attrs.has('update') && !isConditional(element));
+  const names = [...new Set(matches.map((entry) => entry.file))].sort().join(', ') || '(none)';
   const message = `Cannot safely raise central pin ${id}: expected exactly one unconditional literal PackageVersion pin outside conditional imports; candidate files: ${names}`;
   if (candidates.length !== 1) throw new Error(message);
   const [candidate] = candidates;
