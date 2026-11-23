@@ -1,6 +1,7 @@
 // Copyright (c) Cratis. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 // Keep every locally pinned member of a Cratis NuGet family on one stable version.
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -617,6 +618,118 @@ function checkIds(stateDir, input) {
   }
 }
 
+// ---------------------------------------------------------- restore repair
+
+function requiredDowngradeVersion(id, required, current) {
+  const version = parseVersion(required);
+  const pinned = parseVersion(current);
+  const message = `Unsupported NU1109 versions for ${id}: ${required} / ${current}`;
+  if (!version || !pinned) throw new Error(message);
+  if (compareVersions(version, pinned) <= 0) throw new Error(message);
+  return version;
+}
+
+function downgradeRequirements(output) {
+  const requirements = new Map();
+  const pattern = /\bNU1109: Detected package downgrade: ([A-Za-z0-9_.-]+) from (\S+) to centrally defined (\S+)\./g;
+  for (const [, id, required, current] of output.matchAll(pattern)) {
+    const version = requiredDowngradeVersion(id, required, current);
+    const previous = requirements.get(id.toLowerCase());
+    if (!previous || compareVersions(version, previous.version) > 0) requirements.set(id.toLowerCase(), { id, version });
+  }
+  return [...requirements.values()];
+}
+
+function centralPinEdit(file, element, text, requirement) {
+  const id = (element.attrs.get('include') ?? element.attrs.get('update')).value;
+  const sources = versionSources(text, element);
+  const message = `Cannot safely raise central pin ${id} in ${file}: expected one unconditional literal version`;
+  if (element.attrs.has('update')) throw new Error(message);
+  if (sources.length !== 1) throw new Error(message);
+  const [source] = sources;
+  if (source.conditional) throw new Error(message);
+  const current = parseVersion(source.raw);
+  if (!current) throw new Error(message);
+  if (compareVersions(current, requirement.version) >= 0) return null;
+  return { ...source, id, before: source.raw, text: requirement.version.text };
+}
+
+function centralPinEdits(file, text, requirement) {
+  return parseXml(text)
+    .filter((element) => element.lname === 'packageversion')
+    .filter((element) => (element.attrs.get('include') ?? element.attrs.get('update'))?.value.toLowerCase() === requirement.id.toLowerCase())
+    .map((element) => centralPinEdit(file, element, text, requirement))
+    .filter(Boolean);
+}
+
+function centralRepairsFor(files, requirement) {
+  return [...files]
+    .filter(([file]) => path.posix.basename(file).toLowerCase() === 'directory.packages.props')
+    .map(([file, text]) => [file, centralPinEdits(file, text, requirement)])
+    .filter(([, changes]) => changes.length > 0);
+}
+
+function planCentralRepairs(files, requirements, exclusions) {
+  const edits = new Map();
+  const excluded = new Set(exclusions.map((id) => id.toLowerCase()));
+  for (const requirement of requirements) {
+    const { id, version } = requirement;
+    if (excluded.has(id.toLowerCase())) throw new Error(`NU1109 requires ${id} ${version.text}, but the package is excluded`);
+    if (familyKey(id)) throw new Error(`NU1109 requires ${id} ${version.text}; cannot raise a Cratis family member independently`);
+    const changes = centralRepairsFor(files, requirement);
+    if (changes.length === 0) throw new Error(`NU1109 requires ${id} ${version.text}, but no repairable central pin was found`);
+    for (const [file, next] of changes) edits.set(file, [...(edits.get(file) ?? []), ...next]);
+  }
+  return edits;
+}
+
+function rememberBeforeImage(stateDir, state, file, text) {
+  if (state.changed[file]) return;
+  state.changed[file] = `before/${Object.keys(state.changed).length}`;
+  fs.writeFileSync(path.join(stateDir, state.changed[file]), text);
+}
+
+function saveCentralRepairs(stateDir, state, files, edits) {
+  const after = new Map(files);
+  for (const [file, changes] of edits) {
+    after.set(file, applyEdits(files.get(file), changes));
+    rememberBeforeImage(stateDir, state, file, files.get(file));
+  }
+  writeEdits(state.root, Object.fromEntries([...edits.keys()].map((file) => [file, true])), files, after);
+  state.hashes = Object.fromEntries([...after].map(([file, text]) => [file, sha(text)]));
+  fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify(state, null, 2));
+  for (const [file, changes] of edits) {
+    for (const change of changes) console.log(`Raised central NuGet pin ${change.id} in ${file}: ${change.before} -> ${change.text}`);
+  }
+}
+
+function restoreOutput(root) {
+  const result = spawnSync('dotnet', ['restore'], { cwd: root, encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024,
+    env: { ...process.env, DOTNET_CLI_UI_LANGUAGE: 'en-US' } });
+  if (result.status === 0) return null;
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  console.error(output);
+  if (result.error) throw result.error;
+  return output;
+}
+
+function restoreWithRepairs(stateDir, exclusions) {
+  const state = readState(stateDir);
+  if (state.edited.length === 0) return;
+  const maxRepairs = 3;
+  for (let attempt = 0; attempt <= maxRepairs; attempt++) {
+    const files = collectFiles(state.root);
+    if (!matchesPrepared(state, files)) throw new Error('Manifests changed before central pin repair; refusing to continue');
+    const output = restoreOutput(state.root);
+    if (output === null) return;
+    if (attempt === maxRepairs) throw new Error(`dotnet restore failed after ${maxRepairs} central pin repair attempts`);
+    const requirements = downgradeRequirements(output);
+    if (requirements.length === 0) throw new Error('dotnet restore failed after Cratis family prepare; see NuGet diagnostics above');
+    const edits = planCentralRepairs(files, requirements, exclusions);
+    saveCentralRepairs(stateDir, state, files, edits);
+  }
+}
+
 // ----------------------------------------------------------------- commands
 
 function loadInput(values) {
@@ -665,6 +778,7 @@ async function runPrepare(values) {
 const COMMANDS = {
   preview: runPreview,
   prepare: runPrepare,
+  restore: (values) => restoreWithRepairs(values['state-dir'], parseExclusions(values.exclusions)),
   verify: (values) => verify(values['state-dir']),
   rollback: (values) => rollback(values['state-dir']),
   'check-ids': (values) => checkIds(values['state-dir'], fs.readFileSync(0, 'utf8')),

@@ -224,9 +224,22 @@ else:
     if name == "yarn" and args == ["--version"]:
         print(os.environ.get("YARN_VERSION", "4.18.1"))
         sys.exit(0)
+    if name == "dotnet" and args == ["restore"]:
+        counter = Path(os.environ["COMMAND_LOG"] + ".restores")
+        attempt = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(attempt + 1))
+        outputs = json.loads(os.environ.get("RESTORE_OUTPUTS", "[]"))
+        output = outputs[attempt] if attempt < len(outputs) else None
+        if output:
+            print(output, file=sys.stderr)
+            sys.exit(1)
     if name == "dotnet" and args[:2] == ["package", "list"]:
         key = ("DOTNET_PRERELEASE" if "--include-prerelease" in args else
                "DOTNET_OUTDATED" if "--outdated" in args else "DOTNET_INVENTORY")
+        if os.environ.get("LIST_ERROR_KIND") == key:
+            print(os.environ["LIST_ERROR_OUTPUT"])
+            print("package listing stderr detail", file=sys.stderr)
+            sys.exit(19)
         print(os.environ.get(key, os.environ.get("DOTNET_OUTDATED", "")))
         sys.exit(int(os.environ.get("LIST_EXIT", "0")))
     if name == "dotnet" and args[:2] == ["package", "update"] and os.environ.get("UPDATE_REWRITE"):
@@ -844,8 +857,28 @@ class UpdatePackagesTests(unittest.TestCase):
                 data["problems"] = json.loads(nuget_json("restore-failure-outdated"))["problems"]
                 self.env[name] = json.dumps(data)
                 self.env["NUGET_PACKAGE_EXCLUSIONS"] = "Newtonsoft.Json"
+                self.env["RESTORE_OUTPUTS"] = json.dumps(["error NU1301: Unable to load the service index"] * 3)
                 self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+                self.assertIn("Restore failed", self.last_result.stderr)
+                self.assertIn("NU1301", self.last_result.stderr)
+                self.assertIn(["dotnet", "restore"], self.calls("dotnet"))
                 self.assertFalse(any(call[1:3] == ["package", "update"] for call in self.calls("dotnet")))
+
+    def test_nuget_nonzero_listing_prints_stdout_stderr_and_nuget_diagnostics_for_all_lists(self):
+        for kind in ("DOTNET_INVENTORY", "DOTNET_OUTDATED", "DOTNET_PRERELEASE"):
+            with self.subTest(listing=kind):
+                self.log.unlink(missing_ok=True)
+                self.nuget_fixture("prerelease")
+                self.env.update(NUGET_PACKAGE_EXCLUSIONS="Newtonsoft.Json", LIST_ERROR_KIND=kind,
+                                LIST_ERROR_OUTPUT='{"problems":[{"text":"Restore failed","level":"error"}]}',
+                                RESTORE_OUTPUTS=json.dumps(["error NU1301: diagnostic restore failure"] * 3))
+                self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+                self.assertIn("Restore failed", self.last_result.stderr)
+                self.assertIn("package listing stderr detail", self.last_result.stderr)
+                self.assertIn("exited 19", self.last_result.stderr)
+                self.assertIn("NU1301", self.last_result.stderr)
+                self.assertFalse(self.sdk_updates())
+                self.assert_not_published()
 
     def test_nuget_unsupported_per_framework_version_fails_before_partial_update(self):
         self.nuget_fixture("multi-tfm")
@@ -927,6 +960,40 @@ class UpdatePackagesTests(unittest.TestCase):
 
     def sdk_updates(self):
         return [call for call in self.calls("dotnet") if call[1:3] == ["package", "update"]]
+
+    def central_downgrade(self):
+        self.cratis_family([("Cratis.Fundamentals", "7.34.3")], {"Cratis.Fundamentals": ["7.34.4"]})
+        self.props_text = self.props_text.replace("  </ItemGroup>", '    <PackageVersion Include="Microsoft.Extensions.DependencyModel" Version="10.0.14" />\n  </ItemGroup>')
+        (self.repo / self.PROPS).write_text(self.props_text)
+        return "error NU1109: Detected package downgrade: Microsoft.Extensions.DependencyModel from 10.0.15 to centrally defined 10.0.14. Update the centrally managed package version to a higher version."
+
+    def test_nuget_repairs_central_transitive_downgrade_before_listing_and_continues(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade(), None])
+        self.assert_step_ok("Update NuGet packages")
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text.replace("7.34.3", "7.34.4").replace("10.0.14", "10.0.15"))
+        self.assertIn("Microsoft.Extensions.DependencyModel", self.last_result.stdout)
+        self.assertIn("10.0.14 -> 10.0.15", self.last_result.stdout)
+        self.assertEqual(self.calls("dotnet")[:3], [["dotnet", "restore"], ["dotnet", "restore"], ["dotnet", "package", "list", "--format", "json"]])
+        self.assertEqual(self.sdk_updates(), [["dotnet", "package", "update", "Serilog"]])
+
+    def test_nuget_required_excluded_transitive_pin_fails_visibly_rolls_back_and_never_publishes(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade()])
+        self.env["NUGET_PACKAGE_EXCLUSIONS"] = "microsoft.extensions.dependencymodel"
+        self.assertFalse(self.run_steps([PREFLIGHT, "Update NuGet packages", "Build .NET"]))
+        self.assertIn("NU1109", self.last_result.stderr)
+        self.assertIn("package is excluded", self.last_result.stderr)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(self.calls("dotnet"), [["dotnet", "restore"]])
+        self.assert_not_published()
+
+    def test_nuget_listing_failure_after_repair_rolls_back_family_and_central_pin(self):
+        self.env["RESTORE_OUTPUTS"] = json.dumps([self.central_downgrade(), None, "error NU1301: Service index unavailable"])
+        self.env.update(LIST_ERROR_KIND="DOTNET_INVENTORY", LIST_ERROR_OUTPUT="Restore failed")
+        self.assertNotEqual(self.run_step("Update NuGet packages"), 0)
+        self.assertIn("NU1301", self.last_result.stderr)
+        self.assertEqual((self.repo / self.PROPS).read_text(), self.props_text)
+        self.assertEqual(self.sdk_updates(), [])
+        self.assert_not_published()
 
     def test_nuget_complete_cratis_family_updates_together_and_never_reaches_the_sdk(self):
         self.cratis_family([("Cratis.Chronicle", "1.0.0"), ("Cratis.Chronicle.Api", "1.0.0")],
