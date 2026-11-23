@@ -304,10 +304,15 @@ require('node:module').syncBuiltinESMExports();
     { name: 'a transitive conditional import', candidates: ['Nested/Directory.Packages.props'],
       extra: { 'Directory.Build.props': '<Project><Import Project="Bridge.props" Condition="true" /></Project>',
         'Bridge.props': '<Project><Import Project="Nested/Directory.Packages.props" /></Project>' } },
-    { name: 'a conditional ItemGroup', candidates: ['Nested/Directory.Packages.props'],
+    { name: 'a conditional ItemGroup', candidates: ['(none)'],
       extra: { 'Nested/Directory.Packages.props': props(dependencyPin).replace('<ItemGroup>', '<ItemGroup Condition="true">') } },
     { name: 'duplicate declarations in one file', candidates: ['Nested/Directory.Packages.props'],
       extra: { 'Nested/Directory.Packages.props': props(dependencyPin, pin('Microsoft.Extensions.DependencyModel', '8.0.0')) } },
+    { name: 'two unconditional Includes across a central file and its import', candidates: ['Directory.Packages.props', 'Directory.Packages.NET11.props'],
+      extra: { 'Directory.Packages.props': files['Directory.Packages.props'].replace('</ItemGroup>', `${dependencyPin}</ItemGroup>`)
+        .replace('</Project>', '<Import Project="Directory.Packages.NET11.props" /></Project>'),
+        'Directory.Packages.NET11.props': props(pin('Microsoft.Extensions.DependencyModel', '11.0.0')),
+        'Nested/Directory.Packages.props': '<Project />' } },
     { name: 'an unresolved import', candidates: ['Nested/Directory.Packages.props'],
       extra: { 'Directory.Build.props': '<Project><Import Project="$(UnknownPath)/Versions.props" /></Project>' } },
   ]) {
@@ -337,6 +342,36 @@ require('node:module').syncBuiltinESMExports();
     assert.equal(w.cli('rollback', '--state-dir', w.state).status, 0);
     assert.equal(w.read('Frameworks/shared.props'), props(dependencyPin));
   });
+
+  for (const layout of [
+    { name: 'the Arc TFM-conditional NET11 Update',
+      text: props('<PackageVersion Update="Microsoft.Extensions.DependencyModel" Version="11.0.0" />')
+        .replace('<ItemGroup>', '<ItemGroup Condition="\'$(TargetFramework)\' == \'net11.0\'">') },
+    { name: 'an unconditional Update', text: props('<PackageVersion Update="Microsoft.Extensions.DependencyModel" Version="11.0.0" />') },
+    { name: 'a conditional Include ItemGroup', text: props(pin('Microsoft.Extensions.DependencyModel', '11.0.0'))
+      .replace('<ItemGroup>', '<ItemGroup Condition="\'$(TargetFramework)\' == \'net11.0\'">') },
+    { name: 'an Include with a Condition attribute',
+      text: props('<PackageVersion Include="Microsoft.Extensions.DependencyModel" Version="11.0.0" Condition="\'$(TargetFramework)\' == \'net11.0\'" />') },
+  ]) {
+    it(`repairs the unconditional Include without changing ${layout.name}`, () => {
+      const central = files['Directory.Packages.props'].replace('</ItemGroup>', `  ${dependencyPin}\n  </ItemGroup>`)
+        .replace('</Project>', '<Import Project="$(MSBuildThisFileDirectory)/Directory.Packages.NET11.props" /></Project>');
+      const w = repairWork([downgrade(), null], '', {
+        'Directory.Packages.props': central,
+        'Directory.Packages.NET11.props': layout.text,
+      });
+      const before = w.read('Directory.Packages.props');
+      const result = w.cli('restore', '--state-dir', w.state);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(w.read('Directory.Packages.props'), before.replace('10.0.14', '10.0.15'));
+      assert.equal(w.read('Directory.Packages.NET11.props'), layout.text);
+      assert.deepEqual(w.calls(), ['restore', 'restore']);
+      assert.equal(w.cli('verify', '--state-dir', w.state).status, 0);
+      assert.equal(w.cli('rollback', '--state-dir', w.state).status, 0);
+      assert.equal(w.read('Directory.Packages.props'), central);
+      assert.equal(w.read('Directory.Packages.NET11.props'), layout.text);
+    });
+  }
 
   it('honors case-insensitive exclusions without writing any central pins', () => {
     const w = repairWork([downgrade()]);

@@ -669,7 +669,8 @@ function centralPinEdit(candidate, requirement, message) {
 function centralPinCandidates(file, text, id) {
   return parseXml(text)
     .filter((element) => element.lname === 'packageversion')
-    .filter((element) => (element.attrs.get('include') ?? element.attrs.get('update'))?.value.toLowerCase() === id.toLowerCase())
+    .filter((element) => element.attrs.get('include')?.value.toLowerCase() === id.toLowerCase())
+    .filter((element) => !element.attrs.has('update') && !isConditional(element))
     .map((element) => ({ file, text, element }));
 }
 
