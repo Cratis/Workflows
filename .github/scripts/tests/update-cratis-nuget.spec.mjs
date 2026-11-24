@@ -8,7 +8,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { applyEdits, compareVersions, familyKey, parseExclusions, parseVersion, planUpdates, pruneConflicts, renderDiff, updateWithPruning } from '../update-cratis-nuget.mjs';
+import { applyEdits, compareVersions, familyKey, parseExclusions, parseVersion, planUpdates, pruneConflicts, renderDiff, selectUpdateTargets, updateWithPruning } from '../update-cratis-nuget.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../update-cratis-nuget.mjs', import.meta.url));
 
@@ -287,6 +287,58 @@ describe('SDK-prefixed conflict diagnostics', () => {
       assert.throws(() => pruneConflicts(warning, ['Unselected']), /No attributable/);
     });
   }
+});
+
+describe('SDK update target selection', () => {
+  const entry = (id, requestedVersion, latestVersion) => ({ id, requestedVersion, latestVersion });
+  const listing = (...entries) => ({ projects: [{ frameworks: [{ topLevelPackages: entries }] }] });
+  const normal = listing(entry('Snappier', '1.3.2', '1.3.3'), entry('Preview', '1.0.0-beta.1', '1.0.0'));
+  const prerelease = listing(entry('Snappier', '1.3.2', '2.0.0-beta.1'), entry('Preview', '1.0.0-beta.1', '2.0.0-beta.2'));
+  const expected = [{ id: 'Snappier', version: '1.3.3' }, { id: 'Preview', version: '2.0.0-beta.2' }];
+
+  it('uses the normal target for stable references and the prerelease target only for prerelease references', () => {
+    assert.deepEqual(selectUpdateTargets(normal, prerelease), expected);
+  });
+
+  it('rejects an unselected prerelease NU1109 target for a stable reference but accepts the selected stable target', () => {
+    const output = fs.readFileSync(new URL('./fixtures/nuget-sdk-10.0.401/arc-update-conflicts.log', import.meta.url), 'utf8');
+    const versions = selectUpdateTargets(normal, prerelease).map(({ id, version }) => ({ id, target: version, current: '1.3.2' }));
+    assert.throws(() => pruneConflicts(output.replaceAll('1.3.3', '2.0.0-beta.1'), ['Snappier', 'xunit.v3'], [], versions),
+      /Cannot attribute NU1109 for Snappier/);
+    assert.deepEqual([...pruneConflicts(output, ['Snappier', 'xunit.v3'], [], versions)],
+      [['Snappier', 'NU1109 conflicts with Snappier'], ['xunit.v3', 'NU1107 conflicts with xunit.v3.common']]);
+  });
+
+  it('rejects the real listing fixture\'s unselected Newtonsoft prerelease while attributing its selected stable target', () => {
+    const fixture = (name) => JSON.parse(fs.readFileSync(new URL(`./fixtures/nuget-sdk-10.0.401/prerelease-${name}.json`, import.meta.url), 'utf8'));
+    const targets = selectUpdateTargets(fixture('outdated'), fixture('prerelease-outdated'));
+    assert.deepEqual(targets, [{ id: 'Newtonsoft.Json', version: '13.0.4' }, { id: 'Microsoft.Extensions.Http', version: '11.0.0-rc.1.26425.128' }]);
+    const versions = targets.map(({ id, version }) => ({ id, target: version, current: '12.0.1' }));
+    const output = 'error: NU1109: Detected package downgrade: Newtonsoft.Json from 13.0.4 to centrally defined 12.0.1.';
+    assert.throws(() => pruneConflicts(output.replace('13.0.4', '14.0.1-beta2'), ['Newtonsoft.Json'], [], versions),
+      /Cannot attribute NU1109 for Newtonsoft.Json/);
+    assert.deepEqual([...pruneConflicts(output, ['Newtonsoft.Json'], [], versions)], [['Newtonsoft.Json', 'NU1109 conflicts with Newtonsoft.Json']]);
+  });
+
+  it('deduplicates repeated project and framework entries case-insensitively', () => {
+    const duplicated = listing(entry('snappier', '1.3.2', '1.3.3'), entry('SNAPPIER', '1.3.2', '1.3.3'));
+    assert.deepEqual(selectUpdateTargets(duplicated, prerelease), [{ id: 'snappier', version: '1.3.3' }, expected[1]]);
+  });
+
+  it('retains the normal target when a prerelease reference has no prerelease-list candidate', () => {
+    assert.deepEqual(selectUpdateTargets(normal, listing()), [{ id: 'Snappier', version: '1.3.3' }, { id: 'Preview', version: '1.0.0' }]);
+  });
+
+  it('keeps ambiguous versions unproven instead of arbitrarily selecting a duplicate target', () => {
+    const ambiguous = listing(entry('Snappier', '1.3.2', '1.3.3'), entry('snappier', '1.3.2', '1.3.4'));
+    assert.deepEqual(selectUpdateTargets(ambiguous), [{ id: 'Snappier', version: null }]);
+  });
+
+  it('collects the same policy-filtered unique target evidence through the workflow CLI command', () => {
+    const result = spawnSync(process.execPath, [SCRIPT, 'targets'], { input: JSON.stringify([normal, prerelease]), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), expected);
+  });
 });
 
 describe('SDK conflict pruning', () => {

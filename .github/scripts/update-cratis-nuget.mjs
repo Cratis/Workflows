@@ -919,6 +919,29 @@ function requireRetryable(result, attempt) {
   if (attempt === MAX_UPDATE_ATTEMPTS) throw new Error(`NuGet SDK update exhausted ${MAX_UPDATE_ATTEMPTS} attempts`);
 }
 
+function listingTargets(listing, prereleaseOnly = false) {
+  const packages = (listing?.projects ?? []).flatMap((project) => (project.frameworks ?? [])
+    .flatMap((framework) => framework.topLevelPackages ?? []));
+  return packages.filter((entry) => !prereleaseOnly || entry.requestedVersion.includes('-'))
+    .map((entry) => ({ id: entry.id, version: entry.latestVersion }));
+}
+
+function uniqueTargetVersions(targets) {
+  const unique = new Map();
+  for (const target of targets) {
+    const key = target.id.toLowerCase();
+    if (!unique.has(key)) unique.set(key, { ...target });
+    else if (unique.get(key).version !== target.version) unique.get(key).version = null;
+  }
+  return [...unique.values()];
+}
+
+export function selectUpdateTargets(outdated, prereleaseOutdated) {
+  const normal = uniqueTargetVersions(listingTargets(outdated));
+  const prerelease = uniqueTargetVersions(listingTargets(prereleaseOutdated, true));
+  return [...new Map([...normal, ...prerelease].map((entry) => [entry.id.toLowerCase(), entry])).values()];
+}
+
 function selectionVersions(files, targets) {
   return targets.map(({ id, version }) => {
     try {
@@ -1017,6 +1040,7 @@ const COMMANDS = {
   verify: (values) => verify(values['state-dir']),
   rollback: (values) => rollback(values['state-dir']),
   'check-ids': (values) => checkIds(values['state-dir'], fs.readFileSync(0, 'utf8')),
+  targets: () => console.log(JSON.stringify(selectUpdateTargets(...JSON.parse(fs.readFileSync(0, 'utf8'))))),
 };
 
 async function main(argv) {
