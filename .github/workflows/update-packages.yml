@@ -1195,17 +1195,39 @@ jobs:
             return proven ? [id] : [];
           }
 
+          function matchesPreviewVersions(requirement, versions) {
+            const target = parseVersion(versions.target ?? '');
+            const current = parseVersion(versions.current ?? '');
+            return target && current && compareVersions(requirement.version, target) === 0 &&
+              compareVersions(parseVersion(requirement.current), current) === 0;
+          }
+
+          function previewLeaf(block, conflict, context) {
+            if (block.code !== 'NU1109') return [];
+            const id = context.selected.get(conflict.toLowerCase());
+            const versions = context.versions.filter((entry) => entry.id.toLowerCase() === conflict.toLowerCase());
+            if (!id || versions.length === 0) return [];
+            const [requirement] = downgradeRequirements(block.text);
+            const matches = requirement && versions.every((entry) => matchesPreviewVersions(requirement, entry));
+            return matches ? [id] : [];
+          }
+
+          function conflictLeaves(block, conflict, context) {
+            const proven = deltaLeaf(block, conflict, context);
+            return proven.length > 0 ? proven : previewLeaf(block, conflict, context);
+          }
+
           function conflictReasons(block, context) {
             const conflict = conflictPackage(block.text);
             const ancestors = selectedAncestors(block.text, conflict, context.selected);
-            const ids = ancestors.length > 0 ? ancestors : deltaLeaf(block, conflict, context);
+            const ids = ancestors.length > 0 ? ancestors : conflictLeaves(block, conflict, context);
             if (ids.length === 0) throw new Error(`Cannot attribute ${block.code} for ${conflict} to a selected package`);
             return ids.map((id) => [id, `${block.code} conflicts with ${conflict}`]);
           }
 
-          export function pruneConflicts(output, packages, delta = []) {
+          export function pruneConflicts(output, packages, delta = [], versions = []) {
             const selected = new Map(packages.map((id) => [id.toLowerCase(), id]));
-            return new Map(conflictBlocks(output).flatMap((block) => conflictReasons(block, { selected, delta })));
+            return new Map(conflictBlocks(output).flatMap((block) => conflictReasons(block, { selected, delta, versions })));
           }
 
           const isSdkFile = (name) => isManifest(name) || name.toLowerCase() === 'packages.lock.json';
@@ -1249,16 +1271,29 @@ jobs:
             if (attempt === MAX_UPDATE_ATTEMPTS) throw new Error(`NuGet SDK update exhausted ${MAX_UPDATE_ATTEMPTS} attempts`);
           }
 
-          function pruneSelection(result, selected, log) {
-            const reasons = pruneConflicts(result.output, selected, result.delta);
+          function selectionVersions(files, targets) {
+            return targets.map(({ id, version }) => {
+              try {
+                const { candidate, message } = centralRepairCandidate(files, id);
+                const current = literalPinSource(candidate.element, candidate.text, message).raw;
+                return { id, current, target: version };
+              } catch {
+                return { id, current: null, target: version };
+              }
+            });
+          }
+
+          function pruneSelection(result, selected, versions, log) {
+            const reasons = pruneConflicts(result.output, selected, result.delta, versions);
             for (const [id, reason] of reasons) log(`::notice::Pruned NuGet package '${escapeAnnotation(id)}': ${escapeAnnotation(reason)}`);
             const remaining = selected.filter((id) => !reasons.has(id));
             if (remaining.length === 0) throw new Error('No eligible NuGet packages remain after conflict pruning');
             return remaining;
           }
 
-          export function updateWithPruning({ root, packages, unfiltered = false, run = sdkUpdate, validate = () => {}, log = console.log }) {
+          export function updateWithPruning({ root, packages, targets = [], unfiltered = false, run = sdkUpdate, validate = () => {}, log = console.log }) {
             const before = collectFiles(root, isSdkFile);
+            const versions = selectionVersions(before, targets);
             const options = { root, run, validate, log };
             let selected = [...packages];
             let attemptIds = unfiltered ? [] : selected;
@@ -1268,7 +1303,7 @@ jobs:
               if (result.status === 0) return;
               if (unfilteredNoop(result, unfiltered)) return;
               requireRetryable(result, attempt);
-              selected = pruneSelection(result, selected, log);
+              selected = pruneSelection(result, selected, versions, log);
               attemptIds = selected;
             }
           }
@@ -1278,7 +1313,8 @@ jobs:
             const stateDir = values['state-dir'];
             const state = readState(stateDir);
             if (!matchesPrepared(state, collectFiles(state.root))) throw new Error('Manifests changed before SDK update');
-            updateWithPruning({ root: state.root, packages, unfiltered: values.unfiltered, validate: () => verify(stateDir) });
+            const targets = values.targets ? JSON.parse(fs.readFileSync(values.targets, 'utf8')) : [];
+            updateWithPruning({ root: state.root, packages, targets, unfiltered: values.unfiltered, validate: () => verify(stateDir) });
           }
 
           // ----------------------------------------------------------------- commands
@@ -1339,7 +1375,7 @@ jobs:
             const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
               'dry-run': { type: 'boolean' }, root: { type: 'string' }, stdin: { type: 'boolean' }, 'manifest-path': { type: 'string' },
               label: { type: 'string' }, exclusions: { type: 'string' }, 'state-dir': { type: 'string' }, 'index-dir': { type: 'string' },
-              unfiltered: { type: 'boolean' } } });
+              unfiltered: { type: 'boolean' }, targets: { type: 'string' } } });
             const name = values['dry-run'] ? 'preview' : positionals[0] ?? 'preview';
             if (name === 'update') return runSdkUpdate(values, positionals.slice(1));
             const command = COMMANDS[name];
@@ -1423,6 +1459,7 @@ jobs:
           fi
           if [[ "$filtered" == true ]]; then
             outdated=$(list_packages --outdated)
+            prerelease_outdated=''
             referenced_ids=$(extract_ids all <<< "$inventory")
             # A Cratis package the manifests do not pin is protected too; if it belongs to a
             # family that was just edited, that family was incomplete: undo it and fail.
@@ -1506,6 +1543,12 @@ jobs:
           fi
 
           update_args=()
+          if [[ "$filtered" == true ]]; then
+            # Preserve the SDK listing's target versions as evidence for preview-only NU1109.
+            jq -s '[.[] | .projects[] | (.frameworks // [])[] | (.topLevelPackages // [])[]
+              | {id: .id, version: .latestVersion}]' <<< "$outdated${prerelease_outdated:+$'\n'$prerelease_outdated}" > "$cratis_dir/targets.json"
+            update_args+=(--targets "$cratis_dir/targets.json")
+          fi
           if [[ "$filtered" != true ]]; then
             update_args+=(--unfiltered)
             # Preserve the SDK's unfiltered first attempt, but attribute retries only

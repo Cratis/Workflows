@@ -237,6 +237,34 @@ describe('SDK-prefixed conflict diagnostics', () => {
     assert.deepEqual([...pruneConflicts(output.replaceAll('error: NU', 'error NU'), packages, delta)], expected);
   });
 
+  it('self-attributes the real Arc preview without a manifest delta when selected target and central versions match', () => {
+    const versions = [{ id: 'snappier', target: '1.3.3', current: '1.3.2' }];
+    assert.deepEqual([...pruneConflicts(output, ['SNAPPIER', 'xunit.v3', 'Kept'], [], versions)],
+      [['SNAPPIER', 'NU1109 conflicts with Snappier'], ['xunit.v3', 'NU1107 conflicts with xunit.v3.common']]);
+  });
+
+  const invalidPreviewVersions = [
+    ['different target', [{ id: 'Snappier', target: '1.3.4', current: '1.3.2' }]],
+    ['different central version', [{ id: 'Snappier', target: '1.3.3', current: '1.3.1' }]],
+    ['unknown target', [{ id: 'Snappier', current: '1.3.2' }]],
+    ['nonliteral target', [{ id: 'Snappier', target: '[1.3.3,2.0)', current: '1.3.2' }]],
+    ['ambiguous targets', [{ id: 'Snappier', target: '1.3.3', current: '1.3.2' }, { id: 'SNAPPIER', target: '1.3.4', current: '1.3.2' }]],
+  ];
+  for (const [label, versions] of invalidPreviewVersions) {
+    it(`rejects preview self-attribution with ${label}`, () => {
+      assert.throws(() => pruneConflicts(output, ['Snappier', 'xunit.v3'], [], versions), /Cannot attribute NU1109 for Snappier/);
+    });
+  }
+
+  it('rejects the real Arc preview when Snappier is not selected even with matching version evidence', () => {
+    const versions = [{ id: 'Snappier', target: '1.3.3', current: '1.3.2' }];
+    assert.throws(() => pruneConflicts(output, ['xunit.v3'], [], versions), /Cannot attribute NU1109 for Snappier/);
+    assert.throws(() => pruneConflicts('error: NU1301: Other failure\n' + output, ['Snappier', 'xunit.v3'], [], versions),
+      /Cannot attribute SDK restore error/);
+    assert.throws(() => pruneConflicts(conflict, ['xunit.v3.common'], [], [{ id: 'xunit.v3.common', target: '4.0.3', current: '4.0.2' }]),
+      /Cannot attribute NU1107/);
+  });
+
   it('fails closed on Snappier without a proven leaf delta rather than treating a local project as an updated ancestor', () => {
     assert.throws(() => pruneConflicts(output, ['Snappier', 'Cratis.Arc.MongoDB', 'xunit.v3']),
       /Cannot attribute NU1109 for Snappier to a selected package/);
@@ -322,6 +350,36 @@ error: Sample -> ${id} (>= 2.0.0)`;
     assert.match(w.read(), /Kept" Version="2.0.0/);
     assert.deepEqual(notices.filter((line) => line.startsWith('::notice::')), ["::notice::Pruned NuGet package 'MongoDB.Driver': NU1109 conflicts with mongodb.driver"]);
   });
+
+  it('prunes a preview-only selected leaf using the SDK target and an unchanged lowercase central pin, then retries', (t) => {
+    const w = fixture(t);
+    const before = props(pin('snappier', '1.3.2'), pin('Kept', '1.0.0'));
+    fs.writeFileSync(w.file, before);
+    const output = fs.readFileSync(new URL('./fixtures/nuget-sdk-10.0.401/arc-update-conflicts.log', import.meta.url), 'utf8');
+    const calls = [];
+    updateWithPruning({ root: w.root, packages: ['Snappier', 'xunit.v3', 'Kept'],
+      targets: [{ id: 'SNAPPIER', version: '1.3.3' }], log: () => {}, run: (_root, ids) => {
+        calls.push([...ids]);
+        assert.equal(w.read(), before);
+        return calls.length === 1 ? { status: 3, output } : { status: 0, output: '' };
+      } });
+    assert.deepEqual(calls, [['Snappier', 'xunit.v3', 'Kept'], ['Kept']]);
+    assert.equal(w.read(), before);
+  });
+
+  for (const declaration of [pin('snappier', '1.3.1'), pin('snappier', '$(Version)'), pin('snappier', '1.3.2').replace('Version=', 'Condition="true" Version=')]) {
+    it(`rejects preview-only attribution with an unsupported central pin: ${declaration}`, (t) => {
+      const w = fixture(t);
+      fs.writeFileSync(w.file, props(declaration));
+      let calls = 0;
+      assert.throws(() => updateWithPruning({ root: w.root, packages: ['Snappier', 'Kept'],
+        targets: [{ id: 'Snappier', version: '1.3.3' }], log: () => {}, run: () => {
+          calls++;
+          return { status: 3, output: leafConflict('Snappier').replaceAll('3.0.0', '1.3.3').replaceAll('2.0.0', '1.3.2') };
+        } }), /Cannot attribute NU1109 for Snappier/);
+      assert.equal(calls, 1);
+    });
+  }
 
   const unchanged = '<Project><PackageReference Include="MongoDB.Driver" Version="2.0.0" /></Project>';
   const insufficientDeltas = [
