@@ -791,11 +791,11 @@ function selectedAncestors(block, conflict, selected) {
 }
 
 function conflictBlocks(output) {
-  const errors = output.split('\n').filter((line) => !/\bwarning\s+NU\d{4}:/i.test(line)).join('\n');
-  if ([...errors.matchAll(/\berror\s+(NU\d{4}):/gi)].some((match) => !['NU1107', 'NU1109'].includes(match[1].toUpperCase()))) {
+  const errors = output.split('\n').filter((line) => !/\bwarning:?\s+NU\d{4}:/i.test(line)).join('\n');
+  if ([...errors.matchAll(/\berror:?\s+(NU\d{4}):/gi)].some((match) => !['NU1107', 'NU1109'].includes(match[1].toUpperCase()))) {
     throw new Error('Cannot attribute SDK restore error; refusing to prune');
   }
-  const headers = [...errors.matchAll(/\berror\s+(NU1107): Version conflict detected for |\berror\s+(NU1109): Detected package downgrade: /g)];
+  const headers = [...errors.matchAll(/\berror:?\s+(NU1107): Version conflict detected for |\berror:?\s+(NU1109): Detected package downgrade: /g)];
   if (headers.length === 0) throw new Error('No attributable NU1107/NU1109 errors in SDK output');
   return headers.map((header, index) => ({ code: header[1] ?? header[2],
     text: errors.slice(header.index, headers[index + 1]?.index) }));

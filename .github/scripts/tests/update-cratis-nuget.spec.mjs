@@ -213,6 +213,54 @@ describe('failures', () => {
   });
 });
 
+describe('SDK-prefixed conflict diagnostics', () => {
+  const output = fs.readFileSync(new URL('./fixtures/nuget-sdk-10.0.401/arc-update-conflicts.log', import.meta.url), 'utf8');
+  const split = output.indexOf('error: NU1107:');
+  const downgrade = output.slice(0, split);
+  const conflict = output.slice(split);
+  const delta = [{ id: 'snappier', version: parseVersion('1.3.3') }];
+
+  it('attributes all three SDK-prefixed NU1109 blocks to a proven selected leaf', () => {
+    assert.deepEqual([...pruneConflicts(downgrade, ['Snappier', 'Kept'], delta)],
+      [['Snappier', 'NU1109 conflicts with Snappier']]);
+  });
+
+  it('attributes SDK-prefixed NU1107 dependency lines to the selected xunit.v3 ancestor', () => {
+    assert.deepEqual([...pruneConflicts(conflict, ['xunit.v3', 'Kept'])],
+      [['xunit.v3', 'NU1107 conflicts with xunit.v3.common']]);
+  });
+
+  it('handles the exact mixed CI output like restore-prefixed diagnostics', () => {
+    const packages = ['Snappier', 'xunit.v3', 'Kept'];
+    const expected = [['Snappier', 'NU1109 conflicts with Snappier'], ['xunit.v3', 'NU1107 conflicts with xunit.v3.common']];
+    assert.deepEqual([...pruneConflicts(output, packages, delta)], expected);
+    assert.deepEqual([...pruneConflicts(output.replaceAll('error: NU', 'error NU'), packages, delta)], expected);
+  });
+
+  it('fails closed on Snappier without a proven leaf delta rather than treating a local project as an updated ancestor', () => {
+    assert.throws(() => pruneConflicts(output, ['Snappier', 'Cratis.Arc.MongoDB', 'xunit.v3']),
+      /Cannot attribute NU1109 for Snappier to a selected package/);
+    assert.throws(() => pruneConflicts(output, ['Snappier', 'xunit.v3'], [{ id: 'snappier', version: parseVersion('1.3.2') }]),
+      /Cannot attribute NU1109 for Snappier to a selected package/);
+  });
+
+  for (const code of ['NU1301', 'NU1605', 'NU1902']) {
+    it(`fails closed on SDK-prefixed error ${code} alongside an attributable conflict`, () => {
+      const error = `error: ${code}: Other failure\n`;
+      assert.throws(() => pruneConflicts(error + conflict, ['xunit.v3']), /Cannot attribute SDK restore error/);
+      assert.throws(() => pruneConflicts(conflict + error, ['xunit.v3']), /Cannot attribute SDK restore error/);
+    });
+  }
+
+  for (const code of ['NU1902', 'NU1603', 'NU1109']) {
+    it(`ignores SDK-prefixed warning ${code} without making it an attributable error`, () => {
+      const warning = `warning: ${code}: Detected package downgrade: Unselected from 3.0.0 to centrally defined 2.0.0.\n`;
+      assert.deepEqual([...pruneConflicts(warning + conflict, ['xunit.v3']).keys()], ['xunit.v3']);
+      assert.throws(() => pruneConflicts(warning, ['Unselected']), /No attributable/);
+    });
+  }
+});
+
 describe('SDK conflict pruning', () => {
   const conflict = (id, dependency = 'Microsoft.OpenApi', code = 'NU1109') => {
     const header = code === 'NU1107' ? `Version conflict detected for ${dependency}.` :
