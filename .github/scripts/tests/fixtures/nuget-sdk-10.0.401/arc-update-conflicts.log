@@ -1,0 +1,14 @@
+Updating outdated packages in /home/runner/work/Arc/Arc.
+error: NU1109: Detected package downgrade: Snappier from 1.3.3 to centrally defined 1.3.2. Update the centrally managed package version to a higher version.
+error:  Cratis.Arc.Chronicle.Specs -> Cratis.Arc.MongoDB -> Snappier (>= 1.3.3)
+error:  Cratis.Arc.Chronicle.Specs -> Snappier (>= 1.3.2)
+error: NU1109: Detected package downgrade: Snappier from 1.3.3 to centrally defined 1.3.2. Update the centrally managed package version to a higher version.
+error:  AspNetCore -> Cratis.Arc.MongoDB -> Snappier (>= 1.3.3)
+error:  AspNetCore -> Snappier (>= 1.3.2)
+error: NU1109: Detected package downgrade: Snappier from 1.3.3 to centrally defined 1.3.2. Update the centrally managed package version to a higher version.
+error:  Cratis.Arc.MongoDB.Specs -> Cratis.Arc.MongoDB -> Snappier (>= 1.3.3)
+error:  Cratis.Arc.MongoDB.Specs -> Snappier (>= 1.3.2)
+error: NU1107: Version conflict detected for xunit.v3.common. Central Package Management transitive pinning is enabled. Add a PackageVersion for xunit.v3.common 4.0.3 to resolve this issue.
+error:  EmbeddedXunitMtpConsumer -> xunit.v3 4.0.3 -> xunit.v3.mtp-v2 4.0.3 -> xunit.v3.core.mtp-v2 4.0.3 -> xunit.v3.runner.inproc.console 4.0.3 -> xunit.v3.runner.common 4.0.3 -> xunit.v3.common (= 4.0.3)
+error:  EmbeddedXunitMtpConsumer -> xunit.v3.extensibility.core 4.0.2 -> xunit.v3.common (= 4.0.2).
+Preview restore with updated packages was not successful. Force mode is not yet available.

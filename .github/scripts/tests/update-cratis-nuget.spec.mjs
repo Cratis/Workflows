@@ -8,7 +8,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { applyEdits, compareVersions, familyKey, parseExclusions, parseVersion, planUpdates, pruneConflicts, renderDiff, updateWithPruning } from '../update-cratis-nuget.mjs';
+import { applyEdits, compareVersions, familyKey, parseExclusions, parseVersion, planUpdates, pruneConflicts, renderDiff, selectUpdateTargets, updateWithPruning } from '../update-cratis-nuget.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../update-cratis-nuget.mjs', import.meta.url));
 
@@ -213,6 +213,134 @@ describe('failures', () => {
   });
 });
 
+describe('SDK-prefixed conflict diagnostics', () => {
+  const output = fs.readFileSync(new URL('./fixtures/nuget-sdk-10.0.401/arc-update-conflicts.log', import.meta.url), 'utf8');
+  const split = output.indexOf('error: NU1107:');
+  const downgrade = output.slice(0, split);
+  const conflict = output.slice(split);
+  const delta = [{ id: 'snappier', version: parseVersion('1.3.3') }];
+
+  it('attributes all three SDK-prefixed NU1109 blocks to a proven selected leaf', () => {
+    assert.deepEqual([...pruneConflicts(downgrade, ['Snappier', 'Kept'], delta)],
+      [['Snappier', 'NU1109 conflicts with Snappier']]);
+  });
+
+  it('attributes SDK-prefixed NU1107 dependency lines to the selected xunit.v3 ancestor', () => {
+    assert.deepEqual([...pruneConflicts(conflict, ['xunit.v3', 'Kept'])],
+      [['xunit.v3', 'NU1107 conflicts with xunit.v3.common']]);
+  });
+
+  it('handles the exact mixed CI output like restore-prefixed diagnostics', () => {
+    const packages = ['Snappier', 'xunit.v3', 'Kept'];
+    const expected = [['Snappier', 'NU1109 conflicts with Snappier'], ['xunit.v3', 'NU1107 conflicts with xunit.v3.common']];
+    assert.deepEqual([...pruneConflicts(output, packages, delta)], expected);
+    assert.deepEqual([...pruneConflicts(output.replaceAll('error: NU', 'error NU'), packages, delta)], expected);
+  });
+
+  it('self-attributes the real Arc preview without a manifest delta when selected target and central versions match', () => {
+    const versions = [{ id: 'snappier', target: '1.3.3', current: '1.3.2' }];
+    assert.deepEqual([...pruneConflicts(output, ['SNAPPIER', 'xunit.v3', 'Kept'], [], versions)],
+      [['SNAPPIER', 'NU1109 conflicts with Snappier'], ['xunit.v3', 'NU1107 conflicts with xunit.v3.common']]);
+  });
+
+  const invalidPreviewVersions = [
+    ['different target', [{ id: 'Snappier', target: '1.3.4', current: '1.3.2' }]],
+    ['different central version', [{ id: 'Snappier', target: '1.3.3', current: '1.3.1' }]],
+    ['unknown target', [{ id: 'Snappier', current: '1.3.2' }]],
+    ['nonliteral target', [{ id: 'Snappier', target: '[1.3.3,2.0)', current: '1.3.2' }]],
+    ['ambiguous targets', [{ id: 'Snappier', target: '1.3.3', current: '1.3.2' }, { id: 'SNAPPIER', target: '1.3.4', current: '1.3.2' }]],
+  ];
+  for (const [label, versions] of invalidPreviewVersions) {
+    it(`rejects preview self-attribution with ${label}`, () => {
+      assert.throws(() => pruneConflicts(output, ['Snappier', 'xunit.v3'], [], versions), /Cannot attribute NU1109 for Snappier/);
+    });
+  }
+
+  it('rejects the real Arc preview when Snappier is not selected even with matching version evidence', () => {
+    const versions = [{ id: 'Snappier', target: '1.3.3', current: '1.3.2' }];
+    assert.throws(() => pruneConflicts(output, ['xunit.v3'], [], versions), /Cannot attribute NU1109 for Snappier/);
+    assert.throws(() => pruneConflicts('error: NU1301: Other failure\n' + output, ['Snappier', 'xunit.v3'], [], versions),
+      /Cannot attribute SDK restore error/);
+    assert.throws(() => pruneConflicts(conflict, ['xunit.v3.common'], [], [{ id: 'xunit.v3.common', target: '4.0.3', current: '4.0.2' }]),
+      /Cannot attribute NU1107/);
+  });
+
+  it('fails closed on Snappier without a proven leaf delta rather than treating a local project as an updated ancestor', () => {
+    assert.throws(() => pruneConflicts(output, ['Snappier', 'Cratis.Arc.MongoDB', 'xunit.v3']),
+      /Cannot attribute NU1109 for Snappier to a selected package/);
+    assert.throws(() => pruneConflicts(output, ['Snappier', 'xunit.v3'], [{ id: 'snappier', version: parseVersion('1.3.2') }]),
+      /Cannot attribute NU1109 for Snappier to a selected package/);
+  });
+
+  for (const code of ['NU1301', 'NU1605', 'NU1902']) {
+    it(`fails closed on SDK-prefixed error ${code} alongside an attributable conflict`, () => {
+      const error = `error: ${code}: Other failure\n`;
+      assert.throws(() => pruneConflicts(error + conflict, ['xunit.v3']), /Cannot attribute SDK restore error/);
+      assert.throws(() => pruneConflicts(conflict + error, ['xunit.v3']), /Cannot attribute SDK restore error/);
+    });
+  }
+
+  for (const code of ['NU1902', 'NU1603', 'NU1109']) {
+    it(`ignores SDK-prefixed warning ${code} without making it an attributable error`, () => {
+      const warning = `warning: ${code}: Detected package downgrade: Unselected from 3.0.0 to centrally defined 2.0.0.\n`;
+      assert.deepEqual([...pruneConflicts(warning + conflict, ['xunit.v3']).keys()], ['xunit.v3']);
+      assert.throws(() => pruneConflicts(warning, ['Unselected']), /No attributable/);
+    });
+  }
+});
+
+describe('SDK update target selection', () => {
+  const entry = (id, requestedVersion, latestVersion) => ({ id, requestedVersion, latestVersion });
+  const listing = (...entries) => ({ projects: [{ frameworks: [{ topLevelPackages: entries }] }] });
+  const normal = listing(entry('Snappier', '1.3.2', '1.3.3'), entry('Preview', '1.0.0-beta.1', '1.0.0'));
+  const prerelease = listing(entry('Snappier', '1.3.2', '2.0.0-beta.1'), entry('Preview', '1.0.0-beta.1', '2.0.0-beta.2'));
+  const expected = [{ id: 'Snappier', version: '1.3.3' }, { id: 'Preview', version: '2.0.0-beta.2' }];
+
+  it('uses the normal target for stable references and the prerelease target only for prerelease references', () => {
+    assert.deepEqual(selectUpdateTargets(normal, prerelease), expected);
+  });
+
+  it('rejects an unselected prerelease NU1109 target for a stable reference but accepts the selected stable target', () => {
+    const output = fs.readFileSync(new URL('./fixtures/nuget-sdk-10.0.401/arc-update-conflicts.log', import.meta.url), 'utf8');
+    const versions = selectUpdateTargets(normal, prerelease).map(({ id, version }) => ({ id, target: version, current: '1.3.2' }));
+    assert.throws(() => pruneConflicts(output.replaceAll('1.3.3', '2.0.0-beta.1'), ['Snappier', 'xunit.v3'], [], versions),
+      /Cannot attribute NU1109 for Snappier/);
+    assert.deepEqual([...pruneConflicts(output, ['Snappier', 'xunit.v3'], [], versions)],
+      [['Snappier', 'NU1109 conflicts with Snappier'], ['xunit.v3', 'NU1107 conflicts with xunit.v3.common']]);
+  });
+
+  it('rejects the real listing fixture\'s unselected Newtonsoft prerelease while attributing its selected stable target', () => {
+    const fixture = (name) => JSON.parse(fs.readFileSync(new URL(`./fixtures/nuget-sdk-10.0.401/prerelease-${name}.json`, import.meta.url), 'utf8'));
+    const targets = selectUpdateTargets(fixture('outdated'), fixture('prerelease-outdated'));
+    assert.deepEqual(targets, [{ id: 'Newtonsoft.Json', version: '13.0.4' }, { id: 'Microsoft.Extensions.Http', version: '11.0.0-rc.1.26425.128' }]);
+    const versions = targets.map(({ id, version }) => ({ id, target: version, current: '12.0.1' }));
+    const output = 'error: NU1109: Detected package downgrade: Newtonsoft.Json from 13.0.4 to centrally defined 12.0.1.';
+    assert.throws(() => pruneConflicts(output.replace('13.0.4', '14.0.1-beta2'), ['Newtonsoft.Json'], [], versions),
+      /Cannot attribute NU1109 for Newtonsoft.Json/);
+    assert.deepEqual([...pruneConflicts(output, ['Newtonsoft.Json'], [], versions)], [['Newtonsoft.Json', 'NU1109 conflicts with Newtonsoft.Json']]);
+  });
+
+  it('deduplicates repeated project and framework entries case-insensitively', () => {
+    const duplicated = listing(entry('snappier', '1.3.2', '1.3.3'), entry('SNAPPIER', '1.3.2', '1.3.3'));
+    assert.deepEqual(selectUpdateTargets(duplicated, prerelease), [{ id: 'snappier', version: '1.3.3' }, expected[1]]);
+  });
+
+  it('retains the normal target when a prerelease reference has no prerelease-list candidate', () => {
+    assert.deepEqual(selectUpdateTargets(normal, listing()), [{ id: 'Snappier', version: '1.3.3' }, { id: 'Preview', version: '1.0.0' }]);
+  });
+
+  it('keeps ambiguous versions unproven instead of arbitrarily selecting a duplicate target', () => {
+    const ambiguous = listing(entry('Snappier', '1.3.2', '1.3.3'), entry('snappier', '1.3.2', '1.3.4'));
+    assert.deepEqual(selectUpdateTargets(ambiguous), [{ id: 'Snappier', version: null }]);
+  });
+
+  it('collects the same policy-filtered unique target evidence through the workflow CLI command', () => {
+    const result = spawnSync(process.execPath, [SCRIPT, 'targets'], { input: JSON.stringify([normal, prerelease]), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), expected);
+  });
+});
+
 describe('SDK conflict pruning', () => {
   const conflict = (id, dependency = 'Microsoft.OpenApi', code = 'NU1109') => {
     const header = code === 'NU1107' ? `Version conflict detected for ${dependency}.` :
@@ -274,6 +402,36 @@ error: Sample -> ${id} (>= 2.0.0)`;
     assert.match(w.read(), /Kept" Version="2.0.0/);
     assert.deepEqual(notices.filter((line) => line.startsWith('::notice::')), ["::notice::Pruned NuGet package 'MongoDB.Driver': NU1109 conflicts with mongodb.driver"]);
   });
+
+  it('prunes a preview-only selected leaf using the SDK target and an unchanged lowercase central pin, then retries', (t) => {
+    const w = fixture(t);
+    const before = props(pin('snappier', '1.3.2'), pin('Kept', '1.0.0'));
+    fs.writeFileSync(w.file, before);
+    const output = fs.readFileSync(new URL('./fixtures/nuget-sdk-10.0.401/arc-update-conflicts.log', import.meta.url), 'utf8');
+    const calls = [];
+    updateWithPruning({ root: w.root, packages: ['Snappier', 'xunit.v3', 'Kept'],
+      targets: [{ id: 'SNAPPIER', version: '1.3.3' }], log: () => {}, run: (_root, ids) => {
+        calls.push([...ids]);
+        assert.equal(w.read(), before);
+        return calls.length === 1 ? { status: 3, output } : { status: 0, output: '' };
+      } });
+    assert.deepEqual(calls, [['Snappier', 'xunit.v3', 'Kept'], ['Kept']]);
+    assert.equal(w.read(), before);
+  });
+
+  for (const declaration of [pin('snappier', '1.3.1'), pin('snappier', '$(Version)'), pin('snappier', '1.3.2').replace('Version=', 'Condition="true" Version=')]) {
+    it(`rejects preview-only attribution with an unsupported central pin: ${declaration}`, (t) => {
+      const w = fixture(t);
+      fs.writeFileSync(w.file, props(declaration));
+      let calls = 0;
+      assert.throws(() => updateWithPruning({ root: w.root, packages: ['Snappier', 'Kept'],
+        targets: [{ id: 'Snappier', version: '1.3.3' }], log: () => {}, run: () => {
+          calls++;
+          return { status: 3, output: leafConflict('Snappier').replaceAll('3.0.0', '1.3.3').replaceAll('2.0.0', '1.3.2') };
+        } }), /Cannot attribute NU1109 for Snappier/);
+      assert.equal(calls, 1);
+    });
+  }
 
   const unchanged = '<Project><PackageReference Include="MongoDB.Driver" Version="2.0.0" /></Project>';
   const insufficientDeltas = [
