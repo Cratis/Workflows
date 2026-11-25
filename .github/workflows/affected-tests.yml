@@ -330,7 +330,9 @@ jobs:
           fi
           cratis affected run "${args[@]}"
 
+      # Also after a failed run: only the maps of projects whose tests passed were written, and they stay valid.
       - name: Commit the coverage maps
+        if: ${{ !cancelled() }}
         env:
           BRANCH: ${{ inputs.map-branch || github.event.repository.default_branch }}
           TESTED_SHA: ${{ github.sha }}
