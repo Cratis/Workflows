@@ -1,0 +1,40 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Cratis affected-tests CLI
+description: >-
+  Installs a pinned version of the Cratis CLI, which provides 'cratis affected' (select, run and replay).
+  The version is always an input, so a CLI release can never change every repository at once.
+
+inputs:
+  version:
+    description: Exact Cratis.Cli version to install, for example 3.150.0. A range or 'latest' is rejected on purpose.
+    required: true
+
+outputs:
+  path:
+    description: The folder the 'cratis' executable was installed to; it is also added to PATH.
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the Cratis CLI
+      id: install
+      shell: bash
+      env:
+        CLI_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error title=affected-cli::version must be an exact version such as 3.150.0, got '$CLI_VERSION'"
+          exit 1
+        fi
+        tool_path="${RUNNER_TEMP}/cratis-cli"
+        dotnet tool install Cratis.Cli --version "$CLI_VERSION" --tool-path "$tool_path"
+        echo "$tool_path" >> "$GITHUB_PATH"
+        echo "path=$tool_path" >> "$GITHUB_OUTPUT"
+        # Fail now, with a clear message, when the pinned version predates 'cratis affected'.
+        if ! "$tool_path/cratis" affected --help > /dev/null 2>&1; then
+          echo "::error title=affected-cli::Cratis.Cli $CLI_VERSION has no 'affected' command; pin a newer version"
+          exit 1
+        fi

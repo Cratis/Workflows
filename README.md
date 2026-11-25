@@ -768,6 +768,100 @@ run-name: ${{ github.event.pull_request.title }}${{ contains(fromJSON('["edited"
 
 ---
 
+## Affected tests
+
+`.github/workflows/affected-tests.yml` builds and tests only what a pull request can reach, using
+`cratis affected` from the [Cratis CLI](https://github.com/Cratis/cli). Pull requests in large .NET repositories
+otherwise build every project and run every test, including thousands of integration tests, for changes that touch
+a fraction of them. One tested mechanism replaces per-repository selection scripts, so a selection mistake cannot
+silently skip tests in one repository only.
+
+| Event | Mode | What runs |
+|---|---|---|
+| `pull_request` | `pr` | A change-detection job, then only the test projects, and with `level: test` only the tests, the change can reach. A change that reaches none skips the test job. |
+| `push` to the default branch | `merge` | Everything, with coverage attribution, then the coverage maps are committed. |
+| `schedule`, `workflow_dispatch`, `push` elsewhere | `nightly` | Everything, as before. |
+
+The workflow always ends in one aggregator job named `Affected tests` (`if: always()`, checking every `needs.*.result`).
+Require that check, never the individual jobs, so a skipped job cannot hang a required check.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `cli-version` | required | Exact `Cratis.Cli` version providing `cratis affected`. The caller pins it, so a CLI release cannot change every repository at once. A range or `latest` is rejected. |
+| `runs-on` | `ubuntu-latest` | Runner label; private repositories use `cratis-arc`. **Never route the pull request jobs of a public repository to a self-hosted runner.** |
+| `mode` | `auto` | `auto` derives the mode from the event; or force `pr`, `merge` or `nightly`. |
+| `level` | `test` | `test` selects individual tests from the coverage maps; `project` runs whole affected test projects and needs no maps. Start with `project`. |
+| `configuration` | `Release` | Build configuration. |
+| `framework` | empty | Target framework, for test projects that have several. |
+| `global-json-file`, `dotnet-version` | `global.json`, empty | Where the SDK comes from. `DOTNET_INSTALL_DIR` is set, so self-hosted runners work. |
+| `collector`, `collector-version` | `dotnet-coverage`, `18.12.0` | Coverage collector of the merge-time run: `dotnet-coverage` or `coverlet`. |
+| `run-all-label` | `run-all-tests` | A pull request label that forces a full run. |
+| `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the scripts, not a pull request head ref. |
+
+Secret `map-token` (optional) is a token that may push to the default branch. Repositories whose branch protection
+blocks the workflow token need a bypass identity for it, as `PAT_WORKFLOWS` is one. It falls back to the workflow token.
+
+Example caller:
+
+```yaml
+name: Affected tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * *' # choose a repository-specific, nonzero minute
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  affected-tests:
+    uses: Cratis/Workflows/.github/workflows/affected-tests.yml@main
+    permissions:
+      contents: write # the merge-time run commits the coverage maps
+    with:
+      cli-version: 3.150.0
+      level: project
+    secrets:
+      map-token: ${{ secrets.PAT_WORKFLOWS }}
+```
+
+The composite action `.github/actions/affected-cli` installs the pinned CLI on its own, for workflows that call
+`cratis affected` directly:
+
+```yaml
+- uses: Cratis/Workflows/.github/actions/affected-cli@main
+  with:
+    version: 3.150.0
+```
+
+### Where the maps live and how they are written
+
+Coverage maps are committed to the default branch under `.cratis/affected/maps/`, one deterministic file per test
+project, so every checkout has them and they are versioned with the code. Only the merge-time run writes them,
+never a pull request. `scripts/commit-affected-maps.sh` commits only that folder and:
+
+- commits nothing when the maps are unchanged, or when the branch has moved past the tested commit; the newer run
+  updates them;
+- on a rejected push, fetches, **merges** and pushes again; it never rebases, amends or force-pushes;
+- adds no `[skip ci]`, because the downstream run is the only check that sees the merged result;
+- never fails the run for a map it could not push: a missing or stale map makes the selector run more tests, not fewer.
+
+### Safety
+
+Any doubt resolves to running more. A project with no map, a corrupted map, an unknown schema version, or a map whose
+commit is not an ancestor of `HEAD` runs in full. A change to `Directory.Build.props`, `Directory.Packages.props`,
+`global.json`, `NuGet.config`, `.editorconfig`, `.globalconfig`, `.cratis/affected.json`, or to any file outside every
+project that is not mapped to another job, runs everything. A repository's own committed path contract can be kept by
+listing it in `runEverythingTriggers`. The selection report, `selection.json` and `selection.md`, is uploaded as an
+artifact and appended to the step summary, naming the mode, the selected and total counts and the first reasons for
+every test project. See the [CLI documentation](https://github.com/Cratis/cli/blob/main/Documentation/affected/index.md)
+for the selection rules and `.cratis/affected.json`.
+
+`verify-affected-tests.yml` runs `.github/scripts/tests/affected-tests.test.py`: the workflow contract (timeouts,
+concurrency, pins, minimal permissions, the always-run aggregator), the change-detection outputs, and the map write-back
+against real local git remotes, including a push that loses a race.
+
 ## Guarded Pulumi runs
 
 `Cratis/Workflows/.github/actions/pulumi-guarded@main` runs a Pulumi command, holds all of its output back and scans it for key, certificate and token material before anything reaches the log. On a match the step fails and the output is withheld; the annotation names the command and the kind of material, never the matched text. If the scan itself cannot run, the output is withheld too. A scan failure wins over Pulumi's own status; otherwise the step exits with Pulumi's status and the output is printed, so a failed run stays diagnosable.

@@ -1,0 +1,323 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Affected tests
+
+# Builds and tests only what a pull request can reach, using `cratis affected`.
+#   pull_request            select and run what the change reaches
+#   push to default branch  run everything with coverage attribution, then commit the coverage maps
+#   schedule / dispatch     run everything, as before
+# See the README section "Affected tests" for the caller, the inputs and the map write-back.
+
+on:
+  workflow_call:
+    inputs:
+      cli-version:
+        description: Exact Cratis.Cli version that provides 'cratis affected'. Pinned by the caller so a CLI release cannot change every repository at once.
+        type: string
+        required: true
+      runs-on:
+        description: Runner label. Never a self-hosted runner for the pull_request jobs of a public repository; private repositories use cratis-arc.
+        type: string
+        default: ubuntu-latest
+      mode:
+        description: auto derives the mode from the event; or force pr, merge or nightly.
+        type: string
+        default: auto
+      level:
+        description: test selects individual tests from coverage maps; project runs whole affected test projects and needs no maps.
+        type: string
+        default: test
+      configuration:
+        description: Build configuration.
+        type: string
+        default: Release
+      framework:
+        description: Target framework to build and run, for test projects that have several.
+        type: string
+        default: ""
+      global-json-file:
+        description: Path to the global.json that pins the SDK.
+        type: string
+        default: global.json
+      dotnet-version:
+        description: Extra .NET SDK version to install, when global.json does not name it.
+        type: string
+        default: ""
+      collector:
+        description: Coverage collector for the merge-time run, dotnet-coverage or coverlet.
+        type: string
+        default: dotnet-coverage
+      collector-version:
+        description: Exact version of the dotnet-coverage tool to install when it is the collector.
+        type: string
+        default: 18.12.0
+      run-all-label:
+        description: Pull request label that forces a full run.
+        type: string
+        default: run-all-tests
+      workflows-ref:
+        description: Cratis/Workflows ref providing the supporting scripts; never a pull request head ref.
+        type: string
+        default: main
+    secrets:
+      map-token:
+        description: Token that may push to the default branch, for repositories whose branch protection needs a bypass identity. Falls back to the workflow token.
+        required: false
+
+permissions:
+  contents: read
+
+# A pull request run is superseded by the next push to it. A merge-time run is never cancelled, and a pending one may be
+# replaced by a newer one: every merge-time run rebuilds all the maps for the newest commit, so a replaced run loses nothing.
+concurrency:
+  group: affected-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  detect:
+    name: Detect affected projects
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      run-tests: ${{ steps.select.outputs.run-tests }}
+    steps:
+      - name: Resolve the mode
+        id: mode
+        env:
+          REQUESTED: ${{ inputs.mode }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED" in
+            pr | merge | nightly) mode="$REQUESTED" ;;
+            auto)
+              if [ "$EVENT" = pull_request ]; then
+                mode="pr"
+              elif [ "$EVENT" = push ] && [ "$REF" = "$DEFAULT_REF" ]; then
+                mode="merge"
+              else
+                mode="nightly"
+              fi
+              ;;
+            *)
+              echo "::error title=affected-tests::mode must be auto, pr, merge or nightly, got '$REQUESTED'"
+              exit 1
+              ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Mode: $mode"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The supporting scripts only: never caller or pull request code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+        with:
+          global-json-file: ${{ inputs.global-json-file }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - uses: Cratis/Workflows/.github/actions/affected-cli@main
+        with:
+          version: ${{ inputs.cli-version }}
+
+      - name: Select the affected test projects
+        id: select
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          BASE_REF: ${{ github.base_ref }}
+          FORCE_ALL: ${{ contains(github.event.pull_request.labels.*.name, inputs.run-all-label) }}
+          SCRIPTS: ${{ github.workspace }}/.cratis-workflows/.github/scripts
+        run: |
+          set -euo pipefail
+          # Only a pull request can skip work. Merge and nightly runs always run everything.
+          if [ "$MODE" != pr ]; then
+            echo "run-tests=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          args=(--from "origin/$BASE_REF" --to HEAD --mode pr --level project --no-discovery --report-directory "$RUNNER_TEMP/affected-detect")
+          if [ "$FORCE_ALL" = true ]; then
+            args+=(--run-all)
+          fi
+          # A selection that cannot be computed must never skip the tests.
+          if ! cratis affected select "${args[@]}"; then
+            echo "::warning title=affected-tests::selection failed; running the tests"
+            echo "run-tests=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$SCRIPTS/affected-select-outputs.py" "$RUNNER_TEMP/affected-detect/selection.json"
+
+  test:
+    name: Test
+    needs: detect
+    if: needs.detect.outputs.run-tests == 'true' && needs.detect.outputs.mode != 'merge'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+        with:
+          global-json-file: ${{ inputs.global-json-file }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main
+
+      - uses: Cratis/Workflows/.github/actions/affected-cli@main
+        with:
+          version: ${{ inputs.cli-version }}
+
+      - name: Select and run the tests
+        env:
+          MODE: ${{ needs.detect.outputs.mode }}
+          BASE_REF: ${{ github.base_ref }}
+          LEVEL: ${{ inputs.level }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          FRAMEWORK: ${{ inputs.framework }}
+          FORCE_ALL: ${{ contains(github.event.pull_request.labels.*.name, inputs.run-all-label) }}
+        run: |
+          set -euo pipefail
+          args=(--mode "$MODE" --level "$LEVEL" --configuration "$CONFIGURATION"
+            --report-directory "$RUNNER_TEMP/affected-report" --results-directory "$RUNNER_TEMP/affected-results")
+          if [ "$MODE" = pr ]; then
+            args+=(--from "origin/$BASE_REF" --to HEAD)
+          fi
+          if [ -n "$FRAMEWORK" ]; then
+            args+=(--framework "$FRAMEWORK")
+          fi
+          if [ "$FORCE_ALL" = true ]; then
+            args+=(--run-all)
+          fi
+          cratis affected run "${args[@]}"
+
+      - name: Upload the selection report and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: affected-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/affected-report
+            ${{ runner.temp }}/affected-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  merge:
+    name: Test everything and update the coverage maps
+    needs: detect
+    if: needs.detect.outputs.mode == 'merge'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 240
+    permissions:
+      contents: write
+    steps:
+      # The token is kept: the write-back step pushes the maps with it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.map-token || github.token }}
+          persist-credentials: true
+
+      # The supporting scripts only: never caller or pull request code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+        with:
+          global-json-file: ${{ inputs.global-json-file }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      # Merge-time runs may save the NuGet cache; pull request runs only restore it.
+      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main
+
+      - uses: Cratis/Workflows/.github/actions/affected-cli@main
+        with:
+          version: ${{ inputs.cli-version }}
+
+      - name: Install the coverage collector
+        if: inputs.collector == 'dotnet-coverage'
+        env:
+          COLLECTOR_VERSION: ${{ inputs.collector-version }}
+        run: |
+          set -euo pipefail
+          dotnet tool install dotnet-coverage --version "$COLLECTOR_VERSION" --tool-path "$RUNNER_TEMP/collector"
+          echo "$RUNNER_TEMP/collector" >> "$GITHUB_PATH"
+
+      - name: Run every test with coverage attribution
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+          FRAMEWORK: ${{ inputs.framework }}
+          COLLECTOR: ${{ inputs.collector }}
+        run: |
+          set -euo pipefail
+          args=(--mode merge --configuration "$CONFIGURATION" --collector "$COLLECTOR"
+            --report-directory "$RUNNER_TEMP/affected-report" --results-directory "$RUNNER_TEMP/affected-results")
+          if [ -n "$FRAMEWORK" ]; then
+            args+=(--framework "$FRAMEWORK")
+          fi
+          cratis affected run "${args[@]}"
+
+      - name: Commit the coverage maps
+        env:
+          BRANCH: ${{ github.event.repository.default_branch }}
+          TESTED_SHA: ${{ github.sha }}
+        run: bash "${GITHUB_WORKSPACE}/.cratis-workflows/.github/scripts/commit-affected-maps.sh"
+
+      - name: Upload the selection report and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: affected-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/affected-report
+            ${{ runner.temp }}/affected-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The one required check. It always runs, so a required check never hangs on skipped work.
+  affected-tests:
+    name: Affected tests
+    if: always()
+    needs: [detect, test, merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check every job
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != success ] && [ "$result" != skipped ]; then
+              echo "::error title=affected-tests::a job ended as '$result'"
+              exit 1
+            fi
+          done
