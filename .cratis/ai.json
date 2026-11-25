@@ -10,9 +10,11 @@
   ],
   "profiles": [
     "cratis/documentation",
-    "cratis/engineering/core"
+    "cratis/engineering/core",
+    "cratis/engineering/csharp"
   ],
   "languages": [
-    "python"
+    "python",
+    "csharp"
   ]
 }
