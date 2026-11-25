@@ -63,6 +63,10 @@ on:
         description: Pull request label that forces a full run.
         type: string
         default: run-all-tests
+      base-ref:
+        description: Branch the change is measured against. Empty means the pull request base. Set it, with mode pr, to trial the selection from a push.
+        type: string
+        default: ""
       map-branch:
         description: Branch the merge-time run pushes the coverage maps to. Empty means the default branch; set it to a feature branch to trial a merge-time run without touching the default branch.
         type: string
@@ -154,7 +158,7 @@ jobs:
         id: select
         env:
           MODE: ${{ steps.mode.outputs.mode }}
-          BASE_REF: ${{ github.base_ref }}
+          BASE_REF: ${{ inputs.base-ref || github.base_ref }}
           FORCE_ALL: ${{ contains(github.event.pull_request.labels.*.name, inputs.run-all-label) }}
           SCRIPTS: ${{ github.workspace }}/.cratis-workflows/.github/scripts
         run: |
@@ -225,7 +229,7 @@ jobs:
       - name: Select and run the tests
         env:
           MODE: ${{ needs.detect.outputs.mode }}
-          BASE_REF: ${{ github.base_ref }}
+          BASE_REF: ${{ inputs.base-ref || github.base_ref }}
           LEVEL: ${{ inputs.level }}
           CONFIGURATION: ${{ inputs.configuration }}
           FRAMEWORK: ${{ inputs.framework }}

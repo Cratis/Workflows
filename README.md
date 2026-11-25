@@ -795,6 +795,7 @@ Require that check, never the individual jobs, so a skipped job cannot hang a re
 | `framework` | empty | Target framework, for test projects that have several. |
 | `global-json-file`, `dotnet-version` | `global.json`, empty | Where the SDK comes from; `dotnet-version` takes one extra SDK per line. `DOTNET_INSTALL_DIR` is set, so self-hosted runners work. |
 | `node-version`, `prepare-command` | empty, empty | Installs Node.js and runs shell commands in the repository root before the build, for builds that embed generated assets. The command is the repository's own code, run on the checked out head. |
+| `base-ref` | pull request base | Branch the change is measured against. Set it, with `mode: pr`, to trial the selection from a push. |
 | `map-branch` | default branch | Branch the merge-time run pushes the maps to. Set it to a feature branch to trial a merge-time run without touching the default branch. |
 | `collector`, `collector-version` | `dotnet-coverage`, `18.12.0` | Coverage collector of the merge-time run: `dotnet-coverage` or `coverlet`. |
 | `run-all-label` | `run-all-tests` | A pull request label that forces a full run. |
