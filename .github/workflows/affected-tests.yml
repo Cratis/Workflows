@@ -40,7 +40,15 @@ on:
         type: string
         default: global.json
       dotnet-version:
-        description: Extra .NET SDK version to install, when global.json does not name it.
+        description: Extra .NET SDK versions to install, one per line, when global.json does not name them all.
+        type: string
+        default: ""
+      node-version:
+        description: Node.js version to install before the prepare command. Empty installs none.
+        type: string
+        default: ""
+      prepare-command:
+        description: Shell commands run in the repository root before the build, for example installing packages that the build embeds. Runs as the repository's own code on the checked out head.
         type: string
         default: ""
       collector:
@@ -55,6 +63,10 @@ on:
         description: Pull request label that forces a full run.
         type: string
         default: run-all-tests
+      map-branch:
+        description: Branch the merge-time run pushes the coverage maps to. Empty means the default branch; set it to a feature branch to trial a merge-time run without touching the default branch.
+        type: string
+        default: ""
       workflows-ref:
         description: Cratis/Workflows ref providing the supporting scripts; never a pull request head ref.
         type: string
@@ -189,6 +201,19 @@ jobs:
         with:
           version: ${{ inputs.cli-version }}
 
+      - name: Setup node
+        if: inputs.node-version != ''
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: ${{ inputs.node-version }}
+
+      - name: Prepare the build
+        if: inputs.prepare-command != ''
+        env:
+          PREPARE_COMMAND: ${{ inputs.prepare-command }}
+        run: bash -euo pipefail -c "$PREPARE_COMMAND"
+
       - name: Select and run the tests
         env:
           MODE: ${{ needs.detect.outputs.mode }}
@@ -261,6 +286,19 @@ jobs:
         with:
           version: ${{ inputs.cli-version }}
 
+      - name: Setup node
+        if: inputs.node-version != ''
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: ${{ inputs.node-version }}
+
+      - name: Prepare the build
+        if: inputs.prepare-command != ''
+        env:
+          PREPARE_COMMAND: ${{ inputs.prepare-command }}
+        run: bash -euo pipefail -c "$PREPARE_COMMAND"
+
       - name: Install the coverage collector
         if: inputs.collector == 'dotnet-coverage'
         env:
@@ -286,7 +324,7 @@ jobs:
 
       - name: Commit the coverage maps
         env:
-          BRANCH: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ inputs.map-branch || github.event.repository.default_branch }}
           TESTED_SHA: ${{ github.sha }}
         run: bash "${GITHUB_WORKSPACE}/.cratis-workflows/.github/scripts/commit-affected-maps.sh"
 
