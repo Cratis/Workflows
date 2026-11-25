@@ -23,7 +23,7 @@ runs:
       shell: bash
       env:
         CLI_VERSION: ${{ inputs.version }}
-      run: |
+      run: | # zizmor: ignore[github-env] only RUNNER_TEMP is added to PATH; no input reaches it, and the version is validated first
         set -euo pipefail
         if [[ ! "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
           echo "::error title=affected-cli::version must be an exact version such as 3.150.0, got '$CLI_VERSION'"

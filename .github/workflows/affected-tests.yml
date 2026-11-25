@@ -134,7 +134,7 @@ jobs:
           global-json-file: ${{ inputs.global-json-file }}
           dotnet-version: ${{ inputs.dotnet-version }}
 
-      - uses: Cratis/Workflows/.github/actions/affected-cli@main
+      - uses: Cratis/Workflows/.github/actions/affected-cli@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
         with:
           version: ${{ inputs.cli-version }}
 
@@ -183,9 +183,9 @@ jobs:
           global-json-file: ${{ inputs.global-json-file }}
           dotnet-version: ${{ inputs.dotnet-version }}
 
-      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main
+      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
 
-      - uses: Cratis/Workflows/.github/actions/affected-cli@main
+      - uses: Cratis/Workflows/.github/actions/affected-cli@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
         with:
           version: ${{ inputs.cli-version }}
 
@@ -255,9 +255,9 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
 
       # Merge-time runs may save the NuGet cache; pull request runs only restore it.
-      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main
+      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
 
-      - uses: Cratis/Workflows/.github/actions/affected-cli@main
+      - uses: Cratis/Workflows/.github/actions/affected-cli@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
         with:
           version: ${{ inputs.cli-version }}
 
