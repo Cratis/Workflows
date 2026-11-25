@@ -1,0 +1,40 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Affected Tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/affected-tests.yml
+      - .github/actions/affected-cli/**
+      - .github/scripts/affected-select-outputs.py
+      - .github/scripts/commit-affected-maps.sh
+      - .github/scripts/tests/affected-tests.test.py
+      - .github/workflows/verify-affected-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/affected-tests.yml
+      - .github/actions/affected-cli/**
+      - .github/scripts/affected-select-outputs.py
+      - .github/scripts/commit-affected-maps.sh
+      - .github/scripts/tests/affected-tests.test.py
+      - .github/workflows/verify-affected-tests.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the affected-tests workflow, action and scripts offline
+        run: python3 -B .github/scripts/tests/affected-tests.test.py

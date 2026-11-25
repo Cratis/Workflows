@@ -16,7 +16,10 @@
 # aliases, functions, script files and recursive searches without named files remain outside its text analysis.
 # Allowlisted safe shapes (each commented where it is implemented, each with specs): source-file names classified by
 # real secret patterns, a leading plain NAME=VALUE, quoted commit and pull request text, literal here-document
-# text, and link-target checks. Anything else naming a protected file is refused.
+# text for plain consumers, and link-target checks. Inline interpreter programs and executable heredocs share
+# boundary-aware protected file vocabulary. This text filter is not a sandbox: encoded paths, external scripts
+# and arbitrarily assembled names need OS-level protection. See ../README.md#inline-interpreter-policy.
+# Anything else naming a protected file is refused.
 #
 # Escape hatch for a human who authorized the read — set in the environment the agent harness was started
 # from, never inside the command (an assignment in the command is ignored):
@@ -156,6 +159,8 @@ function ansi_c(s, i, n,    c, c2, v, d, k, lim, stop, digits) {
         if (v == 0) stop = 1
         else if (!stop) addw(CH[v], "l")
     }
+    # An unterminated string leaves word boundaries uncertain: no test-filter exemption applies.
+    filter_compound = 1
     return i
 }
 # Output redirections are removed before a command is analyzed, so a redirect never shifts a CLI's subcommand
@@ -241,11 +246,54 @@ function stem_units(t, m, start, stem) {
     return stem_match(t, stem, start, 1, 0, 0)
 }
 function test_filter_option(w) {
-    return w ~ /^(-method|-class|-namespace|-trait|--filter|--filter-method|--filter-class|--filter-namespace|--treenode-filter)$/
+    return w ~ /^(-method|-class|-namespace|-trait|-filterVSTest|--filter|--filter-method|--filter-class|--filter-namespace|--treenode-filter)$/
 }
-function stem_scan(text, mode, nonliteral, test_filter,    t, k, stem, pos, offset, first, found, end, p, candidate) {
+# Only inert type/namespace data can release credential vocabulary; literal secret filenames stay protected.
+function inert_test_filter(w, m) {
+    return w != "" && length(w) == length(m) && w !~ /^[-.~@]/ &&
+        w !~ /[\/\\$`<>;|&[:cntrl:]]/ && !expands(w, m) && sensitive_path(w) == ""
+}
+# dotnet's own arguments can change what runs (-p:RunCommand=..., --launch-profile, adapter paths), so before `--`
+# only the project, build switches and filters are accepted; everything after `--` goes to the test application.
+# The command must be fully literal: an expansion or response file could supply any of those arguments.
+function plain_dotnet_args(A, M, n,    k, w) {
+    for (k = 1; k <= n; k++) if (expands(A[k], M[k]) || length(A[k]) != length(M[k])) return 0
+    for (k = 3; k <= n && A[k] != "--"; k++) {
+        w = A[k]
+        if (test_filter_option(w) || w ~ /^(--project|-c|--configuration|-f|--framework|-v|--verbosity)$/) {
+            if (++k <= n && A[k] ~ /^[-@]/) return 0
+            continue
+        }
+        if (w ~ /^--(no-build|no-restore|nologo|no-launch-profile)$/) continue
+        if (w ~ /^--(project|configuration|framework|verbosity)=[^-@]/) continue
+        if (w ~ /^--[^=]+=/ && test_filter_option(substr(w, 1, index(w, "=") - 1))) continue
+        if (k == 3 && w !~ /^[-\/@+]/ && w !~ /[=:]/) continue
+        return 0
+    }
+    return 1
+}
+function credential_filter_slots(A, M, n,    k, w, eq) {
+    delete CF
+    # Compound commands keep the existing fail-closed credential verdict across command separators.
+    if (filter_compound) return
+    # Only the .NET test runner takes filter data; a reader's operand that looks like an option stays a path.
+    if (tolower(base(A[1])) != "dotnet" || A[2] !~ /^(test|run)$/ || !plain_dotnet_args(A, M, n)) return
+    # Start after the subcommand, and consume exactly one value even when it is another option or is unsafe.
+    for (k = 3; k <= n; k++) {
+        w = A[k]
+        if (test_filter_option(w)) {
+            k++
+            if (k <= n && inert_test_filter(A[k], M[k])) CF[k] = 1
+        } else if (w ~ /^--[^=]+=/ && test_filter_option(substr(w, 1, index(w, "=") - 1))) {
+            eq = index(w, "=")
+            if (inert_test_filter(substr(w, eq + 1), substr(M[k], eq + 1))) CF[k] = 1
+        }
+    }
+}
+function stem_scan(text, mode, nonliteral, test_filter, credential_filter,    t, k, stem, pos, offset, first, found, end, p, candidate) {
     t = tolower(text)
     for (k = 1; k <= nstem; k++) {
+        if (credential_filter && STEM[k] ~ /^credentials?$/) continue
         stem = STEM[k]; offset = 0
         while ((pos = index(substr(t, offset + 1), stem)) > 0) {
             pos += offset; end = pos + length(stem) - 1
@@ -262,6 +310,7 @@ function stem_scan(text, mode, nonliteral, test_filter,    t, k, stem, pos, offs
             candidate = substr(t, p, 1)
             for (k = 1; k <= nstem; k++) {
                 stem = STEM[k]
+                if (credential_filter && stem ~ /^credentials?$/) continue
                 if (candidate != substr(stem, 1, 1) && candidate !~ /[*?[(@+!~^]/) continue
                 # Test-filter values are data; other programs can match globs across path separators.
                 if (stem == "run/secrets" && test_filter && nonliteral != "expanding" && !index(t, "/")) continue
@@ -596,7 +645,18 @@ function sed_slots(A, s, n,    i, w, program, explicit, ended, scripts) {
     return scripts > 0
 }
 # Only fully modeled literal non-readers can distinguish data slots from paths.
-function nonreader(A, M, n,    i, w, first, read) {
+function gh_reader_bundle(A, i, n,    j, flag) {
+    for (j = 2; j <= length(A[i]); j++) {
+        flag = substr(A[i], j, 1)
+        if (flag ~ /^[icwd]$/) continue
+        if (flag != "q" && flag != "t") return 0
+        DATA[i] = 1
+        if (j == length(A[i])) { if (++i > n) return 0; DATA[i] = 1 }
+        return i
+    }
+    return i
+}
+function nonreader(A, M, n,    i, w, first, read, nexti) {
     delete DATA
     for (i = 1; i <= n; i++) if (expands(A[i], M[i]) || index(A[i], "`") || A[i] ~ /^</) return 0
     first = tolower(base(A[1]))
@@ -628,9 +688,11 @@ function nonreader(A, M, n,    i, w, first, read) {
     for (i = A[2] == "api" ? 3 : 4; i <= n; i++) {
         w = A[i]
         if (w ~ /^>/) { if (w == ">" || w == ">>") i++; continue }
+        if (w ~ /^--(jq|template)=/) { DATA[i] = 1; continue }
         if (w ~ /^(--jq|-q|--template|-t)$/) { if (++i > n) return 0; DATA[i] = 1; continue }
         if (w ~ /^(--json|--repo|-R|--limit|-L|--hostname|--header|-H)$/) { if (++i > n) return 0; DATA[i] = 1; continue }
         if (A[2] == "api" && w ~ /^(--method|-X)$/) { if (++i > n || A[i] !~ /^(GET|HEAD)$/) return 0; continue }
+        if (w ~ /^-[^-]/) { nexti = gh_reader_bundle(A, i, n); if (!nexti) return 0; i = nexti; continue }
         if (w ~ /^-/ && w !~ /^(--paginate|--slurp|--include|--silent|--log|--log-failed|--web)$/) return 0
         if (A[2] != "api") DATA[i] = 1
     }
@@ -655,6 +717,7 @@ function end_cmd(    k, m, w, j, hit, exempt, path_git, paths_only, test_filter)
         for (k = 1; k <= nw; k++) PROBE_WORDS[k] = W[k]
         paths_only = nonreader(W, WM, nw)
         regex_slots(W, 1, nw)
+        credential_filter_slots(W, WM, nw)
         path_git = git_paths(W, WM, nw)
         msg_shape = data_shape(W, WM, nw)
         for (k = 1; k <= nw; k++) {
@@ -666,7 +729,7 @@ function end_cmd(    k, m, w, j, hit, exempt, path_git, paths_only, test_filter)
             if (exempt && RP[k] < 0) continue
             w = exempt ? substr(W[k], 1, RP[k]) : W[k]
             test_filter = test_filter_option(W[k - 1]) || (w ~ /^--[^=]+=/ && test_filter_option(substr(w, 1, index(w, "=") - 1)))
-            hit = stem_scan(w, "raw", expands(w, WM[k]) ? "expanding" : 0, test_filter); if (TAINT == "") TAINT = hit
+            hit = stem_scan(w, "raw", expands(w, WM[k]) ? "expanding" : 0, test_filter, (k in CF)); if (TAINT == "") TAINT = hit
             # Command output may supply any text, including several names: judge it as an unresolved wildcard.
             if (!exempt && index(WM[k], "c") + index(WM[k], "C") > 0) {
                 hit = stem_scan(output_wild(W[k], WM[k]), "raw", "expanding"); if (TAINT == "") TAINT = hit
@@ -747,15 +810,42 @@ function interpreter_hit(body,    t, k, stem, from, p, before, after, kind) {
             before = (p > 1) ? substr(t, p - 1, 1) : ""
             after = substr(t, p + length(stem), 1)
             kind = INTERP_KIND[k]
+            # Template filenames and bare properties are not protected file vocabulary. Existing argv
+            # taint checks remain independent; process.env.NAME and data.key in heredocs are not reads.
+            if (stem == ".env" && substr(t, p + length(stem)) ~ /^\.(example|sample|template|dist|defaults)([^a-z0-9_]|$)/) { from = p + 1; continue }
             if (kind == "env" && before !~ /[]a-z0-9_)]/ && after !~ /[a-z0-9_]/) return stem
             if (kind == "ext" && (after == "\"" || after == "\047" || after == "`")) return stem
-            if (kind == "name" && after !~ /[a-z0-9_]/) return stem
+            if (kind == "word" && before !~ /[a-z0-9_]/ && after !~ /[a-z0-9_]/) return stem
+            if (kind == "path" || kind ~ /^(name|suffix)$/ && after !~ /[a-z0-9_]/) return stem
             from = p + 1
         }
     }
     return ""
 }
-function read_heredocs(s, i, n,    h, e, line, cmp, body, hit) {
+function interpreter_name(b) {
+    return b ~ /^(node(js)?|deno|bun|python[0-9.]*|ruby|perl|php|lua|osascript|pwsh|powershell|dotnet|java|jshell|rscript|tclsh|julia|groovy|tsx|ts-node|bash|sh|zsh|dash|ksh)$/
+}
+# Inspect only the executable selected after shell wrappers; later script operands are data, not flags.
+# Unknown startup switches fail closed when vocabulary is present rather than guessing their arity.
+function interpreter_invocation(A, s, n, b,    k, option) {
+    if (nheredoc > 0) { hd_interp = 1; INLINE = 1 }
+    if (b ~ /^(bash|sh|zsh|dash|ksh)$/) return
+    for (k = s + 1; k <= n; k++) {
+        option = tolower(A[k])
+        if (option == "--" || b ~ /^python/ && option ~ /^-m/) return
+        if (b ~ /^node(js)?$/ && option == "--test") continue
+        if (b == "deno" && option == "eval") { INLINE = 1; return }
+        if (b ~ /^(pwsh|powershell)$/ && option ~ /^-(c|command)$/) { INLINE = 1; return }
+        if (b ~ /^python/ && option ~ /^-c/ || b == "php" && option ~ /^-r/ ||
+            b ~ /^(node(js)?|bun|ruby|perl|lua|osascript|tsx|ts-node)$/ && option ~ /^-[ep]/ ||
+            b ~ /^(node(js)?|bun|tsx|ts-node)$/ && option ~ /^--(eval|print)(=|$)/) { INLINE = 1; return }
+        if (option !~ /^-/ || option == "-") return
+        if (option ~ /^--(input-type|require|loader|import)$/ || b ~ /^(node(js)?|bun|tsx|ts-node)$/ && option == "-r") { k++; continue }
+        if (option ~ /^--(input-type|require|loader|import)=/ || option ~ /^--(no-config|no-warnings|quiet)$/) continue
+        INLINE = 1; return
+    }
+}
+function read_heredocs(s, i, n,    h, e, line, cmp, body) {
     for (h = 1; h <= nheredoc; h++) {
         body = ""
         while (i <= n) {
@@ -766,11 +856,9 @@ function read_heredocs(s, i, n,    h, e, line, cmp, body, hit) {
             if (cmp == HD[h]) break
             body = body line "\n"
         }
+        if (hd_interp && interpreter_hit(body) != "") INLINE_HIT = 1
         if (hd_shell) enqueue(body)
-        else {
-            if (!HDQ[h]) heredoc_substitutions(body)
-            if (hd_interp && (hit = interpreter_hit(body)) != "") { complex = 1; if (TAINT == "") TAINT = hit }
-        }
+        else if (!HDQ[h]) heredoc_substitutions(body)
     }
     nheredoc = 0; hd_shell = 0; hd_interp = 0
     return i
@@ -779,7 +867,7 @@ function tokenize(s,    i, n, c, c2, j, dash, delim) {
     delete CWD; ncd = QUEUE_COUNT[qi]
     for (i = 1; i <= ncd; i++) CWD[i] = QUEUE_DIR[qi, i]
     effective_dir = CWD[1]; cwd_depth = 0; cwd_conditional = 0; nwrap = 0
-    clear_pipeline(); pipe_input = 0
+    clear_pipeline(); pipe_input = 0; filter_compound = 0
     n = length(s); i = 1; nw = 0; word = ""; wmask = ""; inword = 0; wquoted = 0; wplain = 0; wunquoted = 0; nheredoc = 0; hd_shell = 0; hd_interp = 0; quote_boundary = 0
     delete W; delete WP; delete WM
     while (i <= n) {
@@ -792,17 +880,17 @@ function tokenize(s,    i, n, c, c2, j, dash, delim) {
         if (c == "\047") {
             wquoted = 1; inword = 1; quote_boundary = 1
             j = index(substr(s, i + 1), "\047")
-            if (j == 0) { addw(substr(s, i + 1), "l"); i = n + 1; continue }
+            if (j == 0) { addw(substr(s, i + 1), "l"); filter_compound = 1; i = n + 1; continue }
             addw(substr(s, i + 1, j - 1), "l"); quote_boundary = 1; i += j + 1; continue
         }
         if (c == "$" && substr(s, i + 1, 1) == "\047") { wquoted = 1; inword = 1; quote_boundary = 1; i = ansi_c(s, i + 2, n); quote_boundary = 1; continue }
         if (c == "$" && substr(s, i + 1, 1) == "\"") { i++; c = "\"" }
         if (c == "\"") {
-            wquoted = 1; inword = 1; quote_boundary = 1; i++
+            wquoted = 1; inword = 1; quote_boundary = 1; i++; dq_closed = 0
             while (i <= n) {
                 c = substr(s, i, 1)
                 if (c == "\\") { addw(substr(s, i + 1, 1), "l"); i += 2; continue }
-                if (c == "\"") { quote_boundary = 1; i++; break }
+                if (c == "\"") { quote_boundary = 1; dq_closed = 1; i++; break }
                 if (c == "$" && substr(s, i + 1, 1) == "(") { i = cmdsub(s, i + 2, n); addw("x", "c"); continue }
                 if (c == "`") {
                     complex = 1
@@ -812,6 +900,7 @@ function tokenize(s,    i, n, c, c2, j, dash, delim) {
                 }
                 addw(c, "d"); i++
             }
+            if (!dq_closed) filter_compound = 1
             continue
         }
         if (c == "$" && substr(s, i + 1, 1) == "(") { wquoted = 1; inword = 1; wunquoted = 1; i = cmdsub(s, i + 2, n); addw("x", "c"); continue }
@@ -829,6 +918,7 @@ function tokenize(s,    i, n, c, c2, j, dash, delim) {
         }
         if (c == " " || c == "\t" || c == "\r") { flush_word(); i++; continue }
         if (c == "\n") {
+            filter_compound = 1
             end_cmd(); clear_pipeline(); pipe_input = 0; cwd_conditional = 0; i++
             if (nheredoc > 0) i = read_heredocs(s, i, n)
             continue
@@ -840,6 +930,7 @@ function tokenize(s,    i, n, c, c2, j, dash, delim) {
             inword = 1; addw(substr(s, i, j - i + 1), "u"); i = j + 1; continue
         }
         if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")") {
+            filter_compound = 1
             end_cmd()
             c2 = substr(s, i + 1, 1)
             if (c == "(") push_cwd_scope()
@@ -886,7 +977,19 @@ function tokenize(s,    i, n, c, c2, j, dash, delim) {
 }
 
 # ── option parsing shared by the CLIs: positionals P/PI, output format, -f/--format value, --raw ──
-function kparse(A, s, n, shortvals,    i, w, eq, key, val, f, rest) {
+function gh_short_options(A, i, shortvals, output_filters,    j, f, rest, value) {
+    for (j = 2; j <= length(A[i]); j++) {
+        f = substr(A[i], j, 1)
+        if (!index(shortvals, f)) continue
+        rest = substr(A[i], j + 1)
+        if (rest == "") value = A[++i]
+        else { value = rest; sub(/^=/, "", value) }
+        if (f == "q" || (f == "t" && output_filters == 1)) check_gh_filter(value)
+        return i
+    }
+    return i
+}
+function kparse(A, s, n, shortvals, output_filters,    i, w, eq, key, val, f, rest) {
     delete P; delete PI
     np = 0; outfmt = ""; fmtval = ""; tmpl = ""; tmplfile = 0; dd = 0; raw = 0
     for (i = s; i <= n; i++) {
@@ -895,7 +998,11 @@ function kparse(A, s, n, shortvals,    i, w, eq, key, val, f, rest) {
         if (substr(w, 1, 2) == "--") {
             eq = index(w, "="); key = w; val = ""
             if (eq) { key = substr(w, 1, eq - 1); val = substr(w, eq + 1) }
-            if (key == "--output") { if (!eq) { i++; val = A[i] } outfmt = tolower(val) }
+            if (output_filters && (key == "--jq" || key == "--template")) {
+                if (!eq) { i++; val = A[i] }
+                check_gh_filter(val)
+            }
+            else if (key == "--output") { if (!eq) { i++; val = A[i] } outfmt = tolower(val) }
             else if (key == "--format") { if (!eq) { i++; val = A[i] } fmtval = val }
             else if (key == "--template") {
                 if (!eq) { i++; val = A[i] } tmpl = val
@@ -907,6 +1014,7 @@ function kparse(A, s, n, shortvals,    i, w, eq, key, val, f, rest) {
             continue
         }
         if (substr(w, 1, 1) == "-" && length(w) > 1) {
+            if (output_filters) { i = gh_short_options(A, i, shortvals, output_filters); continue }
             f = substr(w, 2, 1); rest = substr(w, 3)
             if (f == "o") {
                 if (rest == "") { i++; val = A[i] } else val = (substr(rest, 1, 1) == "=" ? substr(rest, 2) : rest)
@@ -1530,7 +1638,7 @@ function shell_invocation(A, s, n,    k, j, flags, c, script) {
             if (j != length(flags) || expands(A[k + 1], mask_of(A, k + 1)) || !allowed_option(A[k + 1])) config_report()
             k++; break
         }
-        if (script) { enqueue(A[k + 1]); return }
+        if (script) { INLINE = 1; enqueue(A[k + 1]); return }
     }
     if (nheredoc > 0) hd_shell = 1
 }
@@ -1665,8 +1773,45 @@ function endpoint_path(path,    i, pair, value, decoded) {
     sub(/[?#].*$/, "", decoded); gsub(/\/\/+/, "/", decoded); sub(/\/+$/, "", decoded)
     return decoded
 }
+# Ignore string literals and field names, but inspect expressions inside string interpolation.
+function filter_reads_environment(s,    i, c, nextc, quoted, depth, parens, token, previous, level, containers, object_key) {
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1); nextc = substr(s, i + 1, 1)
+        if (quoted) {
+            if (c == "\\") {
+                if (nextc == "(") { parens[++depth] = 1; quoted = 0; previous = "" }
+                i++
+            } else if (c == "\"") quoted = 0
+            continue
+        }
+        if (c == "\"") { quoted = 1; previous = "string"; continue }
+        if (c == "#") { while (i <= length(s) && substr(s, i, 1) != "\n") i++; continue }
+        if (depth && c == "(") parens[depth]++
+        if (depth && c == ")" && --parens[depth] == 0) { depth--; quoted = 1; continue }
+        if (c == "[" || c == "{") containers[++level] = c
+        if (c == "]" || c == "}") { delete containers[level]; level-- }
+        if (c ~ /[A-Za-z_]/) {
+            token = c
+            while (substr(s, i + 1, 1) ~ /[A-Za-z0-9_]/) token = token substr(s, ++i, 1)
+            object_key = containers[level] == "{" && (previous == "{" || previous == ",") && substr(s, i + 1) ~ /^[[:space:]]*:[^:]/
+            if ((token == "env" && previous != "." && previous != "$" && !object_key) || (token == "ENV" && previous == "$")) return 1
+            previous = token
+        } else if (c !~ /[[:space:]]/) previous = c
+    }
+    return 0
+}
+function check_gh_filter(value) {
+    if (filter_reads_environment(value))
+        report("gh output filter reads the process environment, including credentials", "select response fields without env or $ENV")
+}
+function gh_title_option() {
+    return (P[1] ~ /^(pr|issue|release)$/ && P[2] ~ /^(create|edit)$/) ||
+        (P[1] == "pr" && P[2] == "merge") || (P[1] ~ /^(ssh-key|gpg-key)$/ && P[2] == "add")
+}
 function gh(A, s, n,    i, w, mutating, k, path, kind) {
     kparse(A, s + 1, n, "XHfFqtR")
+    # Only named command pairs use -t for a title or subject rather than an output template.
+    kparse(A, s + 1, n, "XHfFqtR", (gh_title_option() ? 2 : 1))
     if (P[1] == "secret") {
         if (P[2] != "set" && P[2] != "delete" && P[2] != "remove")
             report("gh secret " P[2] " reads the repository secret store", "gh secret set NAME (writes nothing to the output); refer to secrets by name only")
@@ -1986,6 +2131,8 @@ function git_content(A, s, n,    subcommand, k, w, kind, ended, pathspec) {
     }
 }
 function analyze(A, s, n,    w, b, k, names, p, config, get, show, first) {
+    # Preserve decoded evidence before search-pattern, Git-path and source/template exemptions.
+    for (k = s; k <= n; k++) if (interpreter_hit(A[k]) != "") INLINE_HIT = 1
     nrt = 0; nwrap = 0; delete REDIRECT_TOKENS; delete ROFF; first = s
     while (s <= n) {
         w = A[s]; b = base(w)
@@ -2023,7 +2170,7 @@ function analyze(A, s, n,    w, b, k, names, p, config, get, show, first) {
     }
     if (expands(A[s], mask_of(A, s))) return dyn_command(A, s, n)
     b = base(A[s])
-    if (nheredoc > 0 && b ~ /^(node|nodejs|deno|bun|python[0-9.]*|ruby|perl|php|lua|osascript|pwsh|powershell|dotnet|java|jshell|rscript|tclsh|julia|groovy|tsx|ts-node)$/) hd_interp = 1
+    if (interpreter_name(b)) interpreter_invocation(A, s, n, b)
     if (b == "cd" || b == "pushd" || b == "popd") { change_directory(A, s, n, b); return }
     check_bulk_roots(A, s, n, b)
     if (A[s] == "git") git_content(A, s, n)
@@ -2117,18 +2264,20 @@ BEGIN {
     }
     nextension = split("pem key p12 pfx jks keystore kdbx kubeconfig env", EXT, " ")
     ndispatch = split("cat tac nl less more head tail bat batcat strings xxd od hexdump cut sort uniq base64 wc dd cp mv ln rsync scp tar zip shopt set setopt unsetopt emulate grep egrep fgrep rg ag sed awk gawk mawk nawk busybox jq yq gojq jaq kubectl oc docker podman docker-compose gh vault aws az gcloud pulumi cratis printenv export declare typeset env bash sh zsh dash ksh eval", DN, " ")
-    ninterp = split(".env|env .env.local|name .env.production|name .envrc|name id_rsa|name id_ed25519|name id_ecdsa|name id_dsa|name .netrc|name .npmrc|name .pgpass|name .pypirc|name .git-credentials|name kubeconfig|name .kube/|name .aws/|name .docker/config.json|name credentials.json|name secrets.yaml|name secrets.yml|name .pem|ext .key|ext .p12|ext .pfx|ext .jks|ext .keystore|ext .kdbx|ext", INTERP_SPEC, " ")
+    ninterp = split(".env|env .env.local|name .env.production|name .envrc|name id_rsa|name id_ed25519|name id_ecdsa|name id_dsa|name .netrc|name .npmrc|name .pgpass|name .pypirc|name .git-credentials|name kubeconfig|name .kube/|path .aws/|path .docker/|path credentials|word credential|word secrets.yaml|name secrets.yml|name /environ|name run/secrets|path .pem|suffix .key|ext .p12|ext .pfx|ext .jks|ext .keystore|ext .kdbx|ext", INTERP_SPEC, " ")
     for (i = 1; i <= ninterp; i++) { split(INTERP_SPEC[i], L, "|"); INTERP[i] = L[1]; INTERP_KIND[i] = L[2] }
     nstem = split(".env .pem .key .p12 .pfx .jks .keystore .kdbx id_rsa id_ed25519 id_ecdsa id_dsa .netrc .npmrc .pgpass .pypirc .git-credentials .kube/ kubeconfig credentials credential secrets.yaml secrets.yml .docker/ /environ run/secrets", STEM, " ")
     CMD = ENVIRON["GS_COMMAND"]
     for (pass = 1; pass <= 2; pass++) {
         delete queue; delete QUEUE_DIR; delete QUEUE_COUNT; queued = 0; qi = 0; delete seen; reports = ""
         delete CWD; ncd = 1; nwrap = 0; CWD[1] = ENVIRON["GS_CWD_FALLBACK"]; effective_dir = CWD[1]
-        nheredoc = 0; hd_shell = 0; hd_interp = 0; commands = 0; complex = 0; simple_ok = 1; TAINT = ""
+        nheredoc = 0; hd_shell = 0; hd_interp = 0; INLINE = 0; INLINE_HIT = interpreter_hit(CMD) != ""; commands = 0; complex = 0; simple_ok = 1; TAINT = ""
         enqueue(CMD)
         while (qi < queued) { qi++; tokenize(queue[qi]) }
         if (pass == 1 && bindings > 0) continue
-        if (TAINT != "" && (complex || queued != 1 || commands != 1 || !simple_ok)) {
+        if (INLINE && INLINE_HIT) {
+            report("inline interpreter programs with protected file vocabulary cannot be checked safely", "the read (Claude: Read) tool for an exact non-credential file; use find/ls to locate files first. Never read credential files or disguise the same read in a variable, encoded string or script file")
+        } else if (TAINT != "" && (complex || queued != 1 || commands != 1 || !simple_ok)) {
             other_reports = reports; reports = ""
             report("the command names a protected file (" TAINT ") and is not a single literal read", "run the read on its own with literal paths, e.g. cat .env.example; split compound commands into separate calls; do not build the name with variables, globs, loops, pipes, redirections or nested shells; for a commit message or PR body that mentions the name, write the text to a file with the file tool and pass the file")
             reports = reports other_reports

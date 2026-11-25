@@ -24,6 +24,7 @@ NOT_SMOKEABLE = {
     "verify-release-notes.yml": "holds Workflows PRs to consumer release policy; decide separately",
     "verify-release-intent.yml": "holds Workflows PRs to consumer release policy; decide separately",
     "verify-ai-corpus-impact.yml": "reads live pull request labels, files and comments with pull-requests: read; exercised by its offline spec",
+    "affected-tests.yml": "installs a released Cratis.Cli that has 'cratis affected', and its merge job pushes coverage maps with a token; exercised by its offline spec",
 }
 
 
