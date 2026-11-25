@@ -793,13 +793,18 @@ Require that check, never the individual jobs, so a skipped job cannot hang a re
 | `level` | `test` | `test` selects individual tests from the coverage maps; `project` runs whole affected test projects and needs no maps. Start with `project`. |
 | `configuration` | `Release` | Build configuration. |
 | `framework` | empty | Target framework, for test projects that have several. |
-| `global-json-file`, `dotnet-version` | `global.json`, empty | Where the SDK comes from. `DOTNET_INSTALL_DIR` is set, so self-hosted runners work. |
+| `global-json-file`, `dotnet-version` | `global.json`, empty | Where the SDK comes from; `dotnet-version` takes one extra SDK per line. `DOTNET_INSTALL_DIR` is set, so self-hosted runners work. |
+| `node-version`, `prepare-command` | empty, empty | Installs Node.js and runs shell commands in the repository root before the build, for builds that embed generated assets. The command is the repository's own code, run on the checked out head. |
+| `map-branch` | default branch | Branch the merge-time run pushes the maps to. Set it to a feature branch to trial a merge-time run without touching the default branch. |
 | `collector`, `collector-version` | `dotnet-coverage`, `18.12.0` | Coverage collector of the merge-time run: `dotnet-coverage` or `coverlet`. |
 | `run-all-label` | `run-all-tests` | A pull request label that forces a full run. |
 | `workflows-ref` | `main` | Trusted Cratis/Workflows ref providing the scripts, not a pull request head ref. |
 
 Secret `map-token` (optional) is a token that may push to the default branch. Repositories whose branch protection
 blocks the workflow token need a bypass identity for it, as `PAT_WORKFLOWS` is one. It falls back to the workflow token.
+
+A caller that runs on a push to the default branch should ignore the map folder with `paths-ignore: [".cratis/affected/maps/**"]`,
+so the commit of the maps does not start another full run.
 
 Example caller:
 
