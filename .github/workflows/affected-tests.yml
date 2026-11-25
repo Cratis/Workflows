@@ -131,7 +131,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The supporting scripts only: never caller or pull request code.
+      # The supporting scripts and actions only, at one trusted ref: never caller or pull request code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Cratis/Workflows
@@ -146,7 +146,7 @@ jobs:
           global-json-file: ${{ inputs.global-json-file }}
           dotnet-version: ${{ inputs.dotnet-version }}
 
-      - uses: Cratis/Workflows/.github/actions/affected-cli@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
+      - uses: ./.cratis-workflows/.github/actions/affected-cli # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
         with:
           version: ${{ inputs.cli-version }}
 
@@ -188,6 +188,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The supporting scripts and actions only, at one trusted ref: never caller or pull request code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         env:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
@@ -195,9 +203,9 @@ jobs:
           global-json-file: ${{ inputs.global-json-file }}
           dotnet-version: ${{ inputs.dotnet-version }}
 
-      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
+      - uses: ./.cratis-workflows/.github/actions/dotnet-cache # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
 
-      - uses: Cratis/Workflows/.github/actions/affected-cli@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
+      - uses: ./.cratis-workflows/.github/actions/affected-cli # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
         with:
           version: ${{ inputs.cli-version }}
 
@@ -264,7 +272,7 @@ jobs:
           token: ${{ secrets.map-token || github.token }}
           persist-credentials: true
 
-      # The supporting scripts only: never caller or pull request code.
+      # The supporting scripts and actions only, at one trusted ref: never caller or pull request code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Cratis/Workflows
@@ -280,9 +288,9 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
 
       # Merge-time runs may save the NuGet cache; pull request runs only restore it.
-      - uses: Cratis/Workflows/.github/actions/dotnet-cache@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
+      - uses: ./.cratis-workflows/.github/actions/dotnet-cache # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
 
-      - uses: Cratis/Workflows/.github/actions/affected-cli@main # zizmor: ignore[unpinned-uses] organization-owned action, consumed at main by convention
+      - uses: ./.cratis-workflows/.github/actions/affected-cli # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
         with:
           version: ${{ inputs.cli-version }}
 
