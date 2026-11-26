@@ -55,6 +55,10 @@ on:
         description: Coverage collector for the merge-time run, dotnet-coverage or coverlet.
         type: string
         default: dotnet-coverage
+      split-merge:
+        description: Run the merge-time job once per test project, in parallel, so a large repository fits the job limit. Needs a CLI that has 'affected projects' and --projects.
+        type: boolean
+        default: false
       parallelism:
         description: How many coverage runs the merge-time job runs at once, 0 for one per processor, 1 for one at a time. Needs a CLI that has --parallelism when above 1. A large repository needs it to finish; ignored by coverlet.
         type: number
@@ -109,6 +113,7 @@ jobs:
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
       run-tests: ${{ steps.select.outputs.run-tests }}
+      merge-projects: ${{ steps.projects.outputs.projects }}
     steps:
       - name: Resolve the mode
         id: mode
@@ -187,6 +192,21 @@ jobs:
             exit 0
           fi
           python3 "$SCRIPTS/affected-select-outputs.py" "$RUNNER_TEMP/affected-detect/selection.json"
+
+      - name: List the test projects of the merge-time job
+        id: projects
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          SPLIT: ${{ inputs.split-merge }}
+        run: |
+          set -euo pipefail
+          # One entry with no project means the whole repository in one job.
+          projects='[""]'
+          if [ "$MODE" = merge ] && [ "$SPLIT" = true ]; then
+            projects="$(cratis affected projects --output json-compact)"
+          fi
+          echo "projects=$projects" >> "$GITHUB_OUTPUT"
+          echo "Merge-time projects: $projects"
 
   test:
     name: Test
@@ -270,9 +290,13 @@ jobs:
           retention-days: 14
 
   merge:
-    name: Test everything and update the coverage maps
+    name: Test everything and update the coverage maps${{ matrix.project && format(' ({0})', matrix.project) || '' }}
     needs: detect
     if: needs.detect.outputs.mode == 'merge'
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.detect.outputs.merge-projects) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.merge-timeout-minutes }}
     permissions:
@@ -336,6 +360,7 @@ jobs:
           FRAMEWORK: ${{ inputs.framework }}
           COLLECTOR: ${{ inputs.collector }}
           PARALLELISM: ${{ inputs.parallelism }}
+          PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           if [ "$PARALLELISM" -le 0 ]; then
@@ -348,6 +373,9 @@ jobs:
           fi
           if [ "$PARALLELISM" -gt 1 ]; then
             args+=(--parallelism "$PARALLELISM")
+          fi
+          if [ -n "$PROJECT" ]; then
+            args+=(--projects "$PROJECT")
           fi
           cratis affected run "${args[@]}"
 
@@ -363,7 +391,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: affected-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          name: affected-tests-${{ github.run_id }}-${{ github.run_attempt }}-merge-${{ strategy.job-index }}
           path: |
             ${{ runner.temp }}/affected-report
             ${{ runner.temp }}/affected-results

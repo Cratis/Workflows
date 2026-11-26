@@ -81,6 +81,15 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("needs.*.result", aggregators[0]["steps"][0]["env"]["RESULTS"])
         self.assertIn("skipped", script)
 
+    def test_the_merge_job_can_split_per_test_project_without_changing_the_default(self):
+        document = workflow()
+        call = triggers(document)["workflow_call"]["inputs"]
+        self.assertIs(call["split-merge"]["default"], False)
+        merge = document["jobs"]["merge"]
+        self.assertFalse(merge["strategy"]["fail-fast"])
+        projects = next(step for step in document["jobs"]["detect"]["steps"] if step.get("id") == "projects")
+        self.assertIn("projects='[\"\"]'", projects["run"])
+
     def test_only_a_pull_request_can_skip_work(self):
         select = next(step for name, step in all_steps(workflow()) if step.get("id") == "select")
         self.assertIn('if [ "$MODE" != pr ]', select["run"])
@@ -208,7 +217,7 @@ class Remote:
         return int(self.git(self.remote, "rev-list", "--count", "main"))
 
     def commit_maps(self, **extra):
-        env = {**os.environ, "BRANCH": "main", "TESTED_SHA": self.tested, "GIT_TERMINAL_PROMPT": "0", **extra}
+        env = {**os.environ, "BRANCH": "main", "TESTED_SHA": self.tested, "GIT_TERMINAL_PROMPT": "0", "RETRY_JITTER": "0", **extra}
         return subprocess.run([BASH, str(COMMIT_SCRIPT)], cwd=self.clone, env=env, capture_output=True, text=True)
 
 
@@ -254,6 +263,17 @@ class CommitMaps(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.remote.tip(), newer)
         self.assertIn("newer run will update the maps", result.stdout)
+
+    def test_map_commits_of_sibling_jobs_do_not_count_as_the_branch_moving(self):
+        self.remote.write(self.remote.other, f"{MAPS}/sibling.json", "{}\n")
+        sibling = self.remote.commit(self.remote.other, "sibling maps", push=True)
+        self.remote.write(self.remote.clone, f"{MAPS}/mine.json", "{}\n")
+        result = self.remote.commit_maps()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = self.remote.git(self.remote.remote, "ls-tree", "-r", "--name-only", "main").split()
+        self.assertIn(f"{MAPS}/sibling.json", files)
+        self.assertIn(f"{MAPS}/mine.json", files)
+        self.assertEqual(self.remote.git(self.remote.remote, "merge-base", "--is-ancestor", sibling, "main") or "ok", "ok")
 
     def test_push_that_loses_a_race_is_merged_and_retried_without_rewriting_history(self):
         self.remote.write(self.remote.clone, f"{MAPS}/a.json", "{}\n")
