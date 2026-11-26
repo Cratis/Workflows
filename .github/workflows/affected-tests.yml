@@ -55,6 +55,14 @@ on:
         description: Coverage collector for the merge-time run, dotnet-coverage or coverlet.
         type: string
         default: dotnet-coverage
+      parallelism:
+        description: How many coverage runs the merge-time job runs at once, 0 for one per processor, 1 for one at a time. Needs a CLI that has --parallelism when above 1. A large repository needs it to finish; ignored by coverlet.
+        type: number
+        default: 1
+      merge-timeout-minutes:
+        description: Timeout of the merge-time job, at most 360 on a hosted runner.
+        type: number
+        default: 240
       collector-version:
         description: Exact version of the dotnet-coverage tool to install when it is the collector.
         type: string
@@ -266,7 +274,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.mode == 'merge'
     runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 240
+    timeout-minutes: ${{ inputs.merge-timeout-minutes }}
     permissions:
       contents: write
     steps:
@@ -327,12 +335,19 @@ jobs:
           CONFIGURATION: ${{ inputs.configuration }}
           FRAMEWORK: ${{ inputs.framework }}
           COLLECTOR: ${{ inputs.collector }}
+          PARALLELISM: ${{ inputs.parallelism }}
         run: |
           set -euo pipefail
+          if [ "$PARALLELISM" -le 0 ]; then
+            PARALLELISM="$(nproc)"
+          fi
           args=(--mode merge --configuration "$CONFIGURATION" --collector "$COLLECTOR"
             --report-directory "$RUNNER_TEMP/affected-report" --results-directory "$RUNNER_TEMP/affected-results")
           if [ -n "$FRAMEWORK" ]; then
             args+=(--framework "$FRAMEWORK")
+          fi
+          if [ "$PARALLELISM" -gt 1 ]; then
+            args+=(--parallelism "$PARALLELISM")
           fi
           cratis affected run "${args[@]}"
 
