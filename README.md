@@ -791,6 +791,11 @@ silently skip tests in one repository only.
 The workflow always ends in one aggregator job named `Affected tests` (`if: always()`, checking every `needs.*.result`).
 Require that check, never the individual jobs, so a skipped job cannot hang a required check.
 
+Every job, the aggregator included, runs on `runs-on`: a called workflow's jobs bill the caller, so a private repository
+keeps the whole workflow on its self-hosted runners. Only the `merge` job writes; every other job declares
+`contents: read`. The caller still grants `contents: write`, because GitHub checks a called job's permissions against
+the caller's even when the job never runs, but the pull request and nightly jobs never receive it.
+
 | Input | Default | Purpose |
 |---|---|---|
 | `cli-version` | required | Exact `Cratis.Cli` version providing `cratis affected`. The caller pins it, so a CLI release cannot change every repository at once. A range or `latest` is rejected. |
