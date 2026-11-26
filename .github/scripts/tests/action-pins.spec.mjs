@@ -2,7 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -113,14 +113,15 @@ test("executable workflows and composites retain immutable third-party action pi
     }
 });
 
-test("bootstrap definitions and the reusable policy variant retain pin coverage without installing Dependabot", t => {
+test("bootstrap definitions and the reusable policy variant retain pin coverage without installing Dependabot in any repository", t => {
+    assert(!existsSync(".github/dependabot.yml"), "Workflows must not configure Dependabot version updates");
     const script = readFileSync(".github/scripts/bootstrap-common-workflows.sh", "utf8");
     const payloads = bootstrapPayloads(script);
     const legacyPaths = [...script.matchAll(/^LEGACY_WRAPPER_HASHES\["([^"]+)"\]=/gm)].map(([, path]) => path);
     assert(legacyPaths.length > 0, "Discover retired wrappers");
     const active = payloads.filter(({ path }) => path !== "POLICY_REUSABLE_WRAPPER" && !legacyPaths.includes(path));
     assert(active.length > 0, "Discover active bootstrap paths");
-    assert(active.every(({ path }) => !/dependabot/i.test(path)), "Dependabot stays in Workflows only");
+    assert(active.every(({ path }) => !/dependabot/i.test(path)), "Bootstrap must not install Dependabot in any repository");
     const counts = payloads.map(({ path, source }) => checkUses(source, path));
     const references = counts.reduce((sum, count) => sum + count.references, 0);
     assert(references > 0, "Discover decoded action references");
@@ -134,20 +135,4 @@ test("decoded bootstrap content cannot hide an unpinned third-party action", () 
     assert.throws(() => checkUses(payloads[0].source, payloads[0].path), /expected a full commit SHA/);
     assert.equal(checkUses(payloads[1].source, payloads[1].path).thirdParty, 1);
     assert.throws(() => bootstrapPayloads(""), /Discover bootstrap payloads/);
-});
-
-test("Dependabot maintains exactly one monthly all-actions group in this repository", () => {
-    const lines = readFileSync(".github/dependabot.yml", "utf8").split("\n")
-        .filter(line => line.trim() && !line.trimStart().startsWith("#"));
-    assert.deepEqual(lines, [
-        "version: 2",
-        "updates:",
-        "  - package-ecosystem: github-actions",
-        '    directories: ["/", "/.github/actions/*"]',
-        "    schedule:",
-        "      interval: monthly",
-        "    groups:",
-        "      github-actions:",
-        '        patterns: ["*"]',
-    ]);
 });
