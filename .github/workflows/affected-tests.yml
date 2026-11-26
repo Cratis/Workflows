@@ -48,7 +48,7 @@ on:
         type: string
         default: ""
       prepare-command:
-        description: Shell commands run in the repository root before the build, for example installing packages that the build embeds. Runs as the repository's own code on the checked out head.
+        description: Shell commands run in the repository root before the build, for example installing packages that the build embeds or adding a package source with GITHUB_TOKEN. May append to GITHUB_ENV. Runs as the repository's own code on the checked out head.
         type: string
         default: ""
       collector:
@@ -224,6 +224,7 @@ jobs:
         if: inputs.prepare-command != ''
         env:
           PREPARE_COMMAND: ${{ inputs.prepare-command }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash -euo pipefail -c "$PREPARE_COMMAND"
 
       - name: Select and run the tests
@@ -309,6 +310,7 @@ jobs:
         if: inputs.prepare-command != ''
         env:
           PREPARE_COMMAND: ${{ inputs.prepare-command }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash -euo pipefail -c "$PREPARE_COMMAND"
 
       - name: Install the coverage collector
