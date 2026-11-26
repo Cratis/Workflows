@@ -797,6 +797,7 @@ Require that check, never the individual jobs, so a skipped job cannot hang a re
 | `node-version`, `prepare-command` | empty, empty | Installs Node.js and runs shell commands in the repository root before the build, for builds that embed generated assets or need a package source. `GITHUB_TOKEN` is set, and the commands may append to `GITHUB_ENV`. The command is the repository's own code, run on the checked out head. |
 | `base-ref` | pull request base | Branch the change is measured against. Set it, with `mode: pr`, to trial the selection from a push. |
 | `map-branch` | default branch | Branch the merge-time run pushes the maps to. Set it to a feature branch to trial a merge-time run without touching the default branch. |
+| `split-merge` | `false` | Runs the merge-time job once per test project, in parallel, each committing its own maps; sibling map commits do not count as the branch moving. Needs a CLI with `affected projects` and `--projects`. One job for a large repository exceeds the job limit. |
 | `parallelism`, `merge-timeout-minutes` | `1`, `240` | How many coverage runs the merge-time job runs at once (`0` is one per processor; above 1 needs a CLI with `--parallelism`), and its timeout (at most 360 on a hosted runner). A large repository needs both: Chronicle's Core specs alone take hours one at a time. |
 | `collector`, `collector-version` | `dotnet-coverage`, `18.12.0` | Coverage collector of the merge-time run: `dotnet-coverage` or `coverlet`. |
 | `run-all-label` | `run-all-tests` | A pull request label that forces a full run. |
