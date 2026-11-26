@@ -5,7 +5,6 @@ name: Verify Workflow Programs
 on:
   pull_request:
     paths:
-      - .github/dependabot.yml
       - .github/scripts/tests/action-pins.spec.mjs
       - ".github/workflows/**"
       - ".github/actions/**"
@@ -28,7 +27,6 @@ on:
   push:
     branches: [main]
     paths:
-      - .github/dependabot.yml
       - .github/scripts/tests/action-pins.spec.mjs
       - ".github/workflows/**"
       - ".github/actions/**"
@@ -69,7 +67,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - name: Verify immutable action pins and local Dependabot maintenance
+      - name: Verify immutable action pins and that Dependabot version updates are off
         run: node --test .github/scripts/tests/action-pins.spec.mjs
       - name: Check guard syntax
         run: node --check .github/scripts/verify-no-work-records.mjs

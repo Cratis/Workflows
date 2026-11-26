@@ -5,6 +5,9 @@
 
 Common reusable GitHub Actions workflows for Cratis repositories.
 
+Dependabot version updates are off in all Cratis repositories. Pinned actions
+and dependencies are refreshed by hand in release trains.
+
 ## Superseded bump pull requests
 
 `.github/workflows/close-superseded-bump-pulls.yml` finds older open bump PRs
@@ -243,7 +246,7 @@ re-running only a failed publish job reuses the successful update's artifact; a
 rerun of update replaces it.
 
 Both modes refuse the entire candidate if it changes `.github/` (including
-workflows, actions, CODEOWNERS and Dependabot), `.cratis/ai/hooks/`, `.pi/`,
+workflows, actions, and CODEOWNERS), `.cratis/ai/hooks/`, `.pi/`,
 `.claude/`, `.mcp.json`, `.vscode/mcp.json`, `.gitattributes`, `.gitmodules`, or Git
 configuration/hook paths. Git paths are conservatively protected whenever any
 path component starts with `.git` (including `.gitconfig` and `.githooks/`).
