@@ -106,10 +106,14 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
 jobs:
+  # Only the merge job writes. Every other job reads, explicitly: a caller must grant contents: write as the ceiling for the
+  # merge job even when it never runs it, and a job without its own permissions would inherit that write access.
   detect:
     name: Detect affected projects
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
       run-tests: ${{ steps.select.outputs.run-tests }}
@@ -214,6 +218,8 @@ jobs:
     if: needs.detect.outputs.run-tests == 'true' && needs.detect.outputs.mode != 'merge'
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 120
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -398,13 +404,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # The one required check. It always runs, so a required check never hangs on skipped work.
+  # The one required check. It always runs, so a required check never hangs on skipped work. It runs on the caller's
+  # runner like every other job: a called workflow's jobs bill the caller, and a private caller must not get a hosted job.
   affected-tests:
     name: Affected tests
     if: always()
     needs: [detect, test, merge]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - name: Check every job
         env:

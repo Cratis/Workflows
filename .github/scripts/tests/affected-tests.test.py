@@ -65,6 +65,17 @@ class WorkflowContract(unittest.TestCase):
         writers = [name for name, job in document["jobs"].items() if job.get("permissions", {}).get("contents") == "write"]
         self.assertEqual(writers, ["merge"])
 
+    def test_every_job_but_the_merge_job_declares_read_only_contents(self):
+        # A caller grants contents: write as the merge job's ceiling; a job without its own permissions would inherit it.
+        for name, job in workflow()["jobs"].items():
+            if name != "merge":
+                self.assertEqual(job.get("permissions"), {"contents": "read"}, name)
+
+    def test_every_job_runs_on_the_callers_runner(self):
+        # A called workflow's jobs bill the caller, so a private caller must be able to keep every job off hosted runners.
+        for name, job in workflow()["jobs"].items():
+            self.assertEqual(job["runs-on"], "${{ inputs.runs-on }}", name)
+
     def test_third_party_actions_are_pinned_by_full_sha(self):
         for name, step in all_steps(workflow()):
             uses = step.get("uses")
