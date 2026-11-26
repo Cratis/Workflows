@@ -471,6 +471,12 @@ jobs:
     secrets: inherit
 ```
 
+The optional `runs-on` input defaults to `ubuntu-latest`, so existing callers
+need no changes. Private repositories should set `runs-on` under `with` to their
+self-hosted runner label, for example `${{ vars.RUNNER_GATE || 'cratis-arc-small' }}`,
+to avoid billed GitHub-hosted minutes. Public callers can omit it. Manual dispatch
+runs use `ubuntu-latest` and do not expose a runner input.
+
 The workflow assumes packages are tagged or versioned using the PR number:
 
 | Package type | Expected pattern | Example |
@@ -1194,7 +1200,8 @@ cleanup. The optional secret `PACKAGE_CLEANUP_TOKEN` (classic PAT with
 `read:packages` and `delete:packages`, package admin, SSO-authorized) takes
 precedence over `PAT_WORKFLOWS`. All other errors still fail closed. The reusable
 contract remains the required numeric `pull_request` input and `PAT_WORKFLOWS`
-secret, plus the optional `PACKAGE_CLEANUP_TOKEN` secret. See
+secret, plus the optional `runs-on` input (default `ubuntu-latest`) and
+`PACKAGE_CLEANUP_TOKEN` secret. See
 [Cleaning up PR artifacts](#cleaning-up-pr-artifacts) for matching rules, permissions,
 manual approval inputs, recovery limitations, and offline verification.
 

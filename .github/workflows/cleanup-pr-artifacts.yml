@@ -5,6 +5,14 @@ name: Cleanup PR Artifacts
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: >-
+          Runner label the cleanup job runs on. Callers in private repositories
+          should pass their self-hosted scale-set label (for example cratis-arc)
+          so cleanup does not consume billed GitHub-hosted minutes.
+        type: string
+        required: false
+        default: ubuntu-latest
       pull_request:
         description: Pull request number to clean up artifacts for
         required: true
@@ -41,7 +49,7 @@ permissions:
 
 jobs:
   cleanup:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     timeout-minutes: 30
     # Configure this environment in Workflows with required reviewers/main only.
     # Reusable callers retain their existing contract, with no environment required.
