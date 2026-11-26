@@ -614,6 +614,17 @@ class CleanupTests(unittest.TestCase):
         self.assert_failed_without_deletes(result)
         self.assertIsNone(result[1])
 
+    def test_reusable_runner_input_is_optional_with_hosted_default(self):
+        workflow_call = SOURCE.split("  workflow_call:\n", 1)[1].split("  workflow_dispatch:\n", 1)[0]
+        self.assertIn("      runs-on:\n", workflow_call)
+        self.assertIn("        type: string\n"
+                      "        required: false\n"
+                      "        default: ubuntu-latest", workflow_call.split("      runs-on:\n", 1)[1])
+
+    def test_cleanup_runner_uses_input_with_dispatch_fallback(self):
+        cleanup_job = SOURCE.split("jobs:\n  cleanup:\n", 1)[1].split("    steps:\n", 1)[0]
+        self.assertIn("    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}\n", cleanup_job)
+
     def test_workflow_keeps_code_inline_and_safe_input_transport(self):
         self.assertNotIn("actions/checkout", SOURCE)
         self.assertNotIn("${{", SHELL)
