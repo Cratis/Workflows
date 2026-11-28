@@ -1,0 +1,40 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Verify Affected Frontend
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/affected-frontend.yml
+      - .github/scripts/affected-frontend.mjs
+      - .github/scripts/tests/affected-frontend.spec.mjs
+      - .github/workflows/verify-affected-frontend.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/affected-frontend.yml
+      - .github/scripts/affected-frontend.mjs
+      - .github/scripts/tests/affected-frontend.spec.mjs
+      - .github/workflows/verify-affected-frontend.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: 24.x
+      - name: Check the selector against a real monorepo and git history
+        run: node --test .github/scripts/tests/affected-frontend.spec.mjs

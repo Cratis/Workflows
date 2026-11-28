@@ -1,0 +1,307 @@
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+name: Affected frontend
+
+# Lints, builds and tests only the JavaScript/TypeScript workspace packages a pull request can reach.
+#   pull_request            the packages that own a changed file, plus every package that depends on one of them
+#   push, schedule, dispatch  every package, as before
+# The selection is computed from the repository's own workspace graph by .github/scripts/affected-frontend.mjs; there is no
+# hand-kept list of packages. See the README section "Affected frontend" for the caller, the inputs and the legs.
+
+on:
+  workflow_call:
+    inputs:
+      legs:
+        description: >-
+          One leg per line. A leg is a job, and the legs run in parallel. A leg is a comma-separated list of package scripts run in
+          dependency order, for example "lint:ci@changed" and "compile,test,build". A script is run in every selected package that
+          defines it; "@changed" limits it to the packages that changed themselves, not the ones that only depend on them (right for
+          checks that read one file at a time, such as a linter). A leg whose scripts match no selected package is not started.
+        type: string
+        required: true
+      working-directory:
+        description: Folder of the JavaScript project (the one with the workspaces, or a single package), relative to the repository root.
+        type: string
+        default: .
+      global-paths:
+        description: >-
+          Globs, relative to the repository root, of files that every package shares, one per line: a change to one runs everything.
+          Root-level package.json, lockfile and configuration of the project folder are shared by default. Name the files that are
+          generated into or read by the project from elsewhere, such as the wire contract a client is generated from.
+        type: string
+        default: ""
+      runs-on:
+        description: Runner label. Never a self-hosted runner for the pull_request jobs of a public repository; private repositories use cratis-arc.
+        type: string
+        default: ubuntu-latest
+      mode:
+        description: auto derives the mode from the event; or force pr or all.
+        type: string
+        default: auto
+      node-version:
+        description: Node.js version to install.
+        type: string
+        default: 24.x
+      package-manager:
+        description: yarn, npm or pnpm.
+        type: string
+        default: yarn
+      install-command:
+        description: Shell command that installs the dependencies, run in the working directory.
+        type: string
+        default: corepack enable && yarn install --immutable
+      prepare-command:
+        description: Shell commands run in the repository root after the install and before the scripts, for example generating code the build reads. Runs as the repository's own code on the checked out head.
+        type: string
+        default: ""
+      dotnet-version:
+        description: .NET SDK versions to install, one per line, for projects whose build generates code with dotnet. Empty installs none.
+        type: string
+        default: ""
+      node-options:
+        description: NODE_OPTIONS for the scripts.
+        type: string
+        default: --max-old-space-size=4096
+      scan-imports:
+        description: Also treat an import of another workspace package as a dependency, when package.json does not declare it.
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: Timeout of each leg.
+        type: number
+        default: 45
+      run-all-label:
+        description: Pull request label that forces a full run.
+        type: string
+        default: run-all-tests
+      base-ref:
+        description: Branch the change is measured against. Empty means the pull request base.
+        type: string
+        default: ""
+      workflows-ref:
+        description: Cratis/Workflows ref providing the supporting scripts; never a pull request head ref.
+        type: string
+        default: main
+    secrets:
+      primeui-license:
+        description: PrimeUI license key, exported to the scripts as PRIMEUI_LICENSE and STUDIO_PRIMEUI_LICENSE. Absent on a fork's pull request, where the build still succeeds without it.
+        required: false
+
+permissions:
+  contents: read
+
+# A pull request run is superseded by the next push to it. A run on the default branch is never cancelled.
+concurrency:
+  group: affected-frontend-${{ github.workflow }}-${{ github.ref }}-${{ inputs.working-directory }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  detect:
+    name: Detect affected packages
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      run: ${{ steps.select.outputs.run }}
+      legs: ${{ steps.select.outputs.legs }}
+    steps:
+      - name: Resolve the mode
+        id: mode
+        env:
+          REQUESTED: ${{ inputs.mode }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED" in
+            pr | all) mode="$REQUESTED" ;;
+            auto)
+              if [ "$EVENT" = pull_request ]; then mode="pr"; else mode="all"; fi
+              ;;
+            *)
+              echo "::error title=affected-frontend::mode must be auto, pr or all, got '$REQUESTED'"
+              exit 1
+              ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Mode: $mode"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The supporting scripts only, at one trusted ref: never caller or pull request code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: ${{ inputs.node-version }}
+
+      - name: Select the affected packages
+        id: select
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          BASE_REF: ${{ inputs.base-ref || github.base_ref }}
+          LEGS: ${{ inputs.legs }}
+          GLOBALS: ${{ inputs.global-paths }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          SCAN_IMPORTS: ${{ inputs.scan-imports }}
+          FORCE_ALL: ${{ contains(github.event.pull_request.labels.*.name, inputs.run-all-label) }}
+          SCRIPT: ${{ github.workspace }}/.cratis-workflows/.github/scripts/affected-frontend.mjs
+        run: |
+          set -euo pipefail
+          args=(select --root "$WORKING_DIRECTORY" --mode "$MODE" --report-directory "$RUNNER_TEMP/affected-frontend")
+          if [ "$MODE" = pr ]; then
+            args+=(--from "origin/$BASE_REF")
+          fi
+          if [ "$FORCE_ALL" = true ]; then
+            args+=(--run-all)
+          fi
+          if [ "$SCAN_IMPORTS" != true ]; then
+            args+=(--no-scan-imports)
+          fi
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            if [ -n "$line" ]; then args+=(--leg "$line"); fi
+          done <<< "$LEGS"
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            if [ -n "$line" ]; then args+=(--global "$line"); fi
+          done <<< "$GLOBALS"
+          # A selection that cannot be computed must never skip the work: the script itself falls back to every leg, and so does a crash.
+          if ! node "$SCRIPT" "${args[@]}"; then
+            echo "::warning title=affected-frontend::selection failed; running every leg"
+            legs='[]'
+            while IFS= read -r line; do
+              line="${line#"${line%%[![:space:]]*}"}"
+              if [ -n "$line" ]; then legs="$(jq -c --arg leg "$line" '. + [{leg: $leg}]' <<< "$legs")"; fi
+            done <<< "$LEGS"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          fi
+
+  frontend:
+    name: Frontend (${{ matrix.leg }})
+    needs: detect
+    if: needs.detect.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect.outputs.legs) }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The supporting scripts and actions only, at one trusted ref: never caller or pull request code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Cratis/Workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .cratis-workflows
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: ${{ inputs.node-version }}
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        if: inputs.dotnet-version != ''
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Enable corepack
+        if: inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm'
+        run: corepack enable
+
+      # Pull requests only restore; the cache is saved from the default branch.
+      - name: Restore the Yarn cache
+        if: inputs.package-manager == 'yarn'
+        uses: ./.cratis-workflows/.github/actions/yarn-cache # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
+        with:
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Install the dependencies
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+        run: bash -euo pipefail -c "$INSTALL_COMMAND"
+
+      - name: Prepare the build
+        if: inputs.prepare-command != ''
+        env:
+          PREPARE_COMMAND: ${{ inputs.prepare-command }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash -euo pipefail -c "$PREPARE_COMMAND"
+
+      - name: Run ${{ matrix.leg }}
+        env:
+          MODE: ${{ needs.detect.outputs.mode }}
+          BASE_REF: ${{ inputs.base-ref || github.base_ref }}
+          LEG: ${{ matrix.leg }}
+          GLOBALS: ${{ inputs.global-paths }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          SCAN_IMPORTS: ${{ inputs.scan-imports }}
+          NODE_OPTIONS: ${{ inputs.node-options }}
+          FORCE_ALL: ${{ contains(github.event.pull_request.labels.*.name, inputs.run-all-label) }}
+          PRIMEUI_LICENSE: ${{ secrets.primeui-license }}
+          STUDIO_PRIMEUI_LICENSE: ${{ secrets.primeui-license }}
+          SCRIPT: ${{ github.workspace }}/.cratis-workflows/.github/scripts/affected-frontend.mjs
+        run: |
+          set -euo pipefail
+          args=(run --root "$WORKING_DIRECTORY" --mode "$MODE" --package-manager "$PACKAGE_MANAGER" --leg "$LEG")
+          if [ "$MODE" = pr ]; then
+            args+=(--from "origin/$BASE_REF")
+          fi
+          if [ "$FORCE_ALL" = true ]; then
+            args+=(--run-all)
+          fi
+          if [ "$SCAN_IMPORTS" != true ]; then
+            args+=(--no-scan-imports)
+          fi
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            if [ -n "$line" ]; then args+=(--global "$line"); fi
+          done <<< "$GLOBALS"
+          node "$SCRIPT" "${args[@]}"
+
+  # The one required check. It always runs, so a required check never hangs on skipped work. It runs on the caller's runner
+  # like every other job: a called workflow's jobs bill the caller, and a private caller must not get a hosted job.
+  affected-frontend:
+    name: Affected frontend
+    if: always()
+    needs: [detect, frontend]
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check every job
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != success ] && [ "$result" != skipped ]; then
+              echo "::error title=affected-frontend::a job ended as '$result'"
+              exit 1
+            fi
+          done

@@ -884,6 +884,97 @@ for the selection rules and `.cratis/affected.json`.
 concurrency, pins, minimal permissions, the always-run aggregator), the change-detection outputs, and the map write-back
 against real local git remotes, including a push that loses a race.
 
+## Affected frontend
+
+`.github/workflows/affected-frontend.yml` is the JavaScript/TypeScript counterpart of [Affected tests](#affected-tests): it lints,
+builds and tests only the workspace packages a pull request can reach. A monorepo otherwise builds every package for a change to
+one, and a change to a shared component library rebuilds applications that cannot see it.
+
+The selection comes from the repository itself, with no hand-kept list of packages, computed by
+`.github/scripts/affected-frontend.mjs` (Node, no dependencies):
+
+1. The workspace packages are read from the root `package.json` (`workspaces`, with `!` negations); a root without `workspaces`
+   is one package that owns its folder.
+2. The files changed since the merge base with the base branch (`git diff base...HEAD`) are mapped to the package that owns them.
+   Only files that can change a build count: source, JSON, styles, assets. A Markdown or C# file inside a package reaches nothing.
+3. Every package that depends on a changed one, directly or not, is added (the reverse closure). Dependencies come from
+   `dependencies`, `devDependencies`, `peerDependencies` and `optionalDependencies`, and from actual imports of another workspace
+   package that `package.json` does not declare (`scan-imports`).
+4. The scripts run in dependency order, so a package is built after what it builds on.
+
+| Event | Mode | What runs |
+|---|---|---|
+| `pull_request` | `pr` | Only the packages the change reaches, in only the legs that have a package to run. A change that reaches none starts no leg. |
+| `push`, `schedule`, `workflow_dispatch` | `all` | Every package, as before. |
+
+Any doubt runs everything: a diff that cannot be read or is empty, an unknown base revision, a selection that crashes, the
+`run-all-tests` label, and a change to a shared input. The root `package.json`, lockfile, `.yarnrc.yml`, `.yarn/`, and any
+configuration file directly in the project folder (`tsconfig.json`, `eslint.config.mjs`, `vite.config.ts`) are shared by default;
+`global-paths` adds the files that are generated into or read by the project from elsewhere. A change to a lockfile runs everything,
+because the lockfile does not say which package it affects.
+
+### Legs
+
+`legs` is the heart of the call. Each line is a **leg**, which is one job; legs run in parallel. A leg is a comma-separated list of
+package scripts, run in dependency order in every selected package that defines the script. A script limited with `@changed` runs
+only in the packages that changed themselves, not in those that merely depend on them: right for a linter that judges each file from
+its own text, wrong for a type-check or a build.
+
+```yaml
+legs: |
+  lint:ci@changed
+  compile,test,build
+```
+
+The two-line example starts a lint job and a compile/test/build job; if a change only touches a package that has no `build` script,
+the second leg starts nothing. The selection and the packages each leg reached are in the step summary and in the `selection.json` report.
+
+The workflow always ends in one aggregator job named `Affected frontend` (`if: always()`, checking every `needs.*.result`). Require
+that check, never the individual legs, so a skipped leg cannot hang a required check. Every job runs on `runs-on`, and every job
+declares `contents: read`.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `legs` | required | One leg per line, see above. |
+| `working-directory` | `.` | The folder of the JavaScript project, for a repository whose frontend is not at the root. A repository with several separate projects calls the workflow once for each. |
+| `global-paths` | empty | Globs, from the repository root, that every package shares, one per line. A change to one runs everything. |
+| `runs-on` | `ubuntu-latest` | Runner label; private repositories use `cratis-arc`. **Never route the pull request jobs of a public repository to a self-hosted runner.** |
+| `mode` | `auto` | `auto` derives the mode from the event; or force `pr` or `all`. |
+| `node-version`, `package-manager` | `24.x`, `yarn` | Node.js version, and `yarn`, `npm` or `pnpm`, which runs the scripts. |
+| `install-command` | `corepack enable && yarn install --immutable` | Installs the dependencies in the working directory. The Yarn cache is restored with the shared `yarn-cache` action and only saved from the default branch. |
+| `prepare-command`, `dotnet-version` | empty, empty | Shell commands run in the repository root after the install, for generated code the build reads, and the .NET SDKs they need. The command is the repository's own code, run on the checked out head. |
+| `node-options` | `--max-old-space-size=4096` | `NODE_OPTIONS` of the scripts. |
+| `scan-imports` | `true` | Also treat an import of another workspace package as a dependency. |
+| `timeout-minutes` | `45` | Timeout of each leg. |
+| `run-all-label`, `base-ref`, `workflows-ref` | `run-all-tests`, pull request base, `main` | As for Affected tests. |
+
+Secret `primeui-license` (optional) is exported to the scripts as `PRIMEUI_LICENSE` and `STUDIO_PRIMEUI_LICENSE`; it is absent on a
+fork's pull request, where the build still succeeds without it.
+
+```yaml
+name: Affected frontend
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  affected-frontend:
+    uses: Cratis/Workflows/.github/workflows/affected-frontend.yml@main
+    with:
+      legs: |
+        lint:ci@changed
+        compile,test,build
+      global-paths: |
+        .frontend/**
+```
+
+`verify-affected-frontend.yml` runs `.github/scripts/tests/affected-frontend.spec.mjs` against a real temporary monorepo with real
+git history: the dependency closure, undeclared imports, shared inputs, every fail-closed path, a project in a repository subfolder,
+the three-dot diff and the order the scripts run in.
+
 ## Guarded Pulumi runs
 
 `Cratis/Workflows/.github/actions/pulumi-guarded@main` runs a Pulumi command, holds all of its output back and scans it for key, certificate and token material before anything reaches the log. On a match the step fails and the output is withheld; the annotation names the command and the kind of material, never the matched text. If the scan itself cannot run, the output is withheld too. A scan failure wins over Pulumi's own status; otherwise the step exits with Pulumi's status and the output is printed, so a failed run stays diagnosable.
