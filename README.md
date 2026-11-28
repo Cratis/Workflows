@@ -941,7 +941,8 @@ declares `contents: read`.
 | `runs-on` | `ubuntu-latest` | Runner label; private repositories use `cratis-arc`. **Never route the pull request jobs of a public repository to a self-hosted runner.** |
 | `mode` | `auto` | `auto` derives the mode from the event; or force `pr` or `all`. |
 | `node-version`, `package-manager` | `24.x`, `yarn` | Node.js version, and `yarn`, `npm` or `pnpm`, which runs the scripts. |
-| `install-command` | `corepack enable && yarn install --immutable` | Installs the dependencies in the working directory. The Yarn cache is restored with the shared `yarn-cache` action and only saved from the default branch. |
+| `install-command` | `corepack enable && yarn install --immutable` | Installs the dependencies in the working directory. |
+| `corepack`, `yarn-cache`, `cache-path` | `true`, `true`, empty | Whether to run `corepack enable` first, whether to restore the Yarn cache with the shared `yarn-cache` action (never saved by a pull request; a repository's warmer saves it from the default branch), and the cache folder when that warmer uses an explicit path, which must match it. |
 | `prepare-command`, `dotnet-version` | empty, empty | Shell commands run in the repository root after the install, for generated code the build reads, and the .NET SDKs they need. The command is the repository's own code, run on the checked out head. |
 | `node-options` | `--max-old-space-size=4096` | `NODE_OPTIONS` of the scripts. |
 | `scan-imports` | `true` | Also treat an import of another workspace package as a dependency. |

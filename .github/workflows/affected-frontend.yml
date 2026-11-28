@@ -46,6 +46,18 @@ on:
         description: yarn, npm or pnpm.
         type: string
         default: yarn
+      corepack:
+        description: Run 'corepack enable' before the install (yarn and pnpm). Turn it off for a project that is built with the Yarn the runner already provides.
+        type: boolean
+        default: true
+      yarn-cache:
+        description: Restore the Yarn package cache before the install (yarn only). Turn it off for a project with no lockfile.
+        type: boolean
+        default: true
+      cache-path:
+        description: Yarn cache folder, relative to the repository root, when the repository's cache warmer saves it under an explicit path. Empty uses the folder Yarn reports. Keep it identical to the warmer's, since a different path is a different cache.
+        type: string
+        default: ""
       install-command:
         description: Shell command that installs the dependencies, run in the working directory.
         type: string
@@ -227,15 +239,16 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
 
       - name: Enable corepack
-        if: inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm'
+        if: inputs.corepack && (inputs.package-manager == 'yarn' || inputs.package-manager == 'pnpm')
         run: corepack enable
 
       # Pull requests only restore; the cache is saved from the default branch.
       - name: Restore the Yarn cache
-        if: inputs.package-manager == 'yarn'
+        if: inputs.package-manager == 'yarn' && inputs.yarn-cache
         uses: ./.cratis-workflows/.github/actions/yarn-cache # zizmor: ignore[self-repository] a different repository, checked out at the trusted ref
         with:
           working-directory: ${{ inputs.working-directory }}
+          path: ${{ inputs.cache-path }}
 
       - name: Install the dependencies
         working-directory: ${{ inputs.working-directory }}
