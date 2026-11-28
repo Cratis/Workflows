@@ -938,12 +938,14 @@ declares `contents: read`.
 | `legs` | required | One leg per line, see above. |
 | `working-directory` | `.` | The folder of the JavaScript project, for a repository whose frontend is not at the root. A repository with several separate projects calls the workflow once for each. |
 | `global-paths` | empty | Globs, from the repository root, that every package shares, one per line. A change to one runs everything. |
-| `runs-on` | `ubuntu-latest` | Runner label; private repositories use `cratis-arc`. **Never route the pull request jobs of a public repository to a self-hosted runner.** |
+| `only` | empty | Package names, one per line, for a caller that builds one application and only needs to know whether the change reaches it: the legs run in those packages alone, and only when they are reached. A name that is not a workspace package fails the selection, which runs everything. |
+| `runs-on` | `ubuntu-latest` | Runner label, or a JSON array of labels such as the output of a runner decision; private repositories use `cratis-arc`. **Never route the pull request jobs of a public repository to a self-hosted runner.** |
 | `mode` | `auto` | `auto` derives the mode from the event; or force `pr` or `all`. |
 | `node-version`, `package-manager` | `24.x`, `yarn` | Node.js version, and `yarn`, `npm` or `pnpm`, which runs the scripts. |
 | `install-command` | `corepack enable && yarn install --immutable` | Installs the dependencies in the working directory. |
 | `corepack`, `yarn-cache`, `cache-path` | `true`, `true`, empty | Whether to run `corepack enable` first, whether to restore the Yarn cache with the shared `yarn-cache` action (never saved by a pull request; a repository's warmer saves it from the default branch), and the cache folder when that warmer uses an explicit path, which must match it. |
 | `prepare-command`, `dotnet-version` | empty, empty | Shell commands run in the repository root after the install, for generated code the build reads, and the .NET SDKs they need. The command is the repository's own code, run on the checked out head. |
+| `post-command` | empty | Shell commands run in the repository root after a leg's scripts have passed, for checks of the build output such as a bundle-size budget. The command is the repository's own code, run on the checked out head. |
 | `node-options` | `--max-old-space-size=4096` | `NODE_OPTIONS` of the scripts. |
 | `scan-imports` | `true` | Also treat an import of another workspace package as a dependency. |
 | `timeout-minutes` | `45` | Timeout of each leg. |

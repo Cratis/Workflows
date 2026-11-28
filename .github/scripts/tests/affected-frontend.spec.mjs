@@ -281,3 +281,19 @@ test('run executes scripts in dependency order, keeps going after a failure and 
     assert.equal(status, 1);
     assert.deepEqual(calls, ['yarn run build @ ./Source/Components', 'yarn run build @ ./Source/Crm', 'yarn run build @ ./Source/Core']);
 });
+
+test('only asks whether one application is reached, and rejects a name that is not a workspace', () => {
+    const { root } = monorepo();
+    const workspaces = discoverWorkspaces(root);
+    const graph = buildGraph(workspaces, { root, scanImports: true });
+    const reached = select({ workspaces, graph, files: ['Source/Components/index.ts'], only: ['core'] });
+    assert.deepEqual(names(reached.affected), ['core']);
+    assert.deepEqual(planLeg('build', reached)[0].targets, ['core']);
+    // A leaf the application does not depend on does not reach it.
+    const unrelated = select({ workspaces, graph, files: ['Source/Tools/index.ts'], only: ['core'] });
+    assert.equal(unrelated.affected.size, 0);
+    assert.deepEqual(planLeg('build', unrelated)[0].targets, []);
+    // Shared inputs still reach it.
+    assert.deepEqual(names(select({ workspaces, graph, files: ['yarn.lock'], only: ['core'] }).affected), ['core']);
+    assert.throws(() => select({ workspaces, graph, files: ['yarn.lock'], only: ['nope'] }), /not a workspace package/);
+});

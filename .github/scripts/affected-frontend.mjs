@@ -251,7 +251,7 @@ export function planLeg(leg, selection) {
 /**
  * The complete selection. `files` is the list of changed files, or undefined when it could not be read, which selects everything.
  */
-export function select({ workspaces, graph, files, prefix = '', globals = [], extensions, runAll = false, reason }) {
+export function select({ workspaces, graph, files, prefix = '', globals = [], extensions, runAll = false, reason, only }) {
     const byName = new Map(workspaces.map(workspace => [workspace.name, workspace]));
     const all = new Set(byName.keys());
     let everything = runAll ? 'a full run was requested' : reason;
@@ -274,6 +274,13 @@ export function select({ workspaces, graph, files, prefix = '', globals = [], ex
     } else {
         dependents = reverseClosure(graph, changed);
         affected = new Set(dependents.keys());
+    }
+    // A caller that builds one application asks only whether that application is reached: the others are not its business.
+    if (only?.length) {
+        const wanted = new Set(only);
+        for (const name of wanted) if (!byName.has(name)) throw new Error(`--only names '${name}', which is not a workspace package`);
+        affected = new Set([...affected].filter(name => wanted.has(name)));
+        changed = new Set([...changed].filter(name => wanted.has(name)));
     }
     return {
         everything: everything ?? null,
@@ -344,6 +351,7 @@ function prepare(options) {
         globals: options.global ?? [],
         extensions,
         runAll: Boolean(options['run-all']),
+        only: options.only,
         reason: prMode ? undefined : `${options.mode} run`
     });
     return { workspaces, graph, selection };
@@ -422,6 +430,7 @@ const OPTIONS = {
     global: { type: 'string', multiple: true },
     extension: { type: 'string', multiple: true },
     leg: { type: 'string', multiple: true },
+    only: { type: 'string', multiple: true },
     'run-all': { type: 'boolean' },
     'scan-imports': { type: 'boolean' },
     'no-scan-imports': { type: 'boolean' },

@@ -23,6 +23,12 @@ on:
         description: Folder of the JavaScript project (the one with the workspaces, or a single package), relative to the repository root.
         type: string
         default: .
+      only:
+        description: >-
+          Workspace package names, one per line, when the caller builds one application and only needs to know whether the change reaches
+          it: the legs run in those packages alone, and only when they are reached. Empty means every reached package.
+        type: string
+        default: ""
       global-paths:
         description: >-
           Globs, relative to the repository root, of files that every package shares, one per line: a change to one runs everything.
@@ -31,7 +37,7 @@ on:
         type: string
         default: ""
       runs-on:
-        description: Runner label. Never a self-hosted runner for the pull_request jobs of a public repository; private repositories use cratis-arc.
+        description: Runner label, or a JSON array of labels such as the output of a runner decision. Never a self-hosted runner for the pull_request jobs of a public repository; private repositories use cratis-arc.
         type: string
         default: ubuntu-latest
       mode:
@@ -68,6 +74,10 @@ on:
         default: ""
       dotnet-version:
         description: .NET SDK versions to install, one per line, for projects whose build generates code with dotnet. Empty installs none.
+        type: string
+        default: ""
+      post-command:
+        description: Shell commands run in the repository root after the legs' scripts, in a leg that ran them and only when they passed, for checks of the build output. Runs as the repository's own code on the checked out head, with the same environment as the scripts.
         type: string
         default: ""
       node-options:
@@ -110,7 +120,7 @@ concurrency:
 jobs:
   detect:
     name: Detect affected packages
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -164,6 +174,7 @@ jobs:
           BASE_REF: ${{ inputs.base-ref || github.base_ref }}
           LEGS: ${{ inputs.legs }}
           GLOBALS: ${{ inputs.global-paths }}
+          ONLY: ${{ inputs.only }}
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
           SCAN_IMPORTS: ${{ inputs.scan-imports }}
           FORCE_ALL: ${{ contains(github.event.pull_request.labels.*.name, inputs.run-all-label) }}
@@ -188,6 +199,10 @@ jobs:
             line="${line#"${line%%[![:space:]]*}"}"
             if [ -n "$line" ]; then args+=(--global "$line"); fi
           done <<< "$GLOBALS"
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            if [ -n "$line" ]; then args+=(--only "$line"); fi
+          done <<< "$ONLY"
           # A selection that cannot be computed must never skip the work: the script itself falls back to every leg, and so does a crash.
           if ! node "$SCRIPT" "${args[@]}"; then
             echo "::warning title=affected-frontend::selection failed; running every leg"
@@ -208,7 +223,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.detect.outputs.legs) }}
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -269,6 +284,7 @@ jobs:
           BASE_REF: ${{ inputs.base-ref || github.base_ref }}
           LEG: ${{ matrix.leg }}
           GLOBALS: ${{ inputs.global-paths }}
+          ONLY: ${{ inputs.only }}
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
           SCAN_IMPORTS: ${{ inputs.scan-imports }}
@@ -293,7 +309,20 @@ jobs:
             line="${line#"${line%%[![:space:]]*}"}"
             if [ -n "$line" ]; then args+=(--global "$line"); fi
           done <<< "$GLOBALS"
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            if [ -n "$line" ]; then args+=(--only "$line"); fi
+          done <<< "$ONLY"
           node "$SCRIPT" "${args[@]}"
+
+      - name: Check the build output
+        if: inputs.post-command != ''
+        env:
+          POST_COMMAND: ${{ inputs.post-command }}
+          NODE_OPTIONS: ${{ inputs.node-options }}
+          PRIMEUI_LICENSE: ${{ secrets.primeui-license }}
+          STUDIO_PRIMEUI_LICENSE: ${{ secrets.primeui-license }}
+        run: bash -euo pipefail -c "$POST_COMMAND"
 
   # The one required check. It always runs, so a required check never hangs on skipped work. It runs on the caller's runner
   # like every other job: a called workflow's jobs bill the caller, and a private caller must not get a hosted job.
@@ -301,7 +330,7 @@ jobs:
     name: Affected frontend
     if: always()
     needs: [detect, frontend]
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 5
     permissions:
       contents: read
